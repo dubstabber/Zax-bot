@@ -65,11 +65,13 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   changes.
 - Mode detection calls the engine's `sub_59FF90(ecx=mgr)` getter to get the
   active `CMultiPlayerGameType` instance and compares `[result+0]` against
-  the three known game-type vtables — 0 (DM), 1 (CTF), or 2 (SK). DM keeps
-  `slot+1` unique-team assignment to dodge the spawn-picker pathology;
-  CTF/SK bind the user-chosen team from the digit press. Unknown vtables
-  drop a one-shot 0x200-byte dump of the game-type object and fall back to
-  DM. `zaxbot/config.py` exposes a `FORCE_MODE` knob for offline testing.
+  the three known game-type vtables — 0 (DM), 1 (CTF), or 2 (SK). CTF is
+  the only team mode: digit `'1'`/`'2'` writes team `0`/`1` (Blue/Red).
+  DM and SK are both free-for-all (each player has their own collector
+  base in SK), so both get `slot+1` unique team values to dodge the
+  same-team spawn-picker pathology. Unknown vtables drop a one-shot
+  0x200-byte dump of the game-type object and fall back to DM.
+  `zaxbot/config.py` exposes a `FORCE_MODE` knob for offline testing.
 - Bots do not navigate. They keep a walking controller for idle animation;
   `detour_542360` zeroes movement, and `detour_5436F0` synthesizes aim/fire
   toward the host when range and line of sight allow it.

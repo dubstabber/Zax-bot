@@ -41,8 +41,10 @@ to a second PC.
 
 Current limitations:
 - `detect_mode` calls the engine's `sub_59FF90` getter and reads `[result+0]`
-  to resolve DM, CTF, and Salvage King. CTF/SK bots spawn on the user-chosen
-  team but do not chase flags or salvage (no navigation/objective AI yet).
+  to resolve DM, CTF, and Salvage King. CTF (the only team mode) supports
+  picking the bot's team via digit `'1'`/`'2'`; DM and SK both spawn one
+  free-for-all bot per `'1'` press. None of the bots chase flags or collect
+  salvage yet — no navigation/objective AI.
 - Bots do not navigate. They keep a real walking controller for idle animation,
   but `detour_542360` zeroes their movement vector.
 - Bots can fire/aim at the host within range and line of sight via `detour_5436F0`.

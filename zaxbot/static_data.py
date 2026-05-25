@@ -5,7 +5,7 @@ import struct
 
 PROMPT_DM = b'Bot: 1=spawn  R=snap\x00'
 PROMPT_CTF = b'Bot team: 1=Blue 2=Red\x00'
-PROMPT_SK = b'Bot team: 1..4 (4 teams)\x00'
+PROMPT_SK = b'SK bot: 1=spawn  R=snap\x00'
 
 DUMP_TAGS = (
     ('tag_snap_marker', 'snap'),
@@ -71,7 +71,11 @@ def write_static_scratch_data(
     fire_range_sq=90000.0,
     force_mode=None,
 ):
-    max_for_mode = struct.pack('<III', 1, 2, 4)  # DM/CTF/SK option counts
+    # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
+    # meaningful — "spawn one bot"); CTF is the only team mode and accepts
+    # '1'..'2' for Blue/Red. The map's MaxPlayers (clamped to MAX_BOT_SLOTS)
+    # caps total bots in all three modes — pressing '1' repeatedly adds more.
+    max_for_mode = struct.pack('<III', 1, 2, 1)
     prompts_table = struct.pack('<III', prompt_dm_va, prompt_ctf_va, prompt_sk_va)
     forced_mode_value = _FORCE_MODE_TABLE.get(force_mode)
     if forced_mode_value is None:

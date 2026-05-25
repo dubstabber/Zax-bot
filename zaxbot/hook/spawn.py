@@ -175,23 +175,24 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x05' + le32(phase_b_in_flight_va) + le32(0))
     leave_cs(a)
 
-    # --- Bind bot team (stats+0x14). DM: team = slot + 1 (unique non-zero per
-    # bot to dodge the same-team spawn-picker pathology). CTF/SK: write the
-    # user-chosen team verbatim — engine CTF expects {0=Blue, 1=Red} (see the
-    # `gametype.vtbl[39]` resolver at sub_4698B0, which only writes a team
-    # hue for team values 0 and 1). SK extends to {0..3}.
+    # --- Bind bot team (stats+0x14). CTF is the only team mode — write the
+    # user-chosen team verbatim ({0=Blue, 1=Red} per the resolver at
+    # sub_4698B0). DM and SK are both free-for-all with per-player colors,
+    # so each bot gets `slot + 1` to dodge the same-team spawn-picker
+    # pathology and keep collector-base/teammate-of-self logic from
+    # collapsing onto the host.
     a.raw(b'\x83\x3D' + le32(botp_va) + b'\x00')
     a.jz('spawn_skip_team')
     a.raw(b'\x8B\x0D' + le32(botidx_va))                     # ecx = botidx (arg to sub_5BA820)
     a.call_va(ax.SUB_5BA820)                                 # eax = bot's stats
     a.raw(b'\x85\xC0'); a.jz('spawn_skip_team')
-    a.raw(b'\x83\x3D' + le32(menu_mode_va) + b'\x00')
-    a.jnz('spawn_team_chosen')
-    a.raw(b'\x8B\x15' + le32(active_bot_slot_va))            # DM: team = slot + 1
+    a.raw(b'\x83\x3D' + le32(menu_mode_va) + b'\x01')        # cmp menu_mode, 1 (CTF?)
+    a.jz('spawn_team_chosen')
+    a.raw(b'\x8B\x15' + le32(active_bot_slot_va))            # DM/SK: team = slot + 1
     a.raw(b'\x83\xC2\x01')
     a.jmp('spawn_team_write')
     a.label('spawn_team_chosen')
-    a.raw(b'\x8B\x15' + le32(chosen_team_va))                # CTF/SK: chosen_team (0..N-1)
+    a.raw(b'\x8B\x15' + le32(chosen_team_va))                # CTF: chosen_team (0=Blue, 1=Red)
     a.label('spawn_team_write')
     a.raw(b'\x89\x50\x14')                                   # mov [eax+0x14], edx
     logc(ord('T'))

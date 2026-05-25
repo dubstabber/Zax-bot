@@ -57,12 +57,13 @@ Useful participant helpers:
 | `stats + 0x14` | team id |
 
 Current team behavior:
-- DM: write a unique nonzero team value based on bot slot to avoid a same-team
-  spawn-picker pathology.
-- CTF/SK: write the user-selected team picked from the digit press (1..2 for
-  CTF, 1..4 for SK) — stored 0-indexed after the dispatcher subtracts `'1'`.
-  Mode is resolved by reading `[mpd+0]` and matching `VT_DM_VA`/`VT_CTF_VA`/
-  `VT_SK_VA`.
+- DM and SK are both free-for-all (SK gives every player their own collector
+  base with a per-player color). Each bot gets `slot + 1` as a unique nonzero
+  team value to avoid a same-team spawn-picker pathology.
+- CTF is the only team mode. The dispatcher's digit '1'/'2' map to team `0`
+  (Blue) / `1` (Red) — stored 0-indexed after subtracting `'1'`. Mode is
+  resolved via `sub_59FF90(ecx=mgr)`, whose return's `[+0]` vtable matches
+  `VT_DM_VA`/`VT_CTF_VA`/`VT_SK_VA`.
 
 ## Character array
 

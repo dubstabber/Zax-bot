@@ -113,10 +113,10 @@ they do not navigate.
 - Movement/navigation. Movement is bundled with either the player's walking
   controller or monster move behavior. The current hook only zeroes movement;
   it does not feed a bot movement vector.
-- Objective AI for team modes. CTF and SK bots now spawn on the user-chosen
-  team and shoot at the host within range, but they do not chase flags or
-  collect salvage — that requires the same navigation/goal-seeking work as
-  general DM bot AI.
+- Objective AI. Bots spawn correctly in all three modes and shoot at the
+  host within range, but they do not navigate — so CTF bots can't chase
+  flags and SK bots can't collect salvage at their own base. Same
+  navigation/goal-seeking workstream as DM movement.
 - Remote display name. Host writes the stats CString after spawn, but the
   synthetic DirectPlay player-data store is not populated for PC2.
 
