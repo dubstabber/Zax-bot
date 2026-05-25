@@ -1,9 +1,13 @@
 # Zax bot-support — reverse engineering notes
 
-Goal: let the **host** of a multiplayer match add AI bots by pressing **B** / **R**.
-- Deathmatch (free-for-all): B or R adds a random bot.
-- Team game: **B → Blue team**, **R → Red team**.
-- Host-only, **not** network-synced (legacy MP; host plays vs bots locally).
+Goal: let the **host** of a multiplayer match add AI bots from an in-game control path.
+- Current control: press **B** to open the bot menu, then press a digit.
+- Deathmatch (free-for-all): **B → 1** spawns a bot.
+- Team games: **B → 1** through **B → 4** spawns a bot on the selected team
+  (within that mode's valid team range).
+- **R is diagnostic only**: it writes runtime snapshots to `zax_dump.bin` for
+  dynamic analysis. It does not spawn bots.
+- Future UI: replace the temporary key menu with a custom window/modal for adding bots.
 - Target fidelity: a full player-bot (player model, team color, frag-scoreboard entry, AI-driven).
 
 Implemented by binary-patching `Zax.exe` (Reflexive, 2001; "Zax: The Alien Hunter").
@@ -14,13 +18,15 @@ Implemented by binary-patching `Zax.exe` (Reflexive, 2001; "Zax: The Alien Hunte
 - `Zax.exe.i64` — IDA Pro database (of the *original* image; the patched `.zaxbot`
   section is NOT in it). Reached via the IDA MCP server.
 - `zax_patch.py` — the patcher (the only artifact we hand-edit). Self-documented.
+- `zax_dump.bin` — appendable runtime snapshots written by **R** for dynamic analysis.
 - `zax_bot.log` — leftover from the old (crashing) attempt; no longer written.
 
 ## How to build & test
 ```
 python3 zax_patch.py        # rebuilds Zax.exe from .bak and applies the patch
 ```
-Then run `Zax.exe` (under Wine), host an MP match, press B/R. The game runs on a
+Then run `Zax.exe` (under Wine), host an MP match, press **B**, then press the
+team digit. Use **R** only when collecting a runtime dump. The game runs on a
 single main thread that also drives fullscreen DirectDraw, so the hook must avoid
 anything fragile on that thread (see `02` — file I/O there crashes under Wine).
 
@@ -43,14 +49,14 @@ Full recipe + analysis in
 
 ## Phase status
 - **Phase 0 — patcher restructured.** Done.
-- **Phase 1 — crash-free B/R detection + host/MP gate + on-screen confirmation.**
+- **Phase 1 — crash-free keyboard hook + host/MP gate + on-screen confirmation.**
   Done & verified in-game (no crash, message shows).
 - **Phase 2 — spawn player-bot participants** (scoreboard + character at spawn point).
   DONE for stationary bots via DirectPlay queue injection and `sub_59DF90`; now map-capped.
 - **Milestone 1 — create scoreboard participant.** DONE (in-game).
 - **Milestone 2 — spawn the bot's character in the arena.** DONE (in-game).
 - **Milestone 3 — make it an independent AI bot** (stop input-mirror + camera-steal; AI
-  movement/combat; map-capped multi-bot indexing; team mapping B=Blue/R=Red; appearance). TODO —
+  movement/combat; map-capped multi-bot indexing; digit-selected team mapping; appearance). TODO —
   the deepest remaining work; the control/AI think + camera/controlled-player mechanism are
   vtable-dispatched and buried under property-registration boilerplate.
 
