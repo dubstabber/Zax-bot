@@ -36,6 +36,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     bot_chars_va        = layout.va('bot_chars')
     bot_team_va         = layout.va('bot_team')
     host_team_va        = layout.va('host_team')
+    host_part_va        = layout.va('host_part')
     botp_va             = layout.va('botp')
     botidx_va           = layout.va('botidx')
     botchar_va          = layout.va('botchar')
@@ -182,9 +183,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # --- Bind bot team (stats+0x14). CTF is the only team mode — write the
     # user-chosen team verbatim ({0=Blue, 1=Red} per the resolver at
     # sub_4698B0). DM and SK are both free-for-all with per-player colors,
-    # so each bot gets `slot + 1` to dodge the same-team spawn-picker
-    # pathology and keep collector-base/teammate-of-self logic from
-    # collapsing onto the host.
+    # so each bot gets `slot + 0x10` to (a) stay unique per bot — dodging
+    # the same-team spawn-picker pathology / collector-base collapse — and
+    # (b) avoid colliding with real-player team ids (host=0, PC2=1, ...,
+    # observed in snapshots). A collision with PC2's team would make
+    # `sub_51D400` format the kill message as "killed TEAMMATE" in DM.
     a.raw(b'\x83\x3D' + le32(botp_va) + b'\x00')
     a.jz('spawn_skip_team')
     a.raw(b'\x8B\x0D' + le32(botidx_va))                     # ecx = botidx (arg to sub_5BA820)
@@ -192,8 +195,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x85\xC0'); a.jz('spawn_skip_team')
     a.raw(b'\x83\x3D' + le32(menu_mode_va) + b'\x01')        # cmp menu_mode, 1 (CTF?)
     a.jz('spawn_team_chosen')
-    a.raw(b'\x8B\x15' + le32(active_bot_slot_va))            # DM/SK: team = slot + 1
-    a.raw(b'\x83\xC2\x01')
+    a.raw(b'\x8B\x15' + le32(active_bot_slot_va))            # DM/SK: team = slot + 0x10
+    a.raw(b'\x83\xC2\x10')
     a.jmp('spawn_team_write')
     a.label('spawn_team_chosen')
     a.raw(b'\x8B\x15' + le32(chosen_team_va))                # CTF: chosen_team (0=Blue, 1=Red)
@@ -368,22 +371,37 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xDB\x04\x24')                                     # fild dword [esp]
     a.raw(b'\xD9\x58' + bytes([ax.APPEARANCE_COLOR2_OFF]))     # fstp [eax+0x18]
     a.raw(b'\x83\xC4\x04')
+    # Let the active gametype override color1 if it wants to (CTF forces it
+    # to the team hue via vtable[+0x9C] = sub_4698B0; DM/SK install nullsub
+    # there so the call is a no-op). Mirrors sub_5ABE80's own behavior.
+    a.raw(b'\x89\xC6')                                         # mov esi, eax (save appearance)
+    a.raw(b'\x8B\x0D' + le32(ax.MANAGER_GLOBAL_VA))            # ecx = mgr
+    a.call_va(ax.SUB_59FF90_VA)                                # eax = active gametype
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_color')
+    a.raw(b'\x8D\x56' + bytes([ax.APPEARANCE_COLOR1_OFF]))     # lea edx, [esi+0xC] (&color1)
+    a.raw(b'\x52')                                             # push edx (a3 = &color1)
+    a.raw(b'\xFF\x35' + le32(botp_va))                         # push [botp] (a2 = participant)
+    a.raw(b'\x8B\x10')                                         # mov edx, [eax] (vtable)
+    a.raw(b'\x8B\xC8')                                         # mov ecx, eax (this = gametype)
+    a.raw(b'\xFF\x92' + le32(ax.GAMETYPE_COLOR1_VTBL_OFF))     # call dword ptr [edx+0x9C]  (disp32)
     a.label('spawn_skip_color')
 
     a.label('spawn_skipai')
 
-    # Capture host's team id once per match (sentinel -1 = still unset).
-    # Doing this AFTER sub_59DF90 has run for the new bot keeps the
-    # worldmgr's internal char-array sync in a known-good state — calling
-    # sub_5BA820(0) earlier (before the new match's first sub_59DF90 has
-    # cleaned up stale slots from the previous match) crashes inside the
-    # auto-sync via the [[garbage-slot-crash]] path.
+    # Capture host's participant ptr (and initial team) once per match;
+    # sentinel -1 means still unset. fire/aim re-reads `*(host_part+0x14)`
+    # live so a mid-match team switch (CTF blue→red) takes effect on the
+    # very next frame without us recapturing. Doing this AFTER sub_59DF90
+    # has run for the new bot keeps the worldmgr's internal char-array
+    # sync in a known-good state — calling sub_5BA820(0) earlier crashes
+    # inside the auto-sync via the [[garbage-slot-crash]] path.
     a.raw(b'\x83\x3D' + le32(host_team_va) + b'\xFF')        # cmp [host_team], -1
     a.jnz('spawn_skip_host_team')
     a.raw(b'\x31\xC9')                                        # xor ecx, ecx (host idx = 0)
-    a.call_va(ax.SUB_5BA820)                                  # eax = host stats
+    a.call_va(ax.SUB_5BA820)                                  # eax = host participant
     a.raw(b'\x85\xC0'); a.jz('spawn_skip_host_team')
-    a.raw(b'\x8B\x40\x14')                                    # mov eax, [stats+0x14]
+    a.raw(b'\xA3' + le32(host_part_va))                       # mov [host_part], eax
+    a.raw(b'\x8B\x40\x14')                                    # mov eax, [part+0x14]
     a.raw(b'\xA3' + le32(host_team_va))                       # mov [host_team], eax
     a.label('spawn_skip_host_team')
 

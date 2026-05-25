@@ -20,6 +20,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     bot_participants_va = layout.va('bot_participants')
     bot_team_va         = layout.va('bot_team')
     host_team_va        = layout.va('host_team')
+    host_part_va        = layout.va('host_part')
 
     a.label('detour_df90')
     a.raw(b'\x50')                                # push eax
@@ -38,6 +39,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xB9\x11\x00\x00\x00')                # mov ecx, 17  (16 bot_team + 1 host_team)
     a.raw(b'\x83\xC8\xFF')                        # or eax, -1
     a.raw(b'\xF3\xAB')                            # rep stosd (writes bot_team[16] + host_team)
+    # Clear cached host participant ptr to NULL so the next match's first
+    # spawn re-captures it. Must be 0 (not -1) so fire/aim's `test eax`
+    # guard works without dereferencing a bogus pointer.
+    a.raw(b'\xC7\x05' + le32(host_part_va) + le32(0))
     # Once we've pre-grown mgr+0x290 to 16 entries (match 1 onwards), the
     # buffer outlives the match: slots populated by match N can still hold
     # freed char pointers at the start of match N+1. Per-frame fire/aim

@@ -64,8 +64,10 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   changed"): walk the bot char's first child via `sub_4FC7C0`/`sub_4FC7D0`,
   look up the appearance via `sub_418790(dword_6C0520, child)`, and
   write the chosen colors as floats at `+0x0C` and `+0x18`. The pcfg
-  (`*(stats+0x1C)+4/+8`) is also kept in sync for persistence. CTF
-  preempts `color1` with the team palette at render time.
+  (`*(stats+0x1C)+4/+8`) is also kept in sync for persistence. After the
+  writes, the active gametype's vtable[+0x9C] (`sub_4698B0` in CTF,
+  `nullsub_3` in DM/SK) is invoked to let CTF replace `color1` with the
+  team hue.
 - Up to map `MaxPlayers` bots are supported, bounded by 16 synthetic ids
   (`0xBADC0DE0..0xBADC0DEF`).
 - `mgr + 0x290` is pre-grown to 16 entries before bot `sub_59DF90` calls.
@@ -76,9 +78,11 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   the three known game-type vtables — 0 (DM), 1 (CTF), or 2 (SK). CTF is
   the only team mode: digit `'1'`/`'2'` writes team `0`/`1` (Blue/Red).
   DM and SK are both free-for-all (each player has their own collector
-  base in SK), so both get `slot+1` unique team values to dodge the
-  same-team spawn-picker pathology. Unknown vtables drop a one-shot
-  0x200-byte dump of the game-type object and fall back to DM.
+  base in SK), so each bot gets `slot + 0x10` (16..31) — unique per bot
+  to dodge the same-team spawn-picker pathology, and well above the
+  real-player team range (host=0, PC2=1, …) so `sub_51D400` never
+  mis-labels a bot kill as a "TEAMMATE" kill. Unknown vtables drop a
+  one-shot 0x200-byte dump of the game-type object and fall back to DM.
   `zaxbot/config.py` exposes a `FORCE_MODE` knob for offline testing.
 - Bots do not navigate. They keep a walking controller for idle animation;
   `detour_542360` zeroes movement, and `detour_5436F0` synthesizes aim/fire

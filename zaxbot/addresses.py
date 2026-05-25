@@ -187,6 +187,14 @@ SUB_4FC7D0_VA         = 0x4FC7D0    # __thiscall(char, idx) -> child entity[idx]
 APPEARANCE_COLOR1_OFF = 0x0C        # float color1 within appearance struct
 APPEARANCE_COLOR2_OFF = 0x18        # float color2 within appearance struct
 
+# The active game-type's vtable[39] is a `(this, stats, *color1)` callback
+# that, for CTF (`sub_4698B0`), overwrites `*color1` with the team hue
+# (Blue Hue at +244, Red Hue at +248) when the "Force Team Colors On
+# Players" flag at +240 is set. DM and SK install a `nullsub_3` here so
+# calling it unconditionally is safe and replicates the engine's own
+# behavior in `sub_5ABE80` (the close-config handler).
+GAMETYPE_COLOR1_VTBL_OFF = 0x9C
+
 # --- Per-player config struct (color persistence) --------------------------
 # Each participant has `*(part+0x1C)` = pointer to a CPlayerConfig-like
 # struct with color1 at `+4` and color2 at `+8` (same layout as the host

@@ -58,8 +58,11 @@ Useful participant helpers:
 
 Current team behavior:
 - DM and SK are both free-for-all (SK gives every player their own collector
-  base with a per-player color). Each bot gets `slot + 1` as a unique nonzero
-  team value to avoid a same-team spawn-picker pathology.
+  base with a per-player color). Each bot gets `slot + 0x10` (16..31) as a
+  unique team value — high enough to avoid colliding with real players
+  (host=0, PC2=1, observed in snapshots) so `sub_51D400` doesn't mis-label
+  bot kills as "TEAMMATE", and still unique per bot so the engine's
+  spawn-picker doesn't cluster them.
 - CTF is the only team mode. The dispatcher's digit '1'/'2' map to team `0`
   (Blue) / `1` (Red) — stored 0-indexed after subtracting `'1'`. Mode is
   resolved via `sub_59FF90(ecx=mgr)`, whose return's `[+0]` vtable matches
@@ -105,8 +108,16 @@ persistence, and (b) walks the child-entity appearance path above to
 write the floats into `appearance+0xC` / `+0x18` — which the renderer
 picks up on the next frame.
 
-CTF preempts `color1` with the team palette at render time — the per-name
-write is harmless.
+CTF forces `color1` to the team hue. The active gametype's vtable[+0x9C]
+slot is `sub_4698B0` for CTF — a `(this, stats, *color1)` callback that
+reads the team from `stats+0x14` (0 = Blue, 1 = Red) and overwrites
+`*color1` with `*(CTF_settings+244)` (Blue Hue, default 208.0f) or
+`*(CTF_settings+248)` (Red Hue, default 0.0f) when the "Force Team Colors
+On Players" flag at `CTF_settings+240` is set. DM and SK install
+`nullsub_3` at the same vtable slot, so the spawn payload calls it
+unconditionally after writing color1 — for CTF the team hue replaces the
+per-name color, for the other modes it's a no-op. Same pattern as
+`sub_5ABE80` (the close-config-window apply path) does.
 
 ## Character array
 

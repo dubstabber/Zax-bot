@@ -35,6 +35,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     bot_indices_va     = layout.va('bot_indices')
     bot_team_va        = layout.va('bot_team')
     host_team_va       = layout.va('host_team')
+    host_part_va       = layout.va('host_part')
     bot_pos_va         = layout.va('bot_pos')
     bot_dx_va          = layout.va('bot_dx')
     bot_dy_va          = layout.va('bot_dy')
@@ -131,6 +132,17 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x8B\x15' + le32(cand_idx_va))                # mov edx, [cand_idx]
     a.raw(b'\x85\xD2')                                    # test edx, edx
     a.jnz('s5436f0_cand_team_bot_scan')
+    # Host team — refresh live from `*(host_part+0x14)` so a mid-match team
+    # switch (e.g. CTF blue→red via the F1 menu) takes effect immediately
+    # without needing to re-spawn bots. Fall back to the cached sentinel if
+    # host_part isn't captured yet.
+    a.raw(b'\xA1' + le32(host_part_va))                   # mov eax, [host_part]
+    a.raw(b'\x85\xC0')                                    # test eax, eax
+    a.jz('s5436f0_host_team_fallback')
+    a.raw(b'\x8B\x40\x14')                                # mov eax, [host_part+0x14]
+    a.raw(b'\xA3' + le32(host_team_va))                   # mov [host_team], eax (cache for next time)
+    a.jmp('s5436f0_cand_team_check')
+    a.label('s5436f0_host_team_fallback')
     a.raw(b'\xA1' + le32(host_team_va))                   # mov eax, [host_team]
     a.jmp('s5436f0_cand_team_check')
 
