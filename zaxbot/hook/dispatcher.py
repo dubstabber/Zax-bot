@@ -1,0 +1,78 @@
+"""WM_KEYDOWN dispatcher: IDLE / MENU_OPEN state machine.
+
+Reached from the patched ``call sub_599580`` site with ECX = VK code. On every
+key:
+- IDLE state, key B   -> MP gate -> ``detect_mode`` -> show prompt -> MENU_OPEN
+- IDLE state, key R   -> MP gate -> ``do_snapshot`` (Phase A diff oracle)
+- MENU_OPEN state, '1'..'4' (in mode's range) -> ``do_spawn_with_team``
+- MENU_OPEN state, anything else              -> cancel back to IDLE
+
+All paths tail-jmp to ``sub_599580`` so normal key handling is unaffected."""
+
+from .. import addresses as ax
+from ..asm import Asm, le32
+from ..layout import ScratchLayout
+from .helpers import mp_gate
+
+
+def emit(a: Asm, layout: ScratchLayout) -> None:
+    menu_state_va    = layout.va('menu_state')
+    menu_mode_va     = layout.va('menu_mode')
+    prompts_table_va = layout.va('prompts_table')
+    max_for_mode_va  = layout.va('max_for_mode')
+    chosen_team_va   = layout.va('chosen_team')
+
+    # =======================================================================
+    # Dispatcher entry: ECX = VK.
+    # =======================================================================
+    a.raw(b'\x83\x3D' + le32(menu_state_va) + b'\x00')       # cmp dword [menu_state], 0
+    a.jnz('handle_menu_open')
+
+    # --- IDLE state: B opens menu; R takes a diagnostic snapshot ---
+    a.raw(b'\x80\xF9' + bytes([ax.VK_R]))                    # cmp cl, VK_R
+    a.jz('handle_R')
+    a.raw(b'\x80\xF9' + bytes([ax.VK_B]))                    # cmp cl, VK_B
+    a.jnz('passthru')
+
+    a.raw(b'\x60')                                            # pushad
+    mp_gate(a, 'pop_passthru')                                # mgr -> level -> mpd; mpd in eax
+    a.call_lbl('detect_mode')                                 # eax = mode (0/1/2)
+    a.raw(b'\xA3' + le32(menu_mode_va))                       # mov [menu_mode], eax
+    a.raw(b'\x8B\x04\x85' + le32(prompts_table_va))           # mov eax,[prompts_table + eax*4]
+    a.raw(b'\x6A\xFF')                                         # push -1
+    a.raw(b'\x50')                                             # push eax (prompt va)
+    a.call_va(ax.SHOWMSG_VA)                                   # __stdcall, pops 8
+    a.raw(b'\xC7\x05' + le32(menu_state_va) + le32(1))         # menu_state = 1
+    a.raw(b'\x61')                                             # popad
+    a.jmp_va(ax.ORIG_TARGET_VA)
+
+    a.label('pop_passthru')
+    a.raw(b'\x61')                                             # popad
+    a.label('passthru')
+    a.jmp_va(ax.ORIG_TARGET_VA)
+
+    # --- R-key snapshot handler (Phase A diff-dump) ---
+    a.label('handle_R')
+    a.raw(b'\x60')                                             # pushad
+    mp_gate(a, 'pop_passthru')                                 # same chain as B handler
+    a.call_lbl('do_snapshot')
+    a.raw(b'\x61')                                             # popad
+    a.jmp_va(ax.ORIG_TARGET_VA)
+
+    # --- MENU_OPEN: digit '1'..'4' in range -> spawn; otherwise cancel ---
+    a.label('handle_menu_open')
+    a.raw(b'\x60')                                             # pushad
+    a.raw(b'\x80\xF9\x31'); a.jb('close_menu')                # cl < '1' -> cancel
+    a.raw(b'\x80\xF9\x34'); a.ja('close_menu')                # cl > '4' -> cancel
+    a.raw(b'\x0F\xB6\xC1')                                     # movzx eax, cl
+    a.raw(b'\x83\xE8\x31')                                     # sub eax, 0x31  (now 0..3)
+    a.raw(b'\x8B\x0D' + le32(menu_mode_va))                    # mov ecx, [menu_mode]
+    a.raw(b'\x83\xF9\x03'); a.jae('close_menu')                # mode wrap-around safety
+    a.raw(b'\x3B\x04\x8D' + le32(max_for_mode_va))             # cmp eax, [max_table + ecx*4]
+    a.jae('close_menu')
+    a.raw(b'\xA3' + le32(chosen_team_va))                      # mov [chosen_team], eax
+    a.call_lbl('do_spawn_with_team')
+    a.label('close_menu')
+    a.raw(b'\xC7\x05' + le32(menu_state_va) + le32(0))         # menu_state = 0
+    a.raw(b'\x61')                                             # popad
+    a.jmp_va(ax.ORIG_TARGET_VA)

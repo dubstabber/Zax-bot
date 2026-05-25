@@ -1,0 +1,45 @@
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local assistant/editor state
+.claude/
+.codex
+.gemini/
+.agents/
+
+# Rebuilt patch target and local retail game files
+Zax.exe
+Zax.exe.bak
+BINKW32.DLL
+Data.dat
+Polish.red
+Zax.CFG
+SaveGames/
+*.url
+klucze.txt
+ReadMe.txt
+
+# IDA Pro database and generated sidecar files
+*.i64
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+
+# Runtime diagnostics from patched builds
+zax_*.log
+zax_*.bin
+zax_*.bin.old
+debug-output.txt
+
+# Local OS/editor noise
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo

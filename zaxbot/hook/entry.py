@@ -1,0 +1,126 @@
+"""``build_hook`` orchestrator for the .zaxbot section.
+
+Builds the scratch layout, allocates a single ``Asm`` instance, then calls
+each emitter in the order their labels appear in the final section. Returns
+``(section_bytes, info)`` where ``info`` is the label-VA dict consumed by
+``zaxbot.patch_manifest``.
+
+Emit order matters: it determines absolute label positions and thus the
+detour-target VAs that are patched back into ``Zax.exe``. Do not reorder
+without re-establishing a new byte-identity baseline."""
+
+from .. import config as cfg
+from ..asm import Asm
+from ..layout import build_scratch_layout
+from ..static_data import write_static_scratch_data
+from . import detect_mode, dispatcher, snapshot, spawn
+from .helpers import emit_logc_body, emit_wbuf_body
+from ..detours import (
+    bot_fire_aim,
+    bot_movement,
+    char_iter,
+    df90_match_change,
+    dp_poll,
+    name_block,
+    spawn_safety,
+    walk_controller,
+)
+
+
+# Every label name that ``patch_manifest`` will look up by ``<label>_va`` key.
+# Maps the label inside .zaxbot to its info-dict key.
+_DETOUR_LABEL_KEYS = {
+    'detour_dp':               'detour_dp_va',
+    'detour_df90':             'detour_df90_va',
+    'detour_5AA4E0':           'detour_5AA4E0_va',
+    'detour_4FBC50':           'detour_4FBC50_va',
+    'detour_542550':           'detour_542550_va',
+    'detour_542360':           'detour_542360_va',
+    'detour_5436F0':           'detour_5436F0_va',
+    'detour_4EF900_test':      'detour_4EF900_test_va',
+    'detour_4FC7C0':           'detour_4FC7C0_va',
+    'detour_417390':           'detour_417390_va',
+    'detour_5AC299':           'detour_5AC299_va',
+    'detour_name_query1':      'detour_name_query1_va',
+    'detour_name_query2':      'detour_name_query2_va',
+    'detour_name_block_skip':  'detour_name_block_skip_va',
+    'detour_4F5204':           'detour_4F5204_va',
+}
+
+
+def build_hook(section_va_abs):
+    """Assemble the .zaxbot section. Returns ``(section_bytes, info)``.
+
+    On B: open a mode-aware text-prompt menu via ``sub_59B260``. On the next
+    digit key, spawn a bot bound to the chosen team. Mode is currently
+    hard-coded to 0 (DM) by ``detect_mode``; the real mpd-vtable scan is the
+    next planned upgrade.
+    """
+    scratch_va = section_va_abs + cfg.SCRATCH_OFF
+    layout = build_scratch_layout(
+        scratch_va,
+        cfg.NEW_SECTION_SIZE - cfg.SCRATCH_OFF,
+        cfg.NUM_BOT_NAMES,
+        cfg.NAME_SLOT_SIZE,
+        cfg.NAME_SLOT_ASCII,
+    )
+
+    a = Asm(section_va_abs + cfg.HOOK_ENTRY_OFF)
+
+    # --- Hook payload bodies (order is load-bearing) -----------------------
+    dispatcher.emit(a, layout)
+    detect_mode.emit(a, layout)
+    spawn.emit(a, layout)
+    emit_wbuf_body(a, dummy_va=layout.va('dummy'))
+    snapshot.emit(a, layout)
+    emit_logc_body(
+        a,
+        stepfn_va=layout.va('stepfn'),
+        dummy_va=layout.va('dummy'),
+        logbyte_va=layout.va('logbyte'),
+    )
+
+    # --- Detours (emit order = section layout order) -----------------------
+    dp_poll.emit(a, layout)
+    df90_match_change.emit(a, layout)
+    walk_controller.emit(a, layout)
+    bot_movement.emit(a, layout)
+    bot_fire_aim.emit(a, layout)
+    spawn_safety.emit(a, layout)
+    name_block.emit(a, layout)
+    char_iter.emit(a, layout)
+
+    code = a.link()
+    assert len(code) <= cfg.SCRATCH_OFF, (
+        f'hook code overflows scratch: {len(code):#x}'
+    )
+
+    section = bytearray(cfg.NEW_SECTION_SIZE)
+    section[cfg.HOOK_ENTRY_OFF:cfg.HOOK_ENTRY_OFF + len(code)] = code
+    write_static_scratch_data(
+        section,
+        cfg.SCRATCH_OFF,
+        layout,
+        dump_filename=cfg.DUMP_FILENAME,
+        dump_msg=cfg.DUMP_MSG,
+        step_filename=cfg.STEP_FILENAME,
+        full_msg=cfg.FULL_MSG,
+        dump_magic=cfg.DUMP_MAGIC,
+        dump_tag_len=cfg.DUMP_TAG_LEN,
+        bot_names=cfg.BOT_NAMES,
+        name_slot_size=cfg.NAME_SLOT_SIZE,
+        name_slot_ascii=cfg.NAME_SLOT_ASCII,
+        prompt_dm_va=layout.va('prompt_dm'),
+        prompt_ctf_va=layout.va('prompt_ctf'),
+        prompt_sk_va=layout.va('prompt_sk'),
+    )
+
+    info = {
+        'hook_entry_va': section_va_abs + cfg.HOOK_ENTRY_OFF,
+        'hook_entry_size': len(code),
+        'scratch_va': scratch_va,
+        'msg_va': layout.va('msg'),
+    }
+    for label, key in _DETOUR_LABEL_KEYS.items():
+        info[key] = section_va_abs + a.labels[label]
+    return bytes(section), info
