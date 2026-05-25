@@ -110,15 +110,15 @@ they do not navigate.
 
 ## Still open
 
-- Real mode detection. `detect_mode` still dumps `mpd[0..0x200]` once and
-  returns DM. Needed: per-mode dumps, find the active game-type pointer offset,
-  compare its vtable against `VT_DM_VA`, `VT_CTF_VA`, `VT_SK_VA`.
 - Movement/navigation. Movement is bundled with either the player's walking
   controller or monster move behavior. The current hook only zeroes movement;
   it does not feed a bot movement vector.
+- Objective AI for team modes. CTF and SK bots now spawn on the user-chosen
+  team and shoot at the host within range, but they do not chase flags or
+  collect salvage — that requires the same navigation/goal-seeking work as
+  general DM bot AI.
 - Remote display name. Host writes the stats CString after spawn, but the
   synthetic DirectPlay player-data store is not populated for PC2.
-- Team behavior outside DM after mode detection is fixed.
 
 ## Historical conclusions to keep
 

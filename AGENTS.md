@@ -63,8 +63,13 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 - `mgr + 0x290` is pre-grown to 16 entries before bot `sub_59DF90` calls.
 - `detour_df90` clears bot scratch arrays on match change when captured `a2`
   changes.
-- Mode detection is still stubbed to DM: `detect_mode` dumps `mpd[0..0x200]`
-  once per session and returns 0.
+- Mode detection calls the engine's `sub_59FF90(ecx=mgr)` getter to get the
+  active `CMultiPlayerGameType` instance and compares `[result+0]` against
+  the three known game-type vtables — 0 (DM), 1 (CTF), or 2 (SK). DM keeps
+  `slot+1` unique-team assignment to dodge the spawn-picker pathology;
+  CTF/SK bind the user-chosen team from the digit press. Unknown vtables
+  drop a one-shot 0x200-byte dump of the game-type object and fall back to
+  DM. `zaxbot/config.py` exposes a `FORCE_MODE` knob for offline testing.
 - Bots do not navigate. They keep a walking controller for idle animation;
   `detour_542360` zeroes movement, and `detour_5436F0` synthesizes aim/fire
   toward the host when range and line of sight allow it.
@@ -103,6 +108,7 @@ Older emitted labels or disabled detours are not active unless they appear in
 | `sub_59DF90` | per-player character create/place |
 | `sub_5BA790` | participant factory |
 | `sub_5BA820` | stats helper used before writing `stats + 0x14` |
+| `sub_59FF90` | `__usercall(this=ecx, hint=esi)` -> active game-type instance |
 | `sub_4E1930` | `CString::operator=(this, char*)` |
 | `sub_4F1050` | active char getter / `a2` fallback |
 | `0x5D034A` | `operator new` |
@@ -128,9 +134,8 @@ Older emitted labels or disabled detours are not active unless they appear in
 
 ## Open work
 
-- Finish mode detection by collecting per-mode `mpd` dumps and finding the
-  active game-type pointer offset.
 - Feed real movement/navigation into bot controllers without stealing host
-  camera/input.
-- Populate or hook DirectPlay player data so PC2 sees chosen bot names.
-- Revisit non-DM team behavior after mode detection is real.
+  camera/input. CTF/SK bots are now team-correct but still stationary, so
+  they cannot pursue flags or collect salvage on their own.
+- Populate or hook DirectPlay player data so PC2 sees chosen bot names
+  (and team colors in CTF/SK).

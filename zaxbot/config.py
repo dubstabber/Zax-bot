@@ -37,6 +37,14 @@ STEP_FILENAME = b'zax_step.log\x00'   # one-letter progress markers, flushed per
 # --- Bot fire/aim policy -------------------------------------------------
 FIRE_RANGE_SQ = 90000.0   # squared distance; bot fires when host is within sqrt(FIRE_RANGE_SQ)
 
+# --- Mode-detection override --------------------------------------------
+# Auto-detection (reading [mpd+0] as a vtable) is currently unreliable: mpd
+# is the polymorphic CMultiPlayerGameData base, and its vtable is shared
+# across DM/CTF/SK. Until the real game-type lookup is found, set this to
+# 'dm', 'ctf', or 'sk' to force detect_mode to return that mode regardless
+# of what mpd holds. Use None for auto-detect (currently DM-biased).
+FORCE_MODE = None  # one of: None | 'dm' | 'ctf' | 'sk'
+
 # --- Synthetic DirectPlay id range (Phase B queue injection) -------------
 # Every bot is assigned a unique id from this contiguous range so the
 # name-block detour can recognize bot participants by id alone.

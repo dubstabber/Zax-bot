@@ -170,6 +170,15 @@ VT_DM_VA  = 0x5F0D54  # CDeathMatchGameType vtable
 VT_CTF_VA = 0x5EF544  # CCaptureTheFlagGameType vtable
 VT_SK_VA  = 0x5FED48  # CSalvageKingGameType vtable
 
+# --- Active-gametype getter (used by detect_mode) --------------------------
+# `sub_59FF90(ecx=mgr)` returns the active CMultiPlayerGameType-derived
+# instance (or NULL). [result+0] is one of `VT_DM_VA`/`VT_CTF_VA`/`VT_SK_VA`.
+# Found via sub_5BAD10 which uses this to emit a "gametype" property string.
+# Note: not to be confused with mpd (`[level+0x30]`), which is the
+# polymorphic `CMultiPlayerGameData` *base* and shares its vtable across
+# all modes — see the [[mode-detection-mpd-pitfall]] memory.
+SUB_59FF90_VA = 0x59FF90
+
 # --- Virtual-key codes used by the dispatcher ------------------------------
 VK_ESC = 0x1B
 VK_B   = 0x42

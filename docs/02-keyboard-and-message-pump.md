@@ -45,25 +45,36 @@ mpd   = *(level + 0x30);
 
 ## Mode detection
 
-`detect_mode` is intentionally conservative. The previous scan-and-deref build
-crashed on `0x6E6F6E00` (`"non\0"`) because a range check does not make an
-arbitrary `mov eax, [eax]` safe.
+`detect_mode` calls the engine's own active-game-type getter
+`sub_59FF90(ecx=mgr)` (found via `sub_5BAD10`, which uses it to emit the
+`"gametype"` property string). The returned pointer is the live
+`CMultiPlayerGameType`-derived instance; its `[+0]` vtable is one of:
 
-Current behavior:
-- re-walk the MP gate to get `mpd`;
-- dump `mpd[0..0x200]` to `zax_dump.bin` once per session;
-- return `0` (Deathmatch).
+| mode | vtable | returned id |
+|---|---:|---:|
+| DM | `0x5F0D54` | `0` |
+| CTF | `0x5EF544` | `1` |
+| Salvage King | `0x5FED48` | `2` |
 
-To finish mode detection, collect per-mode dumps and identify a known-safe field
-holding the active game-type pointer, then compare `*ptr` to:
+The earlier "read `[mpd + 0]`" approach was wrong: `mpd` (`[level + 0x30]`)
+is the 24-byte `CMultiPlayerGameData` *base* (allocated by `sub_51C010`
+with shared vtable `0x5FB104`), so its vtable doesn't distinguish modes.
+The historical `0x6E6F6E00` (`"non\0"`) crash came from *scanning* `mpd` and
+dereferencing pointer-shaped garbage — different bug, same victim. Do not
+reintroduce arbitrary pointer scanning without SEH or `IsBadReadPtr`.
 
-| mode | vtable |
-|---|---:|
-| DM | `0x5F0D54` |
-| CTF | `0x5EF544` |
-| Salvage King | `0x5FED48` |
+`sub_59FF90`'s `esi` argument is a cache-miss hint that's only used the
+first time a game-type resource is loaded; during gameplay the resource is
+already cached, so `detect_mode` zeros `esi` defensively before the call.
 
-Do not reintroduce arbitrary pointer scanning without SEH or `IsBadReadPtr`.
+If the returned vtable matches none of the three, `detect_mode` writes a
+one-shot 0x200-byte dump of the game-type object to `zax_dump.bin` for
+offline analysis and falls back to DM. In known modes nothing is written
+and the message pump stays quiet.
+
+`zaxbot/config.py` exposes a `FORCE_MODE` knob (`None` / `'dm'` / `'ctf'` /
+`'sk'`) that short-circuits this whole flow when set — useful for testing
+per-mode behaviour without depending on a live session.
 
 ## Main-thread rule
 

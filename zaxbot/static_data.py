@@ -48,6 +48,9 @@ def write_bot_name_tables(section, scratch_off, layout, names, wide_slot_size, a
         section[ascii_off:ascii_off + len(ascii_bytes)] = ascii_bytes
 
 
+_FORCE_MODE_TABLE = {None: 0xFFFFFFFF, 'dm': 0, 'ctf': 1, 'sk': 2}
+
+
 def write_static_scratch_data(
     section,
     scratch_off,
@@ -66,9 +69,14 @@ def write_static_scratch_data(
     prompt_ctf_va,
     prompt_sk_va,
     fire_range_sq=90000.0,
+    force_mode=None,
 ):
     max_for_mode = struct.pack('<III', 1, 2, 4)  # DM/CTF/SK option counts
     prompts_table = struct.pack('<III', prompt_dm_va, prompt_ctf_va, prompt_sk_va)
+    forced_mode_value = _FORCE_MODE_TABLE.get(force_mode)
+    if forced_mode_value is None:
+        raise ValueError(f'FORCE_MODE must be None / dm / ctf / sk, got {force_mode!r}')
+    layout.write(section, scratch_off, 'forced_mode', struct.pack('<I', forced_mode_value))
 
     layout.write(section, scratch_off, 'msg', dump_msg)
     layout.write(section, scratch_off, 'fn', dump_filename)

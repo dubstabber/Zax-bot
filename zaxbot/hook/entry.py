@@ -52,9 +52,12 @@ def build_hook(section_va_abs):
     """Assemble the .zaxbot section. Returns ``(section_bytes, info)``.
 
     On B: open a mode-aware text-prompt menu via ``sub_59B260``. On the next
-    digit key, spawn a bot bound to the chosen team. Mode is currently
-    hard-coded to 0 (DM) by ``detect_mode``; the real mpd-vtable scan is the
-    next planned upgrade.
+    digit key, spawn a bot bound to the chosen team. ``detect_mode`` calls
+    the engine's ``sub_59FF90(ecx=mgr)`` getter for the active game-type
+    instance and matches ``[result+0]`` against the three known vtables to
+    return 0 (DM), 1 (CTF), or 2 (SK); unknown vtables drop a one-shot
+    0x200-byte dump and fall back to DM. ``zaxbot/config.py``'s
+    ``FORCE_MODE`` knob short-circuits detection for offline testing.
     """
     scratch_va = section_va_abs + cfg.SCRATCH_OFF
     layout = build_scratch_layout(
@@ -113,6 +116,7 @@ def build_hook(section_va_abs):
         prompt_dm_va=layout.va('prompt_dm'),
         prompt_ctf_va=layout.va('prompt_ctf'),
         prompt_sk_va=layout.va('prompt_sk'),
+        force_mode=cfg.FORCE_MODE,
     )
 
     info = {

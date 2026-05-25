@@ -59,8 +59,10 @@ Useful participant helpers:
 Current team behavior:
 - DM: write a unique nonzero team value based on bot slot to avoid a same-team
   spawn-picker pathology.
-- CTF/SK: intended to use the digit-selected team, but mode detection currently
-  returns DM until the `mpd` offset is found.
+- CTF/SK: write the user-selected team picked from the digit press (1..2 for
+  CTF, 1..4 for SK) — stored 0-indexed after the dispatcher subtracts `'1'`.
+  Mode is resolved by reading `[mpd+0]` and matching `VT_DM_VA`/`VT_CTF_VA`/
+  `VT_SK_VA`.
 
 ## Character array
 

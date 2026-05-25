@@ -88,6 +88,7 @@ def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, n
         ScratchField('stepfn', 0x080, 0x10, 'zax_step.log filename'),
         ScratchField('chosen_team', 0x090, 0x04),
         ScratchField('diag_dumped', 0x094, 0x04),
+        ScratchField('forced_mode', 0x098, 0x04, '0xFF=auto-detect, 0/1/2=force DM/CTF/SK'),
         ScratchField('prompt_dm', 0x0A0, 0x20),
         ScratchField('prompt_ctf', 0x0C0, 0x20),
         ScratchField('prompt_sk', 0x0E0, 0x20),
