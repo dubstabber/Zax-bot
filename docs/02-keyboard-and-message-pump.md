@@ -1,55 +1,76 @@
-# 02 — Keyboard input, the message pump, and the crash
+# 02 - Keyboard input and main-thread constraints
 
-## Main message pump — `sub_5998F0`
-Called from `_WinMain@16` (`0x477940`) → this is the **single main thread**, which also
-drives fullscreen DirectDraw rendering. There is no separate render thread.
+## Message pump
 
-The pump pulls window messages and dispatches by `Msg.message`. Relevant cases:
-- `WM_KEYDOWN` (256 / `0x100`) at `loc_599A16`:
-  ```
-  mov ecx, [esp+Msg.wParam]   ; ECX = VK code
-  call sub_599580             ; translate VK -> internal keyid (returns in EAX)
-  mov ecx, offset unk_6C1050
-  push eax                    ; register key-down with internal keyid
-  call sub_4E2A00
-  ... (also reads scancode from lParam, calls sub_4E29E0)
-  ```
-- `WM_KEYUP` (257) and `WM_CHAR` (258) handled nearby; mouse moves update
-  `dword_6CFF50/54`; etc. Default path calls `TranslateMessage`/`DispatchMessageA`.
+`sub_5998F0` is the main Win32 message pump called from `_WinMain@16`
+(`0x477940`). The game is single-threaded for the important work here: this same
+thread drives fullscreen DirectDraw, input processing, and the multiplayer hooks
+we call into.
 
-## `sub_599580` — VK → internal keyid translator (the hook site target)
-`int __thiscall sub_599580(vk)` (really `vk` arrives in ECX). Pure `switch` with **no
-side effects**; maps a subset of VKs (arrows, page keys, F-keys, digits-with-Ctrl) to
-internal ids. **VK 0x42 (B) and 0x52 (R) are not in any case → return 0 (default).**
-That makes the `call sub_599580` at **`0x599A1A`** an ideal, low-risk interception point:
-intercept the call, inspect ECX (the VK), then tail-`jmp sub_599580` so translation still
-happens. ECX must be preserved for that tail call.
+The WM_KEYDOWN path reaches:
 
-## The hook (`hook_entry`, Phase 1)
-Pseudocode (ECX = VK on entry):
+```asm
+mov ecx, [esp+Msg.wParam]   ; ECX = VK code
+call sub_599580             ; VK -> internal key id
+mov ecx, offset unk_6C1050
+push eax
+call sub_4E2A00
 ```
-if (cl != 'B' && cl != 'R') jmp sub_599580         ; fast path, ECX untouched
-pushad                                              ; preserves ECX (= VK) for the tail jmp
-  eax = *dword_713F14;            if !eax goto done  ; see doc 03 for the gate
-  ecx = eax; edx = *eax; eax = edx[0x184](eax); if !eax goto done
-  eax = *(eax + 0x30);            if !eax goto done  ; CMultiPlayerGameData (NULL outside MP)
-  sub_59B260(msg, -1)             ; on-screen confirmation (doc 03)
-done:
-popad
-jmp sub_599580                                      ; original translation runs; returns to 0x599A1F
+
+The patch changes the call at `0x599A1A` to call `.zaxbot:hook_entry`.
+`hook_entry` tail-jumps to `sub_599580` on every path, preserving normal key
+translation.
+
+## Hook dispatcher
+
+Current dispatcher behavior (`zaxbot/hook/dispatcher.py`):
+
+- idle + **B**: MP-gate, call `detect_mode`, show a prompt with `sub_59B260`,
+  set `menu_state = 1`.
+- idle + **R**: MP-gate, call `do_snapshot`.
+- menu open + digit `1..4`: validate against `max_for_mode[mode]`, store
+  `chosen_team`, call `do_spawn_with_team`, close the menu.
+- menu open + anything else: close the menu.
+- all other keys: tail-jump to `sub_599580`.
+
+The MP gate is:
+
+```c
+mgr   = *dword_713F14;
+level = mgr->vtbl[0x184](mgr);
+mpd   = *(level + 0x30);
 ```
-`sub_59B260` is `__stdcall` (callee pops its 8 bytes of args), so the stack stays balanced
-inside the `pushad/popad` frame.
 
-## Why the previous attempt crashed (solved)
-The old `zax_patch.py` hook called **`CreateFileA` + `WriteFile` + `CloseHandle` on every
-B/R press** to append to `zax_bot.log`. That synchronous file I/O on the fullscreen-DDraw
-main thread (under Wine) closed the game. (The docstring claimed "first press only" but no
-such gate existed in the emitted code; the gate chain and the rest of the hook were fine —
-logging actually succeeded a few times before the process died.)
+`mpd == NULL` means "not in a live MP match" for this hook.
 
-**Fix (Phase 1):** do no syscalls / no file I/O in the hook. Give feedback through the
-game's own message function `sub_59B260` instead. Verified in-game: no crash, message shows.
+## Mode detection
 
-**Lesson for later phases:** keep the hook hot-path to game-engine calls that the engine
-itself makes on this thread; avoid OS/blocking calls.
+`detect_mode` is intentionally conservative. The previous scan-and-deref build
+crashed on `0x6E6F6E00` (`"non\0"`) because a range check does not make an
+arbitrary `mov eax, [eax]` safe.
+
+Current behavior:
+- re-walk the MP gate to get `mpd`;
+- dump `mpd[0..0x200]` to `zax_dump.bin` once per session;
+- return `0` (Deathmatch).
+
+To finish mode detection, collect per-mode dumps and identify a known-safe field
+holding the active game-type pointer, then compare `*ptr` to:
+
+| mode | vtable |
+|---|---:|
+| DM | `0x5F0D54` |
+| CTF | `0x5EF544` |
+| Salvage King | `0x5FED48` |
+
+Do not reintroduce arbitrary pointer scanning without SEH or `IsBadReadPtr`.
+
+## Main-thread rule
+
+Avoid blocking or noisy OS calls on the hot key/frame path. The old per-key log
+build was unstable under Wine. Current diagnostic file I/O is limited to explicit
+R snapshots and one-shot mode dumps; normal B/digit feedback uses the engine's
+own `sub_59B260` message path.
+
+`zax_step.log` is for short spawn progress markers while debugging a crash. Do
+not turn it into per-frame logging.

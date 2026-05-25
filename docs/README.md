@@ -1,66 +1,59 @@
-# Zax bot-support — reverse engineering notes
+# Zax bot-support notes
 
-Goal: let the **host** of a multiplayer match add AI bots from an in-game control path.
-- Current control: press **B** to open the bot menu, then press a digit.
-- Deathmatch (free-for-all): **B → 1** spawns a bot.
-- Team games: **B → 1** through **B → 4** spawns a bot on the selected team
-  (within that mode's valid team range).
-- **R is diagnostic only**: it writes runtime snapshots to `zax_dump.bin` for
-  dynamic analysis. It does not spawn bots.
-- Future UI: replace the temporary key menu with a custom window/modal for adding bots.
-- Target fidelity: a full player-bot (player model, team color, frag-scoreboard entry, AI-driven).
+Goal: let the **host** of a multiplayer match add bot participants to
+*Zax: The Alien Hunter* by runtime-patching the original `Zax.exe`.
 
-Implemented by binary-patching `Zax.exe` (Reflexive, 2001; "Zax: The Alien Hunter").
+Current control path:
+- **B** opens the bot menu in a hosted MP match.
+- A digit selects the spawn/team option for the current mode.
+- **R** appends a diagnostic runtime snapshot to `zax_dump.bin`; it does not spawn.
 
-## Files
-- `Zax.exe` — patch target. **Rebuilt from `Zax.exe.bak` on every `zax_patch.py` run.**
-- `Zax.exe.bak` — pristine original. **Never modify.**
-- `Zax.exe.i64` — IDA Pro database (of the *original* image; the patched `.zaxbot`
-  section is NOT in it). Reached via the IDA MCP server.
-- `zax_patch.py` — the patcher (the only artifact we hand-edit). Self-documented.
-- `zax_dump.bin` — appendable runtime snapshots written by **R** for dynamic analysis.
-- `zax_bot.log` — leftover from the old (crashing) attempt; no longer written.
+## Source of truth
 
-## How to build & test
+- `Zax.exe.bak` is the pristine original. Never modify it.
+- `Zax.exe` is rebuilt from `Zax.exe.bak` every time `python3 zax_patch.py` runs.
+- `zax_patch.py` is now a thin entrypoint. The actual patch lives in `zaxbot/`:
+  - `zaxbot/config.py` - section size, scratch layout policy, bot ids/names.
+  - `zaxbot/addresses.py` - original-image VAs and verified prologues.
+  - `zaxbot/patch_manifest.py` - enabled hook/detour sites.
+  - `zaxbot/hook/` - dispatcher, mode detection, spawn, snapshot.
+  - `zaxbot/detours/` - prologue detours for capture, safety, control, fire/aim.
+- `Zax.exe.i64` is an IDA database for the original image only. It does not contain
+  the appended `.zaxbot` section.
+
+## Build and test
+
+```bash
+python3 zax_patch.py
 ```
-python3 zax_patch.py        # rebuilds Zax.exe from .bak and applies the patch
-```
-Then run `Zax.exe` (under Wine), host an MP match, press **B**, then press the
-team digit. Use **R** only when collecting a runtime dump. The game runs on a
-single main thread that also drives fullscreen DirectDraw, so the hook must avoid
-anything fragile on that thread (see `02` — file I/O there crashes under Wine).
+
+Then the user runs the game under Wine, hosts an MP match, and exercises B/R.
+Do not launch the game from automation; runtime testing is user-owned.
+
+## Current result
+
+The working path is **Phase B: synthetic DirectPlay queue injection**. On spawn,
+the hook injects a synthetic "player added" event, calls the engine's own
+`sub_480800` join handler, then calls `sub_59DF90` to create and place the
+character. The bot is a real participant: it appears on the scoreboard, has a
+visible character, takes damage, can be killed, registers kills, and is broadcast
+to a second PC.
+
+Current limitations:
+- Mode detection is still stubbed to Deathmatch (`detect_mode` returns 0 after a
+  one-shot `mpd[0..0x200]` dump).
+- Bots do not navigate. They keep a real walking controller for idle animation,
+  but `detour_542360` zeroes their movement vector.
+- Bots can fire/aim at the host within range and line of sight via `detour_5436F0`.
+- Host-side bot names are set after spawn; PC2 still does not reliably see the
+  chosen name because the synthetic DirectPlay player-data store is not populated.
 
 ## Doc index
-- `01-binary-and-patching.md` — PE layout, the `.zaxbot` section, the hook mechanism.
-- `02-keyboard-and-message-pump.md` — message pump, the WM_KEYDOWN hook site, the crash.
-- `03-multiplayer-and-display.md` — manager chain, `CMultiPlayerGameData`, the on-screen
-  message function `sub_59B260`, team/score strings.
-- `04-spawn-ai-leads.md` — entity spawn / AI leads for Phase 2/3 (confidence-tagged).
 
-## Current result (working in-game)
-Pressing **B** in a hosted MP match opens the bot/team menu; each selected digit spawns one
-bot until the active map's **Max Players** cap is reached. Bots are real participants on the
-frag scoreboard with visible characters at spawn points, no input mirror, no camera steal,
-host fully functional, and no known end-game crash. The display name is still sometimes
-uninitialized/gibberish because the DirectPlay name query path is not fixed yet.
-The bot is currently a stationary shooter; full navigation/combat remains separate work.
-Full recipe + analysis in
-`04-spawn-ai-leads.md`; the end-goal vision in the project memory.
+- `01-binary-and-patching.md` - PE layout, `.zaxbot`, patch manifest, build checks.
+- `02-keyboard-and-message-pump.md` - WM_KEYDOWN hook and main-thread constraints.
+- `03-multiplayer-and-display.md` - manager/session/participant anchors and messages.
+- `04-spawn-ai-leads.md` - current Phase B spawn architecture and remaining AI work.
 
-## Phase status
-- **Phase 0 — patcher restructured.** Done.
-- **Phase 1 — crash-free keyboard hook + host/MP gate + on-screen confirmation.**
-  Done & verified in-game (no crash, message shows).
-- **Phase 2 — spawn player-bot participants** (scoreboard + character at spawn point).
-  DONE for stationary bots via DirectPlay queue injection and `sub_59DF90`; now map-capped.
-- **Milestone 1 — create scoreboard participant.** DONE (in-game).
-- **Milestone 2 — spawn the bot's character in the arena.** DONE (in-game).
-- **Milestone 3 — make it an independent AI bot** (stop input-mirror + camera-steal; AI
-  movement/combat; map-capped multi-bot indexing; digit-selected team mapping; appearance). TODO —
-  the deepest remaining work; the control/AI think + camera/controlled-player mechanism are
-  vtable-dispatched and buried under property-registration boilerplate.
-
-## Convention
-Addresses are absolute VAs (image base `0x400000`). "Verified" = read directly in IDA
-and/or confirmed by runtime behavior. "Lead" = plausible but not yet confirmed — do not
-bake into the patch without checking in IDA first.
+Addresses are absolute VAs for image base `0x400000`. Prefer runtime dumps over
+static guesses when validating new multiplayer or bot behavior.
