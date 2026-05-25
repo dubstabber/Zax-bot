@@ -34,6 +34,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     bot_participants_va = layout.va('bot_participants')
     bot_indices_va      = layout.va('bot_indices')
     bot_chars_va        = layout.va('bot_chars')
+    bot_team_va         = layout.va('bot_team')
+    host_team_va        = layout.va('host_team')
     botp_va             = layout.va('botp')
     botidx_va           = layout.va('botidx')
     botchar_va          = layout.va('botchar')
@@ -195,6 +197,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x8B\x15' + le32(chosen_team_va))                # CTF: chosen_team (0=Blue, 1=Red)
     a.label('spawn_team_write')
     a.raw(b'\x89\x50\x14')                                   # mov [eax+0x14], edx
+    # Mirror the team into our scratch cache so the per-frame fire/aim detour
+    # can read it without re-entering the engine's worldmgr sync (which
+    # iterates the char array and is unsafe to spin in a hot loop).
+    a.raw(b'\xA1' + le32(active_bot_slot_va))                # mov eax, [active_bot_slot]
+    a.raw(b'\x89\x14\x85' + le32(bot_team_va))               # mov [bot_team + eax*4], edx
     logc(ord('T'))
     a.label('spawn_skip_team')
 
@@ -217,6 +224,17 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.call_va(ax.OP_NEW_VA)                                   # operator new
     a.raw(b'\x83\xC4\x04')
     a.raw(b'\x85\xC0'); a.jz('grow_skip')
+    # Zero the freshly-allocated buffer so any slots not overwritten by the
+    # copy below are NULL. The engine's worldmgr sync (worldmgr->vtbl[+4])
+    # iterates this array and unconditionally derefs non-NULL entries via
+    # sub_4EF900 -> sub_4FC200; uninitialised heap bytes would crash on
+    # `mov ecx, [esi+10h]` (see [[garbage-slot-crash]]).
+    a.raw(b'\x50')                                            # push eax (save buf)
+    a.raw(b'\x89\xC7')                                        # mov edi, eax
+    a.raw(b'\xB9\x10\x00\x00\x00')                            # mov ecx, 16
+    a.raw(b'\x31\xC0')                                        # xor eax, eax
+    a.raw(b'\xFC\xF3\xAB')                                    # cld; rep stosd
+    a.raw(b'\x58')                                            # pop eax (restore buf)
     a.raw(b'\x8B\xB3\x90\x02\x00\x00')                        # mov esi,[ebx+0x290]
     a.raw(b'\x8B\x8B\x94\x02\x00\x00')                        # mov ecx,[ebx+0x294]
     a.raw(b'\x89\xC7')                                        # mov edi, eax
@@ -291,6 +309,21 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('spawn_store_char_done')
     logc(ord('F'))
     a.label('spawn_skipai')
+
+    # Capture host's team id once per match (sentinel -1 = still unset).
+    # Doing this AFTER sub_59DF90 has run for the new bot keeps the
+    # worldmgr's internal char-array sync in a known-good state — calling
+    # sub_5BA820(0) earlier (before the new match's first sub_59DF90 has
+    # cleaned up stale slots from the previous match) crashes inside the
+    # auto-sync via the [[garbage-slot-crash]] path.
+    a.raw(b'\x83\x3D' + le32(host_team_va) + b'\xFF')        # cmp [host_team], -1
+    a.jnz('spawn_skip_host_team')
+    a.raw(b'\x31\xC9')                                        # xor ecx, ecx (host idx = 0)
+    a.call_va(ax.SUB_5BA820)                                  # eax = host stats
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_host_team')
+    a.raw(b'\x8B\x40\x14')                                    # mov eax, [stats+0x14]
+    a.raw(b'\xA3' + le32(host_team_va))                       # mov [host_team], eax
+    a.label('spawn_skip_host_team')
 
     # Confirm with on-screen message.
     a.raw(b'\xC7\x05' + le32(active_bot_slot_va) + le32(0xFFFFFFFF))

@@ -14,7 +14,7 @@ NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
 NEW_SECTION_SIZE   = 0x2000        # two pages: code + scratch (room for ring buffer)
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
-SCRATCH_OFF        = 0x1200        # writable scratch buffer; 4.5KB code / 3.5KB scratch
+SCRATCH_OFF        = 0x1300        # writable scratch buffer; 4.75KB code / 3.25KB scratch
 
 ZAXBOT_SECTION = SectionSpec(
     name=NEW_SECTION_NAME,
