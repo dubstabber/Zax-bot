@@ -65,6 +65,49 @@ Current team behavior:
   resolved via `sub_59FF90(ecx=mgr)`, whose return's `[+0]` vtable matches
   `VT_DM_VA`/`VT_CTF_VA`/`VT_SK_VA`.
 
+## Per-character appearance (colors)
+
+A character's `color1`/`color2` floats live on a "player look" component
+attached to the player char's **first child entity**, not to the player
+char itself. The engine's `sub_5ABE80` (server-side handler for the
+`CClientOptionsToServer` message) is the canonical apply path:
+
+```c
+target = (sub_4FC7C0(char) > 0) ? sub_4FC7D0(char, 0) : char;
+appearance = sub_418790(ecx=dword_6C0520 /*class desc*/, push target);
+if (appearance) {
+    *(float*)(appearance + 0x0C) = (float)color1_int;
+    *(float*)(appearance + 0x18) = (float)color2_int;
+}
+```
+
+Calling `sub_418790` with the player char directly returns `NULL`; the
+appearance lookup only resolves on the child entity. `sub_418790` is
+`__thiscall` and pops its stack arg (`retn 4`). The same pattern is used
+by `sub_46D450` (config-screen preview, against a preview avatar).
+
+Color values are stored in the per-player config struct reached two ways
+that point to the same memory:
+
+- `*(participant + 0x1C)` from the participant pointer, or
+- `*(stats + 0x1C)` from `sub_5BA820(idx)`.
+
+Layout: `+0` name CString, `+4` color1 int, `+8` color2 int, `+0xC`
+auto-switch byte. Sliders are 0..315 (`sub_4101F0(a1, 315, 1)` in
+`sub_46D010`). The host's own config also lives at `dword_6BD2F8` —
+don't write through it for bots.
+
+Bot policy: each `BOT_NAMES[i]` owns a deterministic `BOT_COLORS[i]` pair
+(`zaxbot/config.py`). At spawn the picked name index is preserved in
+scratch (`picked_name_idx`); the spawn payload then (a) writes the
+chosen `(c1, c2)` into the bot's pcfg at `*(stats+0x1C)+4/+8` for
+persistence, and (b) walks the child-entity appearance path above to
+write the floats into `appearance+0xC` / `+0x18` — which the renderer
+picks up on the next frame.
+
+CTF preempts `color1` with the team palette at render time — the per-name
+write is harmless.
+
 ## Character array
 
 The manager character array is at `mgr + 0x290`.

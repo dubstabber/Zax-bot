@@ -58,6 +58,14 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 - Bot display names are set on host through `sub_4E1930(*(part+0x1C), name)`.
   PC2 does not reliably see the chosen name because the synthetic DirectPlay
   player-data store is not populated.
+- Each bot name owns a deterministic `(color1, color2)` pair from
+  `BOT_COLORS` in `zaxbot/config.py`. At spawn, the patch mirrors the
+  engine's own `sub_5ABE80` (server-side handler for "client options
+  changed"): walk the bot char's first child via `sub_4FC7C0`/`sub_4FC7D0`,
+  look up the appearance via `sub_418790(dword_6C0520, child)`, and
+  write the chosen colors as floats at `+0x0C` and `+0x18`. The pcfg
+  (`*(stats+0x1C)+4/+8`) is also kept in sync for persistence. CTF
+  preempts `color1` with the team palette at render time.
 - Up to map `MaxPlayers` bots are supported, bounded by 16 synthetic ids
   (`0xBADC0DE0..0xBADC0DEF`).
 - `mgr + 0x290` is pre-grown to 16 entries before bot `sub_59DF90` calls.
@@ -113,6 +121,11 @@ Older emitted labels or disabled detours are not active unless they appear in
 | `sub_59FF90` | `__usercall(this=ecx, hint=esi)` -> active game-type instance |
 | `sub_4E1930` | `CString::operator=(this, char*)` |
 | `sub_4F1050` | active char getter / `a2` fallback |
+| `sub_418790` | `__thiscall(class, char)` -> appearance component (color1@+0xC, color2@+0x18, floats); query the **child** entity, not the player char |
+| `sub_4FC7C0` | `__thiscall(char)` -> child-list count |
+| `sub_4FC7D0` | `__thiscall(char, idx)` -> child entity |
+| `sub_5ABE80` | server handler for `CClientOptionsToServer` — canonical color-apply path |
+| `dword_6C0520` | class descriptor for the "player look" appearance component |
 | `0x5D034A` | `operator new` |
 | `0x5D0330` | `operator delete` |
 | `VT_DM_VA = 0x5F0D54` | Deathmatch game-type vtable |

@@ -124,6 +124,12 @@ def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, n
         # Team-cache tables (populated at spawn, read by fire/aim).
         ScratchField('bot_team', 0x2B0, 0x40, 'fire/aim: per-slot bot team id (-1=unset)'),
         ScratchField('host_team', 0x2F0, 0x04, 'fire/aim: cached host team id (-1=unset)'),
+        # Per-name color tables. bot_colors holds (color1, color2) dword pairs
+        # parallel to BOT_NAMES; picked_name_idx preserves the RNG-picked
+        # name index so the color lookup at spawn time uses the same row
+        # the on-screen name was picked from.
+        ScratchField('bot_colors', 0x300, num_bot_names * 8, 'per-name (u32 c1, u32 c2)'),
+        ScratchField('picked_name_idx', 0x3A0, 0x04, 'idx into bot_names / bot_colors'),
         ScratchField('thdr', 0x700, 0x04),
         ScratchField('thdr_tag', 0x704, 0x10),
         ScratchField('thdr_src_va', 0x714, 0x04),

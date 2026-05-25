@@ -48,6 +48,16 @@ def write_bot_name_tables(section, scratch_off, layout, names, wide_slot_size, a
         section[ascii_off:ascii_off + len(ascii_bytes)] = ascii_bytes
 
 
+def write_bot_color_table(section, scratch_off, layout, colors):
+    """Pack (color1, color2) dword pairs into scratch parallel to bot_names."""
+    field = layout.field('bot_colors')
+    packed = b''.join(struct.pack('<II', c1, c2) for c1, c2 in colors)
+    assert len(packed) <= field.size, (
+        f'BOT_COLORS does not fit scratch field: {len(packed)} > {field.size}'
+    )
+    layout.write(section, scratch_off, 'bot_colors', packed)
+
+
 _FORCE_MODE_TABLE = {None: 0xFFFFFFFF, 'dm': 0, 'ctf': 1, 'sk': 2}
 
 
@@ -65,6 +75,7 @@ def write_static_scratch_data(
     bot_names,
     name_slot_size,
     name_slot_ascii,
+    bot_colors,
     prompt_dm_va,
     prompt_ctf_va,
     prompt_sk_va,
@@ -108,4 +119,9 @@ def write_static_scratch_data(
         name_slot_size,
         name_slot_ascii,
     )
+
+    assert len(bot_colors) == len(bot_names), (
+        f'BOT_COLORS ({len(bot_colors)}) must be parallel to BOT_NAMES ({len(bot_names)})'
+    )
+    write_bot_color_table(section, scratch_off, layout, bot_colors)
 

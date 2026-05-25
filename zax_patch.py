@@ -31,7 +31,7 @@ from zaxbot.addresses import (  # noqa: F401
 )
 from zaxbot.build import build_patched_image as _build_patched_section_image
 from zaxbot.config import (  # noqa: F401
-    BOT_NAMES, NUM_BOT_NAMES, NAME_SLOT_SIZE, NAME_SLOT_ASCII,
+    BOT_NAMES, BOT_COLORS, NUM_BOT_NAMES, NAME_SLOT_SIZE, NAME_SLOT_ASCII,
     DUMP_MAGIC, DUMP_TAG_LEN, DUMP_HEADER_SIZE,
     DUMP_FILENAME, DUMP_MSG, FULL_MSG, STEP_FILENAME,
     FIRE_RANGE_SQ,

@@ -113,6 +113,7 @@ def build_hook(section_va_abs):
         bot_names=cfg.BOT_NAMES,
         name_slot_size=cfg.NAME_SLOT_SIZE,
         name_slot_ascii=cfg.NAME_SLOT_ASCII,
+        bot_colors=cfg.BOT_COLORS,
         prompt_dm_va=layout.va('prompt_dm'),
         prompt_ctf_va=layout.va('prompt_ctf'),
         prompt_sk_va=layout.va('prompt_sk'),

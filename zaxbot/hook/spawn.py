@@ -47,6 +47,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     synthetic_player_id_va = layout.va('synthetic_player_id')
     phase_b_in_flight_va   = layout.va('phase_b_in_flight')
     bot_names_ascii_va  = layout.va('bot_names_ascii')
+    bot_colors_va       = layout.va('bot_colors')
+    picked_name_idx_va  = layout.va('picked_name_idx')
     msg_va              = layout.va('msg')
     msg_full_va         = layout.va('msg_full')
 
@@ -285,6 +287,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x6A\x00')                                         # push 0
     a.raw(b'\xB9' + le32(ax.RNG_OBJ_VA))                       # mov ecx, RNG
     a.call_va(ax.RNG_SUB)                                      # eax = idx in [0,NUM-1]
+    a.raw(b'\xA3' + le32(picked_name_idx_va))                  # mov [picked_name_idx], eax
     a.raw(b'\xC1\xE0\x04')                                     # shl eax, 4  (NAME_SLOT_ASCII=16)
     a.raw(b'\x05' + le32(bot_names_ascii_va))                  # add eax, table
     a.raw(b'\x50')                                             # push eax (Source)
@@ -308,6 +311,65 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x89\x04\x95' + le32(bot_chars_va))               # bot_chars[slot] = char
     a.label('spawn_store_char_done')
     logc(ord('F'))
+
+    # --- Per-name color1/color2. The engine's `sub_5ABE80` (server-side
+    # handler for "client options changed") applies color updates by walking
+    # the player char's first child entity: if `sub_4FC7C0(char) > 0`, it
+    # pulls `target = sub_4FC7D0(char, 0)`; else `target = char`. Then it
+    # writes color1/color2 floats into `sub_418790(class, target) + 0xC/+0x18`.
+    # Bot chars take the child branch (sub_4FC7C0 > 0 in practice), and
+    # that child IS what carries the appearance lookup the renderer reads.
+    # CTF preempts color1 with the team palette at render time — harmless.
+    # Also mirror the colors into the bot's pcfg (*(stats+0x1C)+4/+8) so the
+    # next match's setup picks them up on its own re-sync.
+    a.raw(b'\x8B\x0D' + le32(botidx_va))                      # ecx = botidx
+    a.call_va(ax.SUB_5BA820)                                   # eax = bot stats
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_pcfg_write')
+    a.raw(b'\x8B\x40\x1C')                                     # eax = *(stats+0x1C) = pcfg*
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_pcfg_write')
+    a.raw(b'\x3D' + le32(ax.HOST_PLAYER_CFG_VA))              # cmp eax, &dword_6BD2F8
+    a.jz('spawn_skip_pcfg_write')                              # never clobber host local config
+    a.raw(b'\x8B\x15' + le32(picked_name_idx_va))              # edx = idx
+    a.raw(b'\xC1\xE2\x03')                                     # shl edx, 3
+    a.raw(b'\x81\xC2' + le32(bot_colors_va))                   # add edx, bot_colors
+    a.raw(b'\x8B\x0A')                                         # ecx = [edx]    color1 int
+    a.raw(b'\x89\x48\x04')                                     # mov [eax+4], ecx
+    a.raw(b'\x8B\x4A\x04')                                     # ecx = [edx+4]  color2 int
+    a.raw(b'\x89\x48\x08')                                     # mov [eax+8], ecx
+    a.label('spawn_skip_pcfg_write')
+
+    # Apply colors via the child-entity appearance path.
+    a.raw(b'\xA1' + le32(botchar_va))                         # eax = bot char
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_color')
+    a.raw(b'\x8B\xC8')                                        # mov ecx, eax (this = char)
+    a.call_va(ax.SUB_4FC7C0_VA)                                # eax = child count
+    a.raw(b'\x85\xC0'); a.jz('color_no_child')
+    a.raw(b'\x6A\x00')                                         # push 0 (child idx)
+    a.raw(b'\x8B\x0D' + le32(botchar_va))                      # ecx = bot char
+    a.call_va(ax.SUB_4FC7D0_VA)                                # eax = child entity
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_color')
+    a.raw(b'\x89\xC6')                                         # mov esi, eax (target = child)
+    a.jmp('color_have_target')
+    a.label('color_no_child')
+    a.raw(b'\x8B\x35' + le32(botchar_va))                      # mov esi, [botchar] (target = char)
+    a.label('color_have_target')
+    a.raw(b'\x56')                                             # push esi (target)
+    a.raw(b'\x8B\x0D' + le32(ax.APPEARANCE_CLASS_VA))          # ecx = appearance class
+    a.call_va(ax.SUB_418790_VA)                                # eax = appearance* (retn 4)
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_color')
+    a.raw(b'\x8B\x15' + le32(picked_name_idx_va))              # edx = picked idx
+    a.raw(b'\xC1\xE2\x03')                                     # shl edx, 3 (2 dwords/entry)
+    a.raw(b'\x81\xC2' + le32(bot_colors_va))                   # add edx, bot_colors
+    a.raw(b'\xFF\x32')                                         # push [edx]    color1 int
+    a.raw(b'\xDB\x04\x24')                                     # fild dword [esp]
+    a.raw(b'\xD9\x58' + bytes([ax.APPEARANCE_COLOR1_OFF]))     # fstp [eax+0xC]
+    a.raw(b'\x83\xC4\x04')
+    a.raw(b'\xFF\x72\x04')                                     # push [edx+4]  color2 int
+    a.raw(b'\xDB\x04\x24')                                     # fild dword [esp]
+    a.raw(b'\xD9\x58' + bytes([ax.APPEARANCE_COLOR2_OFF]))     # fstp [eax+0x18]
+    a.raw(b'\x83\xC4\x04')
+    a.label('spawn_skip_color')
+
     a.label('spawn_skipai')
 
     # Capture host's team id once per match (sentinel -1 = still unset).

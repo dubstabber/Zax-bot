@@ -11,10 +11,10 @@ from .build import SectionSpec
 # --- new section parameters (.zaxbot) -------------------------------------
 NEW_SECTION_NAME   = b'.zaxbot\x00'
 NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
-NEW_SECTION_SIZE   = 0x2000        # two pages: code + scratch (room for ring buffer)
+NEW_SECTION_SIZE   = 0x3000        # three pages: code + scratch
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
-SCRATCH_OFF        = 0x1300        # writable scratch buffer; 4.75KB code / 3.25KB scratch
+SCRATCH_OFF        = 0x1400        # writable scratch buffer; 5KB code / 7KB scratch
 
 ZAXBOT_SECTION = SectionSpec(
     name=NEW_SECTION_NAME,
@@ -67,3 +67,19 @@ BOT_NAMES = [
 NUM_BOT_NAMES   = len(BOT_NAMES)
 NAME_SLOT_SIZE  = 32   # bytes per wide-char name slot (14 wide chars + null)
 NAME_SLOT_ASCII = 16   # bytes per ASCII name slot (used by sub_4E1930 path)
+
+# --- Per-name colors -----------------------------------------------------
+# Each bot name owns a deterministic (color1, color2) pair so every "Ripper"
+# looks identical across spawns and sessions. Values are slider units in the
+# engine's 0..315 range (`sub_4101F0(a1, 315, 1)` in `sub_46D010`). CTF will
+# preempt color1 with the team palette at render time — that's accepted.
+COLOR_SLIDER_MAX = 315
+
+
+def _color_pair(name):
+    c1 = sum(ord(ch) * 31 for ch in name) % (COLOR_SLIDER_MAX + 1)
+    c2 = sum(ord(ch) * (i + 1) * 37 for i, ch in enumerate(name)) % (COLOR_SLIDER_MAX + 1)
+    return c1, c2
+
+
+BOT_COLORS = [_color_pair(n) for n in BOT_NAMES]  # parallel to BOT_NAMES

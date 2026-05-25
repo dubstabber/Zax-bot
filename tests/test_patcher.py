@@ -137,6 +137,7 @@ class StaticDataTests(unittest.TestCase):
             bot_names=zax_patch.BOT_NAMES,
             name_slot_size=zax_patch.NAME_SLOT_SIZE,
             name_slot_ascii=zax_patch.NAME_SLOT_ASCII,
+            bot_colors=zax_patch.BOT_COLORS,
             prompt_dm_va=layout.va('prompt_dm'),
             prompt_ctf_va=layout.va('prompt_ctf'),
             prompt_sk_va=layout.va('prompt_sk'),

@@ -107,7 +107,10 @@ VALUENAME_VA         = 0x62E558
 SUB_4FC200_VA        = 0x4FC200
 
 # --- sub_4FC7C0 / sub_417390 garbage-this defang --------------------------
-S4FC7C0_VA           = 0x4FC7C0
+# `sub_4FC7C0(char) -> child-list count` and `sub_4FC7D0(char, idx) -> child
+# entity[idx]` are also called at bot-spawn time to reach the appearance
+# component (which lives on the player char's first child, not on the char
+# itself — see notes near APPEARANCE_CLASS_VA).
 S4FC7C0_RESUME       = 0x4FC7C5
 S4FC7C0_ORIG         = b'\x8B\x41\x08\x85\xC0'
 
@@ -164,6 +167,33 @@ NETGAME_MAX_PLAYERS   = 0x0C        # descriptor+0x0C -> advertised maxplayers
 RNG_OBJ_VA            = 0x7124C0    # dword_7124C0 — engine's RNG instance
 RNG_SUB               = 0x55C4E0    # sub_55C4E0(this, low, high, opt)
 SUB_4E1930_VA         = 0x4E1930    # CString::operator=(this, char* Source)
+
+# --- Per-character appearance + color application --------------------------
+# The engine's `sub_5ABE80` (server-side "ClientOptionsToServer" handler)
+# applies color updates by walking the char's first child entity:
+#
+#   if (sub_4FC7C0(char) > 0)        target = sub_4FC7D0(char, 0)
+#   else                              target = char
+#   app = sub_418790(class=*(0x6C0520), target)
+#   if (app) {  *(float*)(app+0x0C) = color1;  *(float*)(app+0x18) = color2;  }
+#
+# `sub_418790` is `__thiscall` and pops its stack arg (`retn 4`). Querying
+# appearance on the *player* char itself returns NULL — appearance lives on
+# the child entity. We mirror this exact path at bot-spawn time.
+APPEARANCE_CLASS_VA   = 0x6C0520    # dword_6C0520: player look class descriptor
+SUB_418790_VA         = 0x418790    # __thiscall(class, char) -> appearance* (or NULL)
+SUB_4FC7C0_VA         = 0x4FC7C0    # __thiscall(char) -> child-list count (0 if none)
+SUB_4FC7D0_VA         = 0x4FC7D0    # __thiscall(char, idx) -> child entity[idx]
+APPEARANCE_COLOR1_OFF = 0x0C        # float color1 within appearance struct
+APPEARANCE_COLOR2_OFF = 0x18        # float color2 within appearance struct
+
+# --- Per-player config struct (color persistence) --------------------------
+# Each participant has `*(part+0x1C)` = pointer to a CPlayerConfig-like
+# struct with color1 at `+4` and color2 at `+8` (same layout as the host
+# local config at `dword_6BD2F8`). The renderer doesn't read this directly,
+# but the engine's join / sync code does; keeping it in sync with the bot's
+# applied colors prevents the next match's setup from reverting them.
+HOST_PLAYER_CFG_VA    = 0x6BD2F8    # dword_6BD2F8 — host local config (guard against clobber)
 
 # --- Game-type vtables (detect_mode lookup) --------------------------------
 VT_DM_VA  = 0x5F0D54  # CDeathMatchGameType vtable
