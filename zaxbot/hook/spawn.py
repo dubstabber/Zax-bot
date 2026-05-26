@@ -381,61 +381,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('spawn_store_char_done')
     logc(ord('F'))
 
-    # --- Per-name color1/color2. The engine's `sub_5ABE80` (server-side
-    # handler for "client options changed") applies color updates by walking
-    # the player char's first child entity: if `sub_4FC7C0(char) > 0`, it
-    # pulls `target = sub_4FC7D0(char, 0)`; else `target = char`. Then it
-    # writes color1/color2 floats into `sub_418790(class, target) + 0xC/+0x18`.
-    # Bot chars take the child branch (sub_4FC7C0 > 0 in practice), and
-    # that child IS what carries the appearance lookup the renderer reads.
-    # CTF preempts color1 with the team palette at render time — harmless.
-    # The pcfg mirror happens in the pre-spawn block above (must precede
-    # sub_59DF90 so the SK collector picks up the right color on first paint).
-
-    # Apply colors via the child-entity appearance path.
-    a.raw(b'\xA1' + le32(botchar_va))                         # eax = bot char
-    a.raw(b'\x85\xC0'); a.jz('spawn_skip_color')
-    a.raw(b'\x8B\xC8')                                        # mov ecx, eax (this = char)
-    a.call_va(ax.SUB_4FC7C0_VA)                                # eax = child count
-    a.raw(b'\x85\xC0'); a.jz('color_no_child')
-    a.raw(b'\x6A\x00')                                         # push 0 (child idx)
-    a.raw(b'\x8B\x0D' + le32(botchar_va))                      # ecx = bot char
-    a.call_va(ax.SUB_4FC7D0_VA)                                # eax = child entity
-    a.raw(b'\x85\xC0'); a.jz('spawn_skip_color')
-    a.raw(b'\x89\xC6')                                         # mov esi, eax (target = child)
-    a.jmp('color_have_target')
-    a.label('color_no_child')
-    a.raw(b'\x8B\x35' + le32(botchar_va))                      # mov esi, [botchar] (target = char)
-    a.label('color_have_target')
-    a.raw(b'\x56')                                             # push esi (target)
-    a.raw(b'\x8B\x0D' + le32(ax.APPEARANCE_CLASS_VA))          # ecx = appearance class
-    a.call_va(ax.SUB_418790_VA)                                # eax = appearance* (retn 4)
-    a.raw(b'\x85\xC0'); a.jz('spawn_skip_color')
-    a.raw(b'\x8B\x15' + le32(picked_name_idx_va))              # edx = picked idx
-    a.raw(b'\xC1\xE2\x03')                                     # shl edx, 3 (2 dwords/entry)
-    a.raw(b'\x81\xC2' + le32(bot_colors_va))                   # add edx, bot_colors
-    a.raw(b'\xFF\x32')                                         # push [edx]    color1 int
-    a.raw(b'\xDB\x04\x24')                                     # fild dword [esp]
-    a.raw(b'\xD9\x58' + bytes([ax.APPEARANCE_COLOR1_OFF]))     # fstp [eax+0xC]
-    a.raw(b'\x83\xC4\x04')
-    a.raw(b'\xFF\x72\x04')                                     # push [edx+4]  color2 int
-    a.raw(b'\xDB\x04\x24')                                     # fild dword [esp]
-    a.raw(b'\xD9\x58' + bytes([ax.APPEARANCE_COLOR2_OFF]))     # fstp [eax+0x18]
-    a.raw(b'\x83\xC4\x04')
-    # Let the active gametype override color1 if it wants to (CTF forces it
-    # to the team hue via vtable[+0x9C] = sub_4698B0; DM/SK install nullsub
-    # there so the call is a no-op). Mirrors sub_5ABE80's own behavior.
-    a.raw(b'\x89\xC6')                                         # mov esi, eax (save appearance)
-    a.raw(b'\x8B\x0D' + le32(ax.MANAGER_GLOBAL_VA))            # ecx = mgr
-    a.call_va(ax.SUB_59FF90_VA)                                # eax = active gametype
-    a.raw(b'\x85\xC0'); a.jz('spawn_skip_color')
-    a.raw(b'\x8D\x56' + bytes([ax.APPEARANCE_COLOR1_OFF]))     # lea edx, [esi+0xC] (&color1)
-    a.raw(b'\x52')                                             # push edx (a3 = &color1)
-    a.raw(b'\xFF\x35' + le32(botp_va))                         # push [botp] (a2 = participant)
-    a.raw(b'\x8B\x10')                                         # mov edx, [eax] (vtable)
-    a.raw(b'\x8B\xC8')                                         # mov ecx, eax (this = gametype)
-    a.raw(b'\xFF\x92' + le32(ax.GAMETYPE_COLOR1_VTBL_OFF))     # call dword ptr [edx+0x9C]  (disp32)
-    a.label('spawn_skip_color')
+    # --- Apply the bot's chosen color1/color2 to its appearance component.
+    # See ``apply_bot_colors`` for the full child-walk / gametype-override
+    # protocol; this is the post-spawn half (the pre-spawn pcfg mirror that
+    # paints the SK collector still lives above, before sub_59DF90).
+    a.call_lbl('apply_bot_colors')
 
     a.label('spawn_skipai')
 

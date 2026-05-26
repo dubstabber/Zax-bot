@@ -12,27 +12,18 @@ bypassing controller animation. Host controllers fall through to the
 original prologue + resume."""
 
 from .. import addresses as ax
-from .. import config as cfg
-from ..asm import Asm, le32
+from ..asm import Asm
+from ..hook.bot_lookup import emit_is_bot_controller
 from ..layout import ScratchLayout
 
 
 def emit(a: Asm, layout: ScratchLayout) -> None:
-    bot_indices_va = layout.va('bot_indices')
-
     a.label('detour_542360')
-    a.raw(b'\x8B\x51\x1C')                                # mov edx, [ecx+0x1C] (player_num)
-    a.raw(b'\x85\xD2')                                    # test edx, edx
-    a.jz('s542360_normal')                                # player_num 0 = host
-    a.raw(b'\xB8' + le32(bot_indices_va))                 # mov eax, bot_indices
-    a.label('s542360_scan')
-    a.raw(b'\x3B\x10')                                    # cmp edx, [eax]
-    a.jz('s542360_bot')
-    a.raw(b'\x83\xC0\x04')                                # add eax, 4
-    a.raw(b'\x3D' + le32(bot_indices_va + 4 * cfg.MAX_BOT_SLOTS))  # cmp eax, end
-    a.jb('s542360_scan')
-    a.jmp('s542360_normal')
-    a.label('s542360_bot')
+    emit_is_bot_controller(a, layout,
+                           on_not_bot='s542360_normal',
+                           label_prefix='s542360')
+    # EAX = &bot_indices[slot] on bot match — movement detour doesn't need the
+    # slot itself, just the bot/host distinction, so we drop EAX.
     a.raw(b'\x8B\x44\x24\x04')                            # mov eax, [esp+4] (float[2] out_vec)
     a.raw(b'\x85\xC0'); a.jz('s542360_skip_vec')
     a.raw(b'\xC7\x00\x00\x00\x00\x00')                    # out_vec[0] = 0.0

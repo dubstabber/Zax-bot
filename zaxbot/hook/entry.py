@@ -13,11 +13,12 @@ from .. import config as cfg
 from ..asm import Asm
 from ..layout import build_scratch_layout
 from ..static_data import write_static_scratch_data
-from . import detect_mode, dispatcher, snapshot, spawn
+from . import apply_colors, detect_mode, dispatcher, snapshot, spawn
 from .helpers import emit_logc_body, emit_wbuf_body
 from ..detours import (
     bot_fire_aim,
     bot_movement,
+    bot_perception,
     char_iter,
     df90_match_change,
     dp_poll,
@@ -74,6 +75,10 @@ def build_hook(section_va_abs):
     dispatcher.emit(a, layout)
     detect_mode.emit(a, layout)
     spawn.emit(a, layout)
+    # apply_bot_colors is a callable subroutine used from spawn (post-spawn
+    # color application). Emit it immediately after spawn so the call_lbl
+    # forward-reference resolves to a nearby site.
+    apply_colors.emit(a, layout)
     emit_wbuf_body(a, dummy_va=layout.va('dummy'))
     snapshot.emit(a, layout)
     emit_logc_body(
@@ -88,6 +93,11 @@ def build_hook(section_va_abs):
     df90_match_change.emit(a, layout)
     walk_controller.emit(a, layout)
     bot_movement.emit(a, layout)
+    # pick_target must be emitted before bot_fire_aim's detour body so the
+    # call_lbl inside detour_5436F0 resolves to a forward-defined label
+    # (works either way since Asm.link() is a two-pass linker, but emit
+    # order also fixes the absolute VAs, so we keep perception adjacent).
+    bot_perception.emit(a, layout)
     bot_fire_aim.emit(a, layout)
     spawn_safety.emit(a, layout)
     name_block.emit(a, layout)

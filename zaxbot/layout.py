@@ -3,6 +3,29 @@
 from dataclasses import dataclass
 
 
+# Per-bot state: one parallel u32 array per field, indexed by bot slot
+# ([0, MAX_BOT_SLOTS)). All arrays live in a single contiguous block in
+# scratch (see ``_bot_state_block`` below) so adding new AI fields is a
+# matter of appending an entry here rather than juggling offsets in
+# ``build_scratch_layout``.
+#
+# The exposed scratch field name is ``bot_<key>``; existing ASM that reads
+# ``layout.va('bot_team')`` etc. keeps working unchanged.
+#
+# Order matters insofar as it determines the contiguous offsets one helper
+# can derive from another (e.g. ``bot_controllers`` lives at the same
+# stride exactly one array length past ``bot_indices``, which lets
+# ``walk_controller`` write through a fixed delta after a bot_indices
+# scan hit — see ``bot_indices_to_controllers`` in that module).
+BOT_STATE_FIELDS = (
+    ('participants', 'synthetic DP participant ptrs (per bot slot)'),
+    ('indices',      'per-bot mgr+0x290 char-array index'),
+    ('chars',        'cached char ptrs (for fire/aim hot path)'),
+    ('controllers',  'walking-controller ptrs (re-captured on respawn)'),
+    ('team',         'team id (CTF); -1 sentinel = unset'),
+)
+
+
 @dataclass(frozen=True)
 class ScratchField:
     name: str
@@ -13,6 +36,18 @@ class ScratchField:
     @property
     def end(self):
         return self.offset + self.size
+
+
+def _bot_state_block(base_off, max_bot_slots):
+    """Emit a ``ScratchField`` for each BOT_STATE_FIELDS entry at sequential
+    offsets starting at ``base_off``. Returns ``(fields, end_off)``."""
+    fields = []
+    off = base_off
+    size = max_bot_slots * 4
+    for key, note in BOT_STATE_FIELDS:
+        fields.append(ScratchField(f'bot_{key}', off, size, note))
+        off += size
+    return fields, off
 
 
 class ScratchLayout:
@@ -68,7 +103,11 @@ class ScratchLayout:
 
 
 def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, name_slot_ascii):
-    return ScratchLayout(base_va, scratch_size, [
+    BOT_STATE_BASE = 0x180
+    MAX_BOT_SLOTS = 16
+    bot_state_fields, bot_state_end = _bot_state_block(BOT_STATE_BASE, MAX_BOT_SLOTS)
+
+    fields = [
         ScratchField('hdr', 0x000, 0x08, 'WriteFile header [src_va, len]'),
         ScratchField('dummy', 0x008, 0x04, 'WriteFile bytes-written sink'),
         ScratchField('fn', 0x010, 0x20, 'zax_dump.bin filename'),
@@ -79,10 +118,7 @@ def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, n
         ScratchField('botidx', 0x05C, 0x04),
         ScratchField('logbyte', 0x060, 0x04),
         ScratchField('botchar', 0x064, 0x04),
-        ScratchField('aidesc', 0x068, 0x04),
         ScratchField('botmode', 0x06C, 0x04),
-        ScratchField('hostchar', 0x070, 0x04),
-        ScratchField('aicomp', 0x074, 0x04),
         ScratchField('menu_state', 0x078, 0x04),
         ScratchField('menu_mode', 0x07C, 0x04),
         ScratchField('stepfn', 0x080, 0x10, 'zax_step.log filename'),
@@ -96,34 +132,37 @@ def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, n
         ScratchField('prompts_table', 0x110, 0x0C),
         ScratchField('snap_counter', 0x11C, 0x04),
         ScratchField('fire_range_sq', 0x124, 0x04),
-        ScratchField('bot_controller', 0x128, 0x04),
         ScratchField('bot_dx', 0x12C, 0x04),
         ScratchField('bot_dy', 0x130, 0x04),
         ScratchField('bot_pos', 0x134, 0x08),
-        ScratchField('host_pos', 0x13C, 0x08),
         ScratchField('active_bot_slot', 0x150, 0x04),
         ScratchField('max_players', 0x154, 0x04),
         ScratchField('cur_players', 0x158, 0x04),
         ScratchField('msg_full', 0x160, 0x20),
-        ScratchField('bot_participants', 0x180, 0x40),
-        ScratchField('bot_indices', 0x1C0, 0x40),
-        ScratchField('bot_chars', 0x200, 0x40),
-        ScratchField('bot_controllers', 0x240, 0x40),
-        # Fire/aim scratch (per-detour-call working state).
-        ScratchField('cand_pos', 0x280, 0x08, 'fire/aim: per-candidate position'),
-        ScratchField('cand_tmp', 0x288, 0x04, 'fire/aim: cand char ptr across helpers'),
-        ScratchField('curr_dist_sq', 0x28C, 0x04, 'fire/aim: current cand d^2'),
-        ScratchField('best_target', 0x290, 0x04, 'fire/aim: winning char ptr'),
-        ScratchField('best_dist_sq', 0x294, 0x04, 'fire/aim: winning d^2'),
-        ScratchField('best_dx', 0x298, 0x04, 'fire/aim: winning dx for angle'),
-        ScratchField('best_dy', 0x29C, 0x04, 'fire/aim: winning dy for angle'),
-        ScratchField('bot_slot_tmp', 0x2A0, 0x04, 'fire/aim: firing bot slot index'),
-        ScratchField('cand_idx', 0x2A4, 0x04, 'fire/aim: outer loop counter'),
-        ScratchField('our_team_tmp', 0x2A8, 0x04, 'fire/aim: bot team id, -1 = no CTF filter'),
-        ScratchField('bot_char_tmp', 0x2AC, 0x04, 'fire/aim: firing bot char ptr'),
-        # Team-cache tables (populated at spawn, read by fire/aim).
-        ScratchField('bot_team', 0x2B0, 0x40, 'fire/aim: per-slot bot team id (-1=unset)'),
+    ]
+    # Contiguous per-bot state block. Each field is `MAX_BOT_SLOTS * 4` bytes
+    # and is indexed by slot from ASM as `[<field>_va + slot*4]`. Adding a
+    # new per-bot AI field (target cache, path node, etc.) means appending
+    # to BOT_STATE_FIELDS — no scratch-offset bookkeeping needed.
+    fields.extend(bot_state_fields)
+    # Per-call fire/aim working state lives right after the bot-state block;
+    # `host_part` keeps its old absolute offset (0x2F0) so we don't churn the
+    # one engine-facing pointer that any future tool might want to grep for.
+    fields.extend([
+        ScratchField('cand_pos', bot_state_end + 0x00, 0x08, 'fire/aim: per-candidate position'),
+        ScratchField('cand_tmp', bot_state_end + 0x08, 0x04, 'fire/aim: cand char ptr across helpers'),
+        ScratchField('curr_dist_sq', bot_state_end + 0x0C, 0x04, 'fire/aim: current cand d^2'),
+        ScratchField('best_target', bot_state_end + 0x10, 0x04, 'fire/aim: winning char ptr'),
+        ScratchField('best_dist_sq', bot_state_end + 0x14, 0x04, 'fire/aim: winning d^2'),
+        ScratchField('best_dx', bot_state_end + 0x18, 0x04, 'fire/aim: winning dx for angle'),
+        ScratchField('best_dy', bot_state_end + 0x1C, 0x04, 'fire/aim: winning dy for angle'),
+        ScratchField('bot_slot_tmp', bot_state_end + 0x20, 0x04, 'fire/aim: firing bot slot index'),
+        ScratchField('cand_idx', bot_state_end + 0x24, 0x04, 'fire/aim: outer loop counter'),
+        ScratchField('our_team_tmp', bot_state_end + 0x28, 0x04, 'fire/aim: bot team id, -1 = no CTF filter'),
+        ScratchField('bot_char_tmp', bot_state_end + 0x2C, 0x04, 'fire/aim: firing bot char ptr'),
         ScratchField('host_part', 0x2F0, 0x04, 'fire/aim: cached host participant ptr (team read live from +0x14)'),
+    ])
+    fields.extend([
         # Per-name color tables. bot_colors holds (color1, color2) dword pairs
         # parallel to BOT_NAMES; picked_name_idx preserves the RNG-picked
         # name index so the color lookup at spawn time uses the same row
@@ -155,7 +194,6 @@ def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, n
         ScratchField('stats_tmp', 0x7D0, 0x04),
         ScratchField('cstr_tmp', 0x7D4, 0x04),
         ScratchField('tag_charptr', 0x7D8, 0x10),
-        ScratchField('tag_crashvec', 0x7E8, 0x10),
         ScratchField('tmp_idx', 0x7FC, 0x04),
         ScratchField('cap_dp_edi', 0x800, 0x04),
         ScratchField('my_queue_slot', 0x804, 0x04),
@@ -164,4 +202,5 @@ def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, n
         ScratchField('bot_names', 0x900, num_bot_names * name_slot_size),
         ScratchField('bot_names_ascii', 0xB80, num_bot_names * name_slot_ascii),
     ])
+    return ScratchLayout(base_va, scratch_size, fields)
 

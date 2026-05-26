@@ -18,6 +18,7 @@ Three detours, emitted in source order:
 from .. import addresses as ax
 from .. import config as cfg
 from ..asm import Asm, le32
+from ..hook.bot_lookup import emit_scan_bot_indices
 from ..layout import ScratchLayout
 
 
@@ -27,6 +28,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     bot_controllers_va = layout.va('bot_controllers')
     bot_indices_va     = layout.va('bot_indices')
     tmp_idx_va         = layout.va('tmp_idx')
+    bot_indices_to_controllers = bot_controllers_va - bot_indices_va
 
     # --- detour_5AA4E0 -------------------------------------------------------
     a.label('detour_5AA4E0')
@@ -73,21 +75,15 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x4A')                                         # dec edx
     a.raw(b'\x75\xF0')                                     # jne -16
     # (b) Capture by player-index match (post-natural-respawn for bots).
-    a.raw(b'\x8B\x44\x24\x04')                             # mov eax, [esp+4] (player idx)
-    a.raw(b'\x85\xC0'); a.jz('s542550_normal')             # idx 0 = host
-    a.raw(b'\xA3' + le32(tmp_idx_va))                      # mov [tmp_idx], eax
-    a.raw(b'\xB8' + le32(bot_indices_va))                  # mov eax, bot_indices_va
-    a.raw(b'\xBA' + le32(cfg.MAX_BOT_SLOTS))               # mov edx, MAX_BOT_SLOTS
-    a.raw(b'\x53')                                         # push ebx
-    # capture_loop (manual short jumps):
-    a.raw(b'\x8B\x18')                                     # mov ebx, [eax]
-    a.raw(b'\x3B\x1D' + le32(tmp_idx_va))                  # cmp ebx, [tmp_idx]
-    a.raw(b'\x75\x06')                                     # jne +6
-    a.raw(b'\x89\x88\x80\x00\x00\x00')                     # mov [eax+0x80], ecx  (= bot_controllers_va[i])
-    a.raw(b'\x83\xC0\x04')                                 # add eax, 4
-    a.raw(b'\x4A')                                         # dec edx
-    a.raw(b'\x75\xEA')                                     # jne -22
-    a.raw(b'\x5B')                                         # pop ebx
+    a.raw(b'\x8B\x54\x24\x04')                             # mov edx, [esp+4] (player idx)
+    a.raw(b'\x85\xD2'); a.jz('s542550_normal')             # idx 0 = host
+    emit_scan_bot_indices(a, layout,
+                          on_no_match='s542550_normal',
+                          label_prefix='s542550_recap')
+    # EAX = &bot_indices[i]. bot_controllers lives at the same stride one
+    # whole array later, so writing through that delta restores the bot's
+    # controller binding after a natural respawn.
+    a.raw(b'\x89\x88' + le32(bot_indices_to_controllers))  # mov [eax+(controllers-indices)], ecx
 
     a.label('s542550_normal')
     a.raw(b'\x8B\x44\x24\x04')                            # mov eax, [esp+4]

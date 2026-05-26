@@ -19,7 +19,6 @@ DUMP_TAGS = (
     ('tag_mgr_root', 'mgr_root'),
     ('tag_session', 'session'),
     ('tag_charptr', 'charptr'),
-    ('tag_crashvec', 'crashvec'),
 )
 
 
