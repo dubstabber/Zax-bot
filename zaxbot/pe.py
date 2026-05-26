@@ -137,3 +137,21 @@ class RelocationPatch:
         if self.kind == 'jmp':
             return image.patch_jmp(self.va, target_va, self.length, self.original)
         raise ValueError(f'unknown patch kind: {self.kind}')
+
+
+@dataclass(frozen=True)
+class RawBytePatch:
+    """Overwrites a fixed VA with `replacement` after verifying `original`.
+
+    Used for in-place engine patches that don't redirect into .zaxbot — e.g.
+    surgical fixes that NULL-guard a virtual-call site by writing a few extra
+    bytes into the function's trailing padding.
+    """
+    name: str
+    va: int
+    original: bytes
+    replacement: bytes
+
+    def apply(self, image, targets):  # `targets` unused — keeps apply_patches uniform.
+        image.write_at_va(self.va, self.replacement, self.original)
+        return self.replacement

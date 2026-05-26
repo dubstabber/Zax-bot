@@ -102,7 +102,7 @@ class ScratchLayout:
         return max((field.end for field in self.fields), default=0)
 
 
-def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, name_slot_ascii):
+def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, name_slot_ascii, weapon_speeds_max):
     BOT_STATE_BASE = 0x180
     MAX_BOT_SLOTS = 16
     bot_state_fields, bot_state_end = _bot_state_block(BOT_STATE_BASE, MAX_BOT_SLOTS)
@@ -207,9 +207,15 @@ def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, n
         ScratchField('phase_b_in_flight', 0x80C, 0x04),
         # Diagnostic tags for the bot-AI scratch dump. ai_fire covers the
         # per-call fire/aim region (best_target through proj_speed); ai_pos
-        # covers prev_pos_table + cand_vx/cand_vy.
-        ScratchField('tag_ai_fire', 0x810, 0x10),
-        ScratchField('tag_ai_pos',  0x820, 0x10),
+        # covers prev_pos_table + cand_vx/cand_vy; weapon_info dumps the
+        # current weapon's vtable + projectile prototype + applied speed.
+        ScratchField('tag_ai_fire',     0x810, 0x10),
+        ScratchField('tag_ai_pos',      0x820, 0x10),
+        ScratchField('tag_weapon_info', 0x830, 0x10),
+        ScratchField('tag_host_weapon', 0x840, 0x10),
+        ScratchField('tag_pc2_weapon',  0x850, 0x10),
+        ScratchField('tag_host_wpn_bytes', 0x860, 0x10),
+        ScratchField('tag_pc2_wpn_bytes',  0x870, 0x10),
         ScratchField('bot_names', 0x900, num_bot_names * name_slot_size),
         ScratchField('bot_names_ascii', 0xB80, num_bot_names * name_slot_ascii),
         # Per-bot, per-char-slot last-seen position cache for the lead-shot
@@ -225,6 +231,30 @@ def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, n
         ScratchField('prev_pos_table', 0xCC0, 16 * 16 * 8, 'fire/aim: per-(bot,cand) last-seen pos (16×16×2 floats)'),
         ScratchField('cand_vx',        0x14C0, 0x04, 'fire/aim: current cand velocity x (delta vs prev)'),
         ScratchField('cand_vy',        0x14C4, 0x04, 'fire/aim: current cand velocity y (delta vs prev)'),
+        # Per-weapon projectile-speed dispatch (see hook/weapon_speed.py).
+        ScratchField('default_proj_speed', 0x14C8, 0x04, 'weapon: cfg.PROJECTILE_SPEED fallback (static)'),
+        ScratchField('is_hitscan',         0x14CC, 0x04, 'weapon: 1 if current weapon has no projectile prototype'),
+        ScratchField('primary_hash',       0x14D0, 0x04, 'weapon: cached hash of "Primary" slot (0 = uninit)'),
+        ScratchField('inv_tmp',            0x14D4, 0x04, 'weapon: inventory ptr scratch across sub_523DF0 call'),
+        ScratchField('current_weapon_obj', 0x14D8, 0x04, 'weapon: diagnostic — last weapon object ptr'),
+        ScratchField('current_proto_va',   0x14DC, 0x04, 'weapon: diagnostic — last projectile-prototype VA (0=hitscan)'),
+        # FORCE_BOT_ITEM_ID written at build time; 0xFFFFFFFF = no override.
+        ScratchField('force_bot_item_id',  0x14E0, 0x04, 'spawn: item id to force-equip on new bots (-1 = off)'),
+        # weapon_table: (proto_va u32, speed float) pairs + terminating 0 entry.
+        # Sized to fit WEAPON_SPEEDS_MAX rows plus the sentinel.
+        ScratchField('weapon_table',       0x14E4, (weapon_speeds_max + 1) * 8,
+                     'weapon: (proto_va, speed) lookup + 0-VA sentinel'),
+        # Host-side diagnostic — snapshot writes these by running the weapon
+        # lookup chain on worldmgr.charArray[0]. Lets the user discover valid
+        # item ids by picking up a weapon and pressing R.
+        ScratchField('host_weapon_obj',    0x15F0, 0x04, 'host weapon diag: weapon object ptr'),
+        ScratchField('host_proto_va',      0x15F4, 0x04, 'host weapon diag: projectile prototype VA (0=hitscan)'),
+        ScratchField('host_item_id',       0x15F8, 0x04, 'host weapon diag: Primary slot item id'),
+        # Parallel diagnostic for PC2 (charArray[1]) — lets us compare a real
+        # remote client's weapon layout against the synthetic-DP bot's.
+        ScratchField('pc2_weapon_obj',     0x15FC, 0x04, 'pc2 weapon diag: weapon object ptr'),
+        ScratchField('pc2_proto_va',       0x1600, 0x04, 'pc2 weapon diag: projectile prototype VA (0=hitscan)'),
+        ScratchField('pc2_item_id',        0x1604, 0x04, 'pc2 weapon diag: Primary slot item id'),
     ])
     return ScratchLayout(base_va, scratch_size, fields)
 

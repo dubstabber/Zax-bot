@@ -387,6 +387,81 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # paints the SK collector still lives above, before sub_59DF90).
     a.call_lbl('apply_bot_colors')
 
+    # --- Optional FORCE_BOT_ITEM_ID override (testing aid). Bots can't move
+    # and so can't pick up weapons; this knob force-equips a specific item
+    # at spawn time. 0xFFFFFFFF sentinel = no override (default loadout).
+    # Mirrors the engine's own give-weapon call at 0x543ACD:
+    #   push 1 (auto-equip); push 0 (a4); push primary_hash; push item_id;
+    #   mov ecx, inv; call sub_425590.
+    # primary_hash is normally warmed by compute_proj_speed on the first bot
+    # fire frame; force this block to compute it if it's still 0 here so a
+    # bot can be force-equipped before it has ever fired.
+    force_va        = layout.va('force_bot_item_id')
+    primary_hash_va = layout.va('primary_hash')
+
+    a.raw(b'\x83\x3D' + le32(force_va) + b'\xFF')             # cmp [force_bot_item_id], -1
+    a.jz('spawn_skip_force_weapon')
+    a.raw(b'\xA1' + le32(botchar_va))                         # eax = bot char
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_force_weapon')
+    a.raw(b'\x8B\xC8')                                        # mov ecx, eax (this = bot char)
+    a.call_va(ax.SUB_4267E0_VA)                               # eax = inventory
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_force_weapon')
+    a.raw(b'\x89\xC6')                                        # mov esi, eax (save inventory)
+
+    # Lazy-init primary_hash if compute_proj_speed hasn't warmed it yet.
+    a.raw(b'\x83\x3D' + le32(primary_hash_va) + b'\x00')      # cmp [primary_hash], 0
+    a.jnz('spawn_force_have_hash')
+    a.raw(b'\x6A\xFF')                                        # push -1
+    a.raw(b'\x68' + le32(ax.PRIMARY_STR_VA))                  # push "Primary"
+    a.raw(b'\xB9' + le32(ax.SLOT_NAME_REGISTRY_VA))           # mov ecx, registry
+    a.call_va(ax.SUB_523DF0_VA)
+    a.raw(b'\xA3' + le32(primary_hash_va))                    # mov [primary_hash], eax
+    a.label('spawn_force_have_hash')
+
+    # sub_425590(this=inv, item_id, slot_hash, 0, 1).
+    # a5=1 triggers the engine's auto-equip path, which routes through the
+    # positional-sound wrapper at 0x4FC8A0. That wrapper is patched
+    # NULL-tolerant in patch_manifest.RawBytePatch so it skips the sound
+    # when the bot's audio emitter slot at char+0x48 is NULL (synthetic-DP
+    # bots don't have one).
+    a.raw(b'\x6A\x01')                                        # push 1 (a5: auto-equip)
+    a.raw(b'\x6A\x00')                                        # push 0 (a4: void*)
+    a.raw(b'\xFF\x35' + le32(primary_hash_va))                # push [primary_hash] (a3)
+    a.raw(b'\xFF\x35' + le32(force_va))                       # push [force_bot_item_id] (a2)
+    a.raw(b'\x8B\xCE')                                        # mov ecx, esi (this = inventory)
+    a.call_va(ax.SUB_425590_VA)
+    logc(ord('W'))
+
+    # --- Ammo pump. Bots are spawned without going through the engine's
+    # pickup-event path, which is what normally hands out ammo alongside a
+    # weapon. Result: the force-equipped Primary has zero ammo, the engine
+    # auto-switches off it on the first fire attempt, and the bot ends up
+    # holding whatever weapon happens to have ammo. Workaround: walk the
+    # bot's inventory and set ammo_count (+0x0C, float) to 999.0 on every
+    # populated slot. Energy weapons get full batteries, pool ammo slots
+    # get full pools — symmetric and not weapon-specific.
+    # Layout: inv+0x04 = slot array, each slot is 24 bytes with item_id at
+    # +0x14 (-1 = empty, 0 = uninitialised past the end). ESI is still the
+    # inventory ptr (preserved by __thiscall sub_425590). EBX caps the walk
+    # at 16 slots so we never run off into garbage even if the slot count
+    # field at inv+0x08 reads larger.
+    a.raw(b'\x85\xF6'); a.jz('spawn_skip_ammo')               # test esi, esi
+    a.raw(b'\x8B\x7E\x04')                                    # mov edi, [esi+4]
+    a.raw(b'\x85\xFF'); a.jz('spawn_skip_ammo')
+    a.raw(b'\xBB\x10\x00\x00\x00')                            # mov ebx, 16
+    a.label('spawn_ammo_loop')
+    a.raw(b'\x8B\x47\x14')                                    # mov eax, [edi+0x14] (item_id)
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_ammo')               # 0 -> past end, stop
+    a.raw(b'\x83\xF8\xFF'); a.jz('spawn_ammo_next')           # -1 -> empty, skip
+    a.raw(b'\xC7\x47\x0C\x00\xC0\x79\x44')                    # mov [edi+0x0C], 999.0f
+    a.label('spawn_ammo_next')
+    a.raw(b'\x83\xC7\x18')                                    # add edi, 24
+    a.raw(b'\x4B')                                            # dec ebx
+    a.jnz('spawn_ammo_loop')
+    a.label('spawn_skip_ammo')
+
+    a.label('spawn_skip_force_weapon')
+
     a.label('spawn_skipai')
 
     # Capture host's participant ptr once per match (sentinel 0 = unset).

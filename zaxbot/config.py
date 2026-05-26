@@ -11,10 +11,10 @@ from .build import SectionSpec
 # --- new section parameters (.zaxbot) -------------------------------------
 NEW_SECTION_NAME   = b'.zaxbot\x00'
 NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
-NEW_SECTION_SIZE   = 0x3000        # three pages: code + scratch
+NEW_SECTION_SIZE   = 0x4000        # four pages: code + scratch (bumped for diagnostic blocks)
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
-SCRATCH_OFF        = 0x1600        # writable scratch buffer; ~5.5KB code / ~6.5KB scratch
+SCRATCH_OFF        = 0x1A00        # writable scratch buffer; ~6.5KB code / ~5.5KB scratch
 
 ZAXBOT_SECTION = SectionSpec(
     name=NEW_SECTION_NAME,
@@ -39,11 +39,40 @@ FIRE_RANGE_SQ = 90000.0   # squared distance; bot fires when host is within sqrt
 
 # Projectile speed used for shot leading. Units are engine-world units
 # per pick_target call (≈ per frame), matching the per-frame delta the
-# perception loop uses to estimate target velocity. Single value for now;
-# per-weapon lookup replaces this in a follow-up. Tune by playtesting
-# against a strafing target — if shots over-lead, raise this; if shots
-# under-lead, lower it.
+# perception loop uses to estimate target velocity. This is the FALLBACK
+# used when the bot's current weapon prototype is not listed in
+# WEAPON_SPEEDS below. Hitscan weapons (no projectile) bypass apply_lead
+# entirely and ignore this value.
 PROJECTILE_SPEED = 10.0
+
+# Per-weapon projectile speeds, keyed by the weapon-class vtable VA at
+# [weapon + 0x00]. Same vtable for every player holding the same weapon
+# class, so this is a stable identifier (the previous +0x20 keying was
+# per-instance noise — different value per player). Populate by
+# observation: fire each weapon in-game, press R, read `current_proto_va`
+# from the weapon_info snapshot chunk (despite the legacy name, it now
+# holds the vtable VA), and add a (vtable_va, speed) entry here.
+# Unrecognised vtables fall back to PROJECTILE_SPEED.
+#
+# HITSCAN: use speed = 0.0 as the sentinel — the dispatcher will set
+# is_hitscan and skip apply_lead entirely. Known so far (confirmed via
+# host/PC2 snapshot diff):
+#   0x005EE474 — Rocket Launcher class
+WEAPON_SPEEDS = []  # type: list[tuple[int, float]]
+# Slots reserved in scratch for the runtime lookup; bumping this only costs
+# bytes in .zaxbot scratch, so keep some headroom.
+WEAPON_SPEEDS_MAX = 32
+
+# --- Testing knob: force-equip every freshly-spawned bot with this item -----
+# Bots default to whatever the engine's "Players Initial Inventory" gives
+# them — and since they don't move, they can't pick up replacements. This
+# knob is the only way to exercise per-weapon prediction with different
+# weapons. Set to an integer item id; sub_425590 will equip the bot with
+# that weapon right after spawn (replacing its default Primary). Discover
+# usable item ids by iteration: 0, 1, 2, … until the bot fires the weapon
+# you want. The bot's R-press `weapon_info` snapshot confirms which
+# projectile prototype VA each item id maps to. None disables the override.
+FORCE_BOT_ITEM_ID = None  # type: int | None
 
 # --- Mode-detection override --------------------------------------------
 # Auto-detection (reading [mpd+0] as a vtable) is currently unreliable: mpd

@@ -88,6 +88,36 @@ S5436F0_PROLOGUE = b'\x53\x56\x8B\xF1\x57\x6A\x18'
 # --- atan2-ish helper (used by bot fire/aim) -------------------------------
 SUB_509100    = 0x509100  # __stdcall(dy, dx) -> angle in ST0
 
+# --- Weapon lookup chain (used by bot fire/aim for per-weapon lead speed) --
+# Replicates the lookup sub_543830 itself uses to find the firing weapon:
+#   inv  = sub_4267E0(this=char)                                 ; inventory
+#   hash = sub_523DF0(this=SLOT_NAME_REGISTRY, "Primary", -1)    ; slot hash
+#   item = sub_425290(this=inv, hash)                            ; item id
+#   wpn  = inv.vtable[+0x68](this=inv, item)                     ; weapon obj
+# Hitscan detection: `*(wpn + 0x20) == NULL` (no "Projectiles/Projectile").
+SUB_4267E0_VA              = 0x4267E0   # __thiscall(char) -> inventory*
+SUB_523DF0_VA              = 0x523DF0   # __thiscall(registry, char* name, int) -> hash; ret 8
+SUB_425290_VA              = 0x425290   # __thiscall(inventory, hash) -> item; ret 4
+SLOT_NAME_REGISTRY_VA      = 0x6C0800   # ECX setup for sub_523DF0 (engine global)
+PRIMARY_STR_VA             = 0x60B780   # ASCII "Primary\0..."
+INVENTORY_GET_WEAPON_OFF   = 0x68       # inv.vtable[+0x68](this, item) -> weapon obj
+# weapon.vtable VA at +0x00 is the per-weapon-class identifier — same across
+# every player holding the same weapon. Confirmed by snapshot diff: host's
+# RL and PC2's RL both have [obj+0x00] = 0x005EE474. The previously-assumed
+# +0x20 ("Projectiles/Projectile" property) is actually per-instance noise
+# (a name string on host, a heap-ptr on PC2, a float on bots — useless as
+# a key).
+WEAPON_CLASS_VTBL_OFF      = 0x00
+
+# --- Add-weapon-to-inventory (used by FORCE_BOT_ITEM_ID testing knob) ------
+# __thiscall(this=inv, item_id, slot_hash, a4, a5); ret 0x10.
+# Args matched against the engine's own call at 0x543ACD: push 1; push ebx;
+# push -1; push "Primary"; mov ecx, registry; call sub_523DF0; push eax (=hash);
+# push edi (=item_id); mov ecx, esi (=inv); call sub_425590.
+# a4: void* (engine passes a non-NULL buffer at some sites; we pass 0).
+# a5: auto-equip flag (1 = make this the active weapon).
+SUB_425590_VA              = 0x425590
+
 # --- Engine line-of-sight check (used by monster AI fire decision) ---------
 # __thiscall(this=src_char, target_char, a3, target_off, a5, src_off) -> al
 # Returns 1 if the swept trace from src to target ends at target with no wall

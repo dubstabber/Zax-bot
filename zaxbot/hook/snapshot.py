@@ -50,13 +50,29 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     tag_char_va        = layout.va('tag_char')
     tag_ai_fire_va     = layout.va('tag_ai_fire')
     tag_ai_pos_va      = layout.va('tag_ai_pos')
+    tag_weapon_info_va = layout.va('tag_weapon_info')
+    tag_host_weapon_va = layout.va('tag_host_weapon')
+    tag_pc2_weapon_va  = layout.va('tag_pc2_weapon')
+    tag_host_wpn_bytes_va = layout.va('tag_host_wpn_bytes')
+    tag_pc2_wpn_bytes_va  = layout.va('tag_pc2_wpn_bytes')
+    primary_hash_va    = layout.va('primary_hash')
+    host_weapon_obj_va = layout.va('host_weapon_obj')
+    host_proto_va_va   = layout.va('host_proto_va')
+    host_item_id_va    = layout.va('host_item_id')
+    pc2_weapon_obj_va  = layout.va('pc2_weapon_obj')
+    pc2_proto_va_va    = layout.va('pc2_proto_va')
+    pc2_item_id_va     = layout.va('pc2_item_id')
 
     # Bot-AI scratch dump regions:
     #   ai_fire: best_target through proj_speed (64 bytes from cand_pos onward;
     #            captures best_dx/dy, best_vx/vy, host_part, proj_speed).
     #   ai_pos:  prev_pos_table + cand_vx/vy (144 bytes from prev_pos_table).
-    ai_fire_src_va = layout.va('cand_pos')
-    ai_pos_src_va  = layout.va('prev_pos_table')
+    #   weapon_info: 8 bytes — current_weapon_obj + current_proto_va.
+    #                proj_speed is already covered by ai_fire; is_hitscan can
+    #                be inferred from current_proto_va == 0.
+    ai_fire_src_va     = layout.va('cand_pos')
+    ai_pos_src_va      = layout.va('prev_pos_table')
+    weapon_info_src_va = layout.va('current_weapon_obj')
 
     a.label('do_snapshot')
     # Open zax_dump.bin (append).
@@ -115,6 +131,102 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # Bot-AI scratch dumps for shooting-prediction debugging.
     emit_chunk(tag_ai_fire_va,   b'\xB8' + le32(ai_fire_src_va),         0x40, 'snap_skip_ai_fire')
     emit_chunk(tag_ai_pos_va,    b'\xB8' + le32(ai_pos_src_va),         0x100, 'snap_skip_ai_pos')
+    emit_chunk(tag_weapon_info_va, b'\xB8' + le32(weapon_info_src_va),    0x08, 'snap_skip_weapon_info')
+
+    # --- Host-side weapon lookup (diagnostic). Resolves the host's currently
+    # equipped Primary weapon and stashes (item_id, weapon_obj, proto_va) so
+    # the user can discover valid item ids by picking up weapons in-game and
+    # pressing R. Mirrors compute_proj_speed's chain but on charArray[0]
+    # instead of the bot. Safe because R is pressed long after the host is
+    # fully initialised.
+    a.raw(b'\xC7\x05' + le32(host_weapon_obj_va) + le32(0))
+    a.raw(b'\xC7\x05' + le32(host_proto_va_va) + le32(0))
+    a.raw(b'\xC7\x05' + le32(host_item_id_va) + le32(0xFFFFFFFF))
+    a.raw(b'\xA1' + le32(ax.WORLDMGR_GLOBAL))                 # eax = worldmgr
+    a.raw(b'\x85\xC0'); a.jz('snap_skip_host_wpn')
+    a.raw(b'\x8B\x80\x90\x02\x00\x00')                        # eax = [eax+0x290] (charArray)
+    a.raw(b'\x85\xC0'); a.jz('snap_skip_host_wpn')
+    a.raw(b'\x8B\x08')                                        # ecx = charArray[0] (host char)
+    a.raw(b'\x85\xC9'); a.jz('snap_skip_host_wpn')
+    a.call_va(ax.SUB_4267E0_VA)                               # eax = inv
+    a.raw(b'\x85\xC0'); a.jz('snap_skip_host_wpn')
+    a.raw(b'\x89\xC6')                                        # esi = inv
+    # Lazy-init primary_hash (compute_proj_speed normally warms this; on a
+    # very early R-press it could still be 0).
+    a.raw(b'\x83\x3D' + le32(primary_hash_va) + b'\x00')
+    a.jnz('snap_host_have_hash')
+    a.raw(b'\x6A\xFF')                                        # push -1
+    a.raw(b'\x68' + le32(ax.PRIMARY_STR_VA))
+    a.raw(b'\xB9' + le32(ax.SLOT_NAME_REGISTRY_VA))
+    a.call_va(ax.SUB_523DF0_VA)
+    a.raw(b'\xA3' + le32(primary_hash_va))
+    a.label('snap_host_have_hash')
+    # sub_425290(this=inv, hash) -> item_id
+    a.raw(b'\xFF\x35' + le32(primary_hash_va))                # push [primary_hash]
+    a.raw(b'\x8B\xCE')                                        # ecx = inv
+    a.call_va(ax.SUB_425290_VA)
+    a.raw(b'\xA3' + le32(host_item_id_va))                    # [host_item_id] = eax
+    # inv.vtable[+0x68](inv, item_id) -> weapon obj
+    a.raw(b'\x50')                                            # push eax (item_id)
+    a.raw(b'\x8B\xCE')                                        # ecx = inv
+    a.raw(b'\x8B\x01')                                        # eax = [ecx] (vtable)
+    a.raw(b'\xFF\x50' + bytes([ax.INVENTORY_GET_WEAPON_OFF])) # call [eax+0x68]
+    a.raw(b'\x85\xC0'); a.jz('snap_skip_host_wpn')
+    a.raw(b'\xA3' + le32(host_weapon_obj_va))
+    a.raw(b'\x8B\x10')                                        # edx = [eax]  (weapon class vtable)
+    a.raw(b'\x89\x15' + le32(host_proto_va_va))
+    a.label('snap_skip_host_wpn')
+
+    emit_chunk(tag_host_weapon_va, b'\xB8' + le32(host_weapon_obj_va), 0x0C, 'snap_skip_host_weapon_dump')
+
+    # --- PC2-side weapon lookup (diagnostic). Same chain as the host block
+    # but on worldmgr.charArray[1] — the slot a real remote client takes
+    # when host + PC2 join before any bot is spawned. Lets us compare a
+    # bot's weapon-object layout against an honest non-synthetic client's.
+    a.raw(b'\xC7\x05' + le32(pc2_weapon_obj_va) + le32(0))
+    a.raw(b'\xC7\x05' + le32(pc2_proto_va_va) + le32(0))
+    a.raw(b'\xC7\x05' + le32(pc2_item_id_va) + le32(0xFFFFFFFF))
+    a.raw(b'\xA1' + le32(ax.WORLDMGR_GLOBAL))                 # eax = worldmgr
+    a.raw(b'\x85\xC0'); a.jz('snap_skip_pc2_wpn')
+    a.raw(b'\x8B\x80\x90\x02\x00\x00')                        # eax = [eax+0x290] (charArray)
+    a.raw(b'\x85\xC0'); a.jz('snap_skip_pc2_wpn')
+    a.raw(b'\x8B\x48\x04')                                    # ecx = charArray[1] (PC2 if present)
+    a.raw(b'\x85\xC9'); a.jz('snap_skip_pc2_wpn')
+    a.call_va(ax.SUB_4267E0_VA)                               # eax = inv
+    a.raw(b'\x85\xC0'); a.jz('snap_skip_pc2_wpn')
+    a.raw(b'\x89\xC6')                                        # esi = inv
+    # primary_hash is shared (process-wide); should already be warmed by the
+    # host block above or compute_proj_speed.
+    a.raw(b'\x83\x3D' + le32(primary_hash_va) + b'\x00')
+    a.jnz('snap_pc2_have_hash')
+    a.raw(b'\x6A\xFF')
+    a.raw(b'\x68' + le32(ax.PRIMARY_STR_VA))
+    a.raw(b'\xB9' + le32(ax.SLOT_NAME_REGISTRY_VA))
+    a.call_va(ax.SUB_523DF0_VA)
+    a.raw(b'\xA3' + le32(primary_hash_va))
+    a.label('snap_pc2_have_hash')
+    a.raw(b'\xFF\x35' + le32(primary_hash_va))                # push [primary_hash]
+    a.raw(b'\x8B\xCE')                                        # ecx = inv
+    a.call_va(ax.SUB_425290_VA)
+    a.raw(b'\xA3' + le32(pc2_item_id_va))                     # [pc2_item_id] = eax
+    a.raw(b'\x50')                                            # push eax (item_id)
+    a.raw(b'\x8B\xCE')                                        # ecx = inv
+    a.raw(b'\x8B\x01')                                        # eax = [ecx] (vtable)
+    a.raw(b'\xFF\x50' + bytes([ax.INVENTORY_GET_WEAPON_OFF])) # call [eax+0x68]
+    a.raw(b'\x85\xC0'); a.jz('snap_skip_pc2_wpn')
+    a.raw(b'\xA3' + le32(pc2_weapon_obj_va))
+    a.raw(b'\x8B\x10')                                        # edx = [eax]  (weapon class vtable)
+    a.raw(b'\x89\x15' + le32(pc2_proto_va_va))
+    a.label('snap_skip_pc2_wpn')
+
+    emit_chunk(tag_pc2_weapon_va, b'\xB8' + le32(pc2_weapon_obj_va), 0x0C, 'snap_skip_pc2_weapon_dump')
+
+    # --- Raw 128-byte dumps of each weapon object so we can compare layouts
+    # and pick a stable per-weapon key (vtable at +0x00 is the most likely
+    # candidate). `ptr_load` here uses `mov eax, [scratch]` (opcode A1) so
+    # the source is the weapon-obj pointer stored at host/pc2_weapon_obj.
+    emit_chunk(tag_host_wpn_bytes_va, b'\xA1' + le32(host_weapon_obj_va), 0x80, 'snap_skip_host_wpn_b')
+    emit_chunk(tag_pc2_wpn_bytes_va,  b'\xA1' + le32(pc2_weapon_obj_va),  0x80, 'snap_skip_pc2_wpn_b')
 
     # 7-9. Per-participant iteration: dpmgr.array[0..count). Entries are direct
     # 280B participant pointers — no -0x3C sink dance.

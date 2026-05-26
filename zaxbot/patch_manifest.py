@@ -1,7 +1,7 @@
 """Patch-site manifest for installing .zaxbot detours into the original PE."""
 
 from . import addresses as ax
-from .pe import RelocationPatch
+from .pe import RawBytePatch, RelocationPatch
 
 
 def build_enabled_patches():
@@ -49,6 +49,48 @@ def build_enabled_patches():
         RelocationPatch(
             'sub_4F5150 char iter null-skip', 'jmp', ax.S4F5204_VA,
             ax.S4F5204_ORIG, 'detour_4F5204_va', 6,
+        ),
+        # Inline NULL-guard for sub_4FC8A0 (the positional-sound dispatch
+        # wrapper). The function does `mov ecx, [ecx+0x48]; call sub_4EA880`
+        # — when called on a synthetic-DP bot whose audio emitter at +0x48
+        # isn't initialised, ECX comes in as the bot char (or a derived
+        # field that's NULL) and the deref faults. The engine's give-weapon
+        # path (sub_425590) routes through here unconditionally — neither
+        # a5=0 nor a5=1 avoids it — so we patch the function itself to skip
+        # the sound when ECX is NULL.
+        #
+        # Original 21-byte function + 4 padding bytes get replaced with a
+        # 25-byte NULL-tolerant version. The trailing 7 padding NOPs after
+        # the function are untouched. New `jz +0xE` target is the same `ret`
+        # the original `jz +0xA` hit; the second jz (after `test ecx, ecx`)
+        # jumps to the same ret. The call rel32 is re-encoded for the new
+        # instruction offset.
+        RawBytePatch(
+            'sub_4FC8A0 NULL-tolerant audio dispatch',
+            va=0x4FC8A0,
+            original=(
+                b'\x8B\x44\x24\x04'      # mov eax, [esp+4]
+                b'\x85\xC0'              # test eax, eax
+                b'\x74\x0A'              # jz +0xA (to ret)
+                b'\x51'                  # push ecx
+                b'\x8B\x49\x48'          # mov ecx, [ecx+0x48]  <-- original crash
+                b'\x50'                  # push eax
+                b'\xE8\xCE\xDF\xFE\xFF'  # call sub_4EA880
+                b'\xC2\x04\x00'          # ret 4
+                b'\x90\x90\x90\x90'      # 4 of the 11 trailing NOPs
+            ),
+            replacement=(
+                b'\x8B\x44\x24\x04'      # mov eax, [esp+4]
+                b'\x85\xC0'              # test eax, eax
+                b'\x74\x0E'              # jz +0xE -> 0x4FC8B6 (ret)
+                b'\x85\xC9'              # test ecx, ecx        (NEW)
+                b'\x74\x0A'              # jz +0xA -> 0x4FC8B6  (NEW)
+                b'\x51'                  # push ecx
+                b'\x8B\x49\x48'          # mov ecx, [ecx+0x48]
+                b'\x50'                  # push eax
+                b'\xE8\xCA\xDF\xFE\xFF'  # call sub_4EA880 (rel32 re-encoded)
+                b'\xC2\x04\x00'          # ret 4
+            ),
         ),
     )
 

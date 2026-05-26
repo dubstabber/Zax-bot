@@ -21,6 +21,11 @@ DUMP_TAGS = (
     ('tag_charptr', 'charptr'),
     ('tag_ai_fire', 'ai_fire'),
     ('tag_ai_pos',  'ai_pos'),
+    ('tag_weapon_info', 'weapon_info'),
+    ('tag_host_weapon', 'host_weapon'),
+    ('tag_pc2_weapon',  'pc2_weapon'),
+    ('tag_host_wpn_bytes', 'host_wpn_b'),
+    ('tag_pc2_wpn_bytes',  'pc2_wpn_b'),
 )
 
 
@@ -82,6 +87,8 @@ def write_static_scratch_data(
     prompt_sk_va,
     fire_range_sq=90000.0,
     projectile_speed=600.0,
+    weapon_speeds=(),
+    force_bot_item_id=None,
     force_mode=None,
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
@@ -106,7 +113,30 @@ def write_static_scratch_data(
     layout.write(section, scratch_off, 'max_for_mode', max_for_mode)
     layout.write(section, scratch_off, 'prompts_table', prompts_table)
     layout.write(section, scratch_off, 'fire_range_sq', struct.pack('<f', fire_range_sq))
+    # proj_speed is what apply_lead reads each frame; compute_proj_speed
+    # rewrites it per fire call. default_proj_speed is the immutable fallback
+    # copied in when the current weapon's prototype isn't in WEAPON_SPEEDS.
     layout.write(section, scratch_off, 'proj_speed', struct.pack('<f', projectile_speed))
+    layout.write(section, scratch_off, 'default_proj_speed', struct.pack('<f', projectile_speed))
+
+    # Pack WEAPON_SPEEDS into the runtime table. Each entry is (proto_va u32,
+    # speed float). Terminated by a (0, 0.0) sentinel; the asm scan stops on
+    # the first zero proto_va. Empty list → first dword is 0 → no matches.
+    weapon_field = layout.field('weapon_table')
+    max_entries = weapon_field.size // 8 - 1  # one slot reserved for sentinel
+    if len(weapon_speeds) > max_entries:
+        raise ValueError(
+            f'WEAPON_SPEEDS has {len(weapon_speeds)} rows but scratch holds '
+            f'{max_entries} (raise cfg.WEAPON_SPEEDS_MAX)'
+        )
+    packed = b''.join(struct.pack('<If', proto_va, speed)
+                       for proto_va, speed in weapon_speeds)
+    packed += struct.pack('<If', 0, 0.0)  # sentinel
+    layout.write(section, scratch_off, 'weapon_table', packed)
+
+    # FORCE_BOT_ITEM_ID — 0xFFFFFFFF sentinel means "no override".
+    forced_item = 0xFFFFFFFF if force_bot_item_id is None else (force_bot_item_id & 0xFFFFFFFF)
+    layout.write(section, scratch_off, 'force_bot_item_id', struct.pack('<I', forced_item))
 
     # The dump header magic is written once; runtime code rewrites tag/src/len.
     layout.write(section, scratch_off, 'thdr', struct.pack('<I', dump_magic))

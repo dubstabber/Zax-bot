@@ -38,6 +38,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     bot_slot_tmp_va    = layout.va('bot_slot_tmp')
     our_team_tmp_va    = layout.va('our_team_tmp')
     bot_char_tmp_va    = layout.va('bot_char_tmp')
+    is_hitscan_va      = layout.va('is_hitscan')
 
     a.label('detour_5436F0')
 
@@ -70,11 +71,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x84\xC0')                                    # test al, al
     a.jz('s5436f0_no_fire')
 
-    # --- (5) Lead the target: rewrite best_dx/best_dy with the predicted
-    # intercept point. apply_lead reads best_dist_sq + best_vx/vy + proj_speed
-    # from scratch (all populated by pick_target / the build-time init), so
-    # the existing sub_509100 call below keeps working unchanged.
-    a.call_lbl('apply_lead')
+    # --- (5) Dispatch on the bot's current weapon. compute_proj_speed writes
+    # `proj_speed` (per-weapon match, or default fallback) and `is_hitscan`
+    # (1 if the weapon fires no projectile). Hitscan weapons skip apply_lead
+    # entirely — they hit instantly, so leading would just steer shots off
+    # the target.
+    a.call_lbl('compute_proj_speed')
+    a.raw(b'\x83\x3D' + le32(is_hitscan_va) + b'\x00')    # cmp [is_hitscan], 0
+    a.jnz('s5436f0_skip_lead')
+    a.call_lbl('apply_lead')                              # rewrite best_dx/best_dy
+    a.label('s5436f0_skip_lead')
 
     # --- (6) Convert (dx, dy) -> angle and write to out.
     a.raw(b'\xFF\x35' + le32(best_dx_va))                 # push [best_dx]
