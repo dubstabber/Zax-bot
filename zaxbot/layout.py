@@ -130,6 +130,10 @@ def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, n
         # the on-screen name was picked from.
         ScratchField('bot_colors', 0x300, num_bot_names * 8, 'per-name (u32 c1, u32 c2)'),
         ScratchField('picked_name_idx', 0x3A0, 0x04, 'idx into bot_names / bot_colors'),
+        # Per-match "this name is taken" bitmap, parallel to BOT_NAMES.
+        # Byte == 0 means the slot is free, != 0 means claimed by a live bot.
+        # Cleared by detour_df90 when cap_a2 flips (new match).
+        ScratchField('used_names', 0x3A8, num_bot_names, 'per-name claimed flag (byte)'),
         ScratchField('thdr', 0x700, 0x04),
         ScratchField('thdr_tag', 0x704, 0x10),
         ScratchField('thdr_src_va', 0x714, 0x04),

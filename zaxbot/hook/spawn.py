@@ -53,6 +53,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     bot_names_ascii_va  = layout.va('bot_names_ascii')
     bot_colors_va       = layout.va('bot_colors')
     picked_name_idx_va  = layout.va('picked_name_idx')
+    used_names_va       = layout.va('used_names')
     msg_va              = layout.va('msg')
     msg_full_va         = layout.va('msg_full')
 
@@ -238,7 +239,29 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x6A\x00')                                         # push 0
     a.raw(b'\xB9' + le32(ax.RNG_OBJ_VA))                       # mov ecx, RNG
     a.call_va(ax.RNG_SUB)                                      # eax = idx in [0,NUM-1]
-    a.raw(b'\xA3' + le32(picked_name_idx_va))                  # mov [picked_name_idx], eax
+    # Ensure the picked name is unique across all live bots in this match.
+    # used_names[i] != 0 means slot i is already claimed. Linear-scan forward
+    # from the rolled idx (wrapping once) for the first free slot; that's the
+    # one we claim. Worst case after NUM steps every slot is taken — which can
+    # only happen if more bots than names live at once (MAX_BOT_SLOTS bots vs
+    # NUM_BOT_NAMES names) — in which case we fall through and re-use the
+    # rolled idx so spawning still succeeds. The claim is cleared on match
+    # change by detour_df90 (alongside the bot scratch arrays), so each new
+    # match starts with every name available again.
+    a.raw(b'\xB9' + le32(cfg.NUM_BOT_NAMES))                  # mov ecx, NUM_BOT_NAMES
+    a.label('uname_search')
+    a.raw(b'\x80\xB8' + le32(used_names_va) + b'\x00')        # cmp byte [eax+used_names], 0
+    a.jz('uname_found')
+    a.raw(b'\x40')                                             # inc eax
+    a.raw(b'\x3D' + le32(cfg.NUM_BOT_NAMES))                  # cmp eax, NUM_BOT_NAMES
+    a.jb('uname_no_wrap')
+    a.raw(b'\x31\xC0')                                         # xor eax, eax  (wrap to 0)
+    a.label('uname_no_wrap')
+    a.raw(b'\x49')                                             # dec ecx
+    a.jnz('uname_search')
+    a.label('uname_found')
+    a.raw(b'\xC6\x80' + le32(used_names_va) + b'\x01')        # mov byte [eax+used_names], 1
+    a.raw(b'\xA3' + le32(picked_name_idx_va))                 # mov [picked_name_idx], eax
     a.raw(b'\x8B\x0D' + le32(botidx_va))                       # ecx = botidx
     a.call_va(ax.SUB_5BA820)                                   # eax = bot stats
     a.raw(b'\x85\xC0'); a.jz('spawn_skip_prewrite')

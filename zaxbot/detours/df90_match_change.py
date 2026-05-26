@@ -11,6 +11,7 @@ newly-allocated match-2 objects. (This was Bug 1: stale
 movement vector in subsequent matches.)"""
 
 from .. import addresses as ax
+from .. import config as cfg
 from ..asm import Asm, le32
 from ..layout import ScratchLayout
 
@@ -20,6 +21,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     bot_participants_va = layout.va('bot_participants')
     bot_team_va         = layout.va('bot_team')
     host_part_va        = layout.va('host_part')
+    used_names_va       = layout.va('used_names')
 
     a.label('detour_df90')
     a.raw(b'\x50')                                # push eax
@@ -42,6 +44,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # spawn re-captures it. Must be 0 (not -1) so fire/aim's `test eax`
     # guard works without dereferencing a bogus pointer.
     a.raw(b'\xC7\x05' + le32(host_part_va) + le32(0))
+    # Reset the per-match "name claimed" bitmap so every bot name is
+    # available again. Without this, names claimed in match N would stay
+    # marked-as-used across to match N+1, eventually starving the linear
+    # search in spawn.py and forcing duplicate name re-use.
+    a.raw(b'\xBF' + le32(used_names_va))          # mov edi, used_names_va
+    a.raw(b'\xB9' + le32(cfg.NUM_BOT_NAMES))      # mov ecx, NUM_BOT_NAMES
+    a.raw(b'\x31\xC0')                            # xor eax, eax
+    a.raw(b'\xF3\xAA')                            # rep stosb
     # Once we've pre-grown mgr+0x290 to 16 entries (match 1 onwards), the
     # buffer outlives the match: slots populated by match N can still hold
     # freed char pointers at the start of match N+1. Per-frame fire/aim
