@@ -13,7 +13,7 @@ from .. import config as cfg
 from ..asm import Asm
 from ..layout import build_scratch_layout
 from ..static_data import write_static_scratch_data
-from . import apply_colors, detect_mode, dispatcher, snapshot, spawn
+from . import aim_lead, apply_colors, detect_mode, dispatcher, snapshot, spawn
 from .helpers import emit_logc_body, emit_wbuf_body
 from ..detours import (
     bot_fire_aim,
@@ -98,6 +98,7 @@ def build_hook(section_va_abs):
     # (works either way since Asm.link() is a two-pass linker, but emit
     # order also fixes the absolute VAs, so we keep perception adjacent).
     bot_perception.emit(a, layout)
+    aim_lead.emit(a, layout)
     bot_fire_aim.emit(a, layout)
     spawn_safety.emit(a, layout)
     name_block.emit(a, layout)
@@ -127,6 +128,8 @@ def build_hook(section_va_abs):
         prompt_dm_va=layout.va('prompt_dm'),
         prompt_ctf_va=layout.va('prompt_ctf'),
         prompt_sk_va=layout.va('prompt_sk'),
+        fire_range_sq=cfg.FIRE_RANGE_SQ,
+        projectile_speed=cfg.PROJECTILE_SPEED,
         force_mode=cfg.FORCE_MODE,
     )
 

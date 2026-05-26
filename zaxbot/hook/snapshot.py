@@ -48,6 +48,15 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     tag_cstr_va        = layout.va('tag_cstr')
     tag_charptr_va     = layout.va('tag_charptr')
     tag_char_va        = layout.va('tag_char')
+    tag_ai_fire_va     = layout.va('tag_ai_fire')
+    tag_ai_pos_va      = layout.va('tag_ai_pos')
+
+    # Bot-AI scratch dump regions:
+    #   ai_fire: best_target through proj_speed (64 bytes from cand_pos onward;
+    #            captures best_dx/dy, best_vx/vy, host_part, proj_speed).
+    #   ai_pos:  prev_pos_table + cand_vx/vy (144 bytes from prev_pos_table).
+    ai_fire_src_va = layout.va('cand_pos')
+    ai_pos_src_va  = layout.va('prev_pos_table')
 
     a.label('do_snapshot')
     # Open zax_dump.bin (append).
@@ -102,6 +111,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     emit_chunk(tag_worldmgr_va,  b'\xA1' + le32(ax.WORLDMGR_GLOBAL),   0x400, 'snap_skip_wm')
     emit_chunk(tag_dpmgr_va,     b'\xA1' + le32(cap_dpmgr),           0x1000, 'snap_skip_dp')
     emit_chunk(tag_idx_nbhd_va,  b'\xB8\x00\x29\x6C\x00',              0x100, 'snap_skip_idx')
+
+    # Bot-AI scratch dumps for shooting-prediction debugging.
+    emit_chunk(tag_ai_fire_va,   b'\xB8' + le32(ai_fire_src_va),         0x40, 'snap_skip_ai_fire')
+    emit_chunk(tag_ai_pos_va,    b'\xB8' + le32(ai_pos_src_va),         0x100, 'snap_skip_ai_pos')
 
     # 7-9. Per-participant iteration: dpmgr.array[0..count). Entries are direct
     # 280B participant pointers — no -0x3C sink dance.

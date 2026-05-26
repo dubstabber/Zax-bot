@@ -161,6 +161,12 @@ def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, n
         ScratchField('our_team_tmp', bot_state_end + 0x28, 0x04, 'fire/aim: bot team id, -1 = no CTF filter'),
         ScratchField('bot_char_tmp', bot_state_end + 0x2C, 0x04, 'fire/aim: firing bot char ptr'),
         ScratchField('host_part', 0x2F0, 0x04, 'fire/aim: cached host participant ptr (team read live from +0x14)'),
+        # Leading-shot fields live in the 12-byte gap between host_part and
+        # bot_colors. Kept out of the bot_state_end + N block so host_part
+        # stays at its grep-stable 0x2F0 absolute offset.
+        ScratchField('best_vx',    0x2F4, 0x04, 'fire/aim: winning target velocity x (for lead)'),
+        ScratchField('best_vy',    0x2F8, 0x04, 'fire/aim: winning target velocity y (for lead)'),
+        ScratchField('proj_speed', 0x2FC, 0x04, 'fire/aim: projectile speed (from cfg.PROJECTILE_SPEED)'),
     ])
     fields.extend([
         # Per-name color tables. bot_colors holds (color1, color2) dword pairs
@@ -199,8 +205,26 @@ def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, n
         ScratchField('my_queue_slot', 0x804, 0x04),
         ScratchField('synthetic_player_id', 0x808, 0x04),
         ScratchField('phase_b_in_flight', 0x80C, 0x04),
+        # Diagnostic tags for the bot-AI scratch dump. ai_fire covers the
+        # per-call fire/aim region (best_target through proj_speed); ai_pos
+        # covers prev_pos_table + cand_vx/cand_vy.
+        ScratchField('tag_ai_fire', 0x810, 0x10),
+        ScratchField('tag_ai_pos',  0x820, 0x10),
         ScratchField('bot_names', 0x900, num_bot_names * name_slot_size),
         ScratchField('bot_names_ascii', 0xB80, num_bot_names * name_slot_ascii),
+        # Per-bot, per-char-slot last-seen position cache for the lead-shot
+        # velocity estimate. The engine does not expose a live velocity field
+        # on player characters (the CEntityMovable +0xE8/+0xEC fields stay 0),
+        # so we fingerprint velocity as (curr_pos - prev_pos) across two
+        # consecutive pick_target calls for THIS BOT. Keying on the bot slot
+        # (not just cand_idx) is required because multiple bots fire in the
+        # same frame: a shared table would let bot N+1 see prev_pos already
+        # overwritten by bot N's call this frame, collapsing the delta to 0.
+        # Indexed as table[bot_slot * 16 + cand_idx]; 16 × 16 entries × 8B.
+        # Zero-initialised; first-visit delta is suppressed by the asm.
+        ScratchField('prev_pos_table', 0xCC0, 16 * 16 * 8, 'fire/aim: per-(bot,cand) last-seen pos (16×16×2 floats)'),
+        ScratchField('cand_vx',        0x14C0, 0x04, 'fire/aim: current cand velocity x (delta vs prev)'),
+        ScratchField('cand_vy',        0x14C4, 0x04, 'fire/aim: current cand velocity y (delta vs prev)'),
     ])
     return ScratchLayout(base_va, scratch_size, fields)
 

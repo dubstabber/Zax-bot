@@ -70,7 +70,13 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x84\xC0')                                    # test al, al
     a.jz('s5436f0_no_fire')
 
-    # --- (5) Convert (dx, dy) -> angle and write to out.
+    # --- (5) Lead the target: rewrite best_dx/best_dy with the predicted
+    # intercept point. apply_lead reads best_dist_sq + best_vx/vy + proj_speed
+    # from scratch (all populated by pick_target / the build-time init), so
+    # the existing sub_509100 call below keeps working unchanged.
+    a.call_lbl('apply_lead')
+
+    # --- (6) Convert (dx, dy) -> angle and write to out.
     a.raw(b'\xFF\x35' + le32(best_dx_va))                 # push [best_dx]
     a.raw(b'\xFF\x35' + le32(best_dy_va))                 # push [best_dy]
     a.call_va(ax.SUB_509100)                              # __stdcall, st0 = angle

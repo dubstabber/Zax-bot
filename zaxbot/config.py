@@ -14,7 +14,7 @@ NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
 NEW_SECTION_SIZE   = 0x3000        # three pages: code + scratch
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
-SCRATCH_OFF        = 0x1400        # writable scratch buffer; 5KB code / 7KB scratch
+SCRATCH_OFF        = 0x1600        # writable scratch buffer; ~5.5KB code / ~6.5KB scratch
 
 ZAXBOT_SECTION = SectionSpec(
     name=NEW_SECTION_NAME,
@@ -36,6 +36,14 @@ STEP_FILENAME = b'zax_step.log\x00'   # one-letter progress markers, flushed per
 
 # --- Bot fire/aim policy -------------------------------------------------
 FIRE_RANGE_SQ = 90000.0   # squared distance; bot fires when host is within sqrt(FIRE_RANGE_SQ)
+
+# Projectile speed used for shot leading. Units are engine-world units
+# per pick_target call (≈ per frame), matching the per-frame delta the
+# perception loop uses to estimate target velocity. Single value for now;
+# per-weapon lookup replaces this in a follow-up. Tune by playtesting
+# against a strafing target — if shots over-lead, raise this; if shots
+# under-lead, lower it.
+PROJECTILE_SPEED = 10.0
 
 # --- Mode-detection override --------------------------------------------
 # Auto-detection (reading [mpd+0] as a vtable) is currently unreliable: mpd

@@ -56,9 +56,15 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     best_dist_sq_va    = layout.va('best_dist_sq')
     best_dx_va         = layout.va('best_dx')
     best_dy_va         = layout.va('best_dy')
+    best_vx_va         = layout.va('best_vx')
+    best_vy_va         = layout.va('best_vy')
+    cand_vx_va         = layout.va('cand_vx')
+    cand_vy_va         = layout.va('cand_vy')
+    prev_pos_table_va  = layout.va('prev_pos_table')
     cand_idx_va        = layout.va('cand_idx')
     our_team_tmp_va    = layout.va('our_team_tmp')
     bot_char_tmp_va    = layout.va('bot_char_tmp')
+    bot_slot_tmp_va    = layout.va('bot_slot_tmp')
 
     a.label('pick_target')
 
@@ -124,6 +130,50 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # reaching here (the team-filter side branches only touch EAX/EDX).
     a.raw(b'\x68' + le32(cand_pos_va))                    # push &cand_pos
     a.call_va(ax.SUB_4FB0A0_VA)                           # __thiscall, ret 4
+
+    # --- Velocity estimate from per-(bot, candidate) last-seen position.
+    # The engine does not expose a live velocity field on player characters
+    # (the registered CEntityMovable Velocity X/Y at +0xE8/+0xEC stay 0 on
+    # the host — verified by snapshotting a strafing player). So we
+    # fingerprint velocity as (curr_pos − prev_pos) across two consecutive
+    # pick_target calls for THIS bot.
+    #
+    # Keying on (bot_slot, cand_idx) instead of cand_idx alone is required:
+    # multiple bots fire in the same frame, so a shared table would let
+    # bot N+1 read prev_pos already overwritten by bot N's call this frame,
+    # producing delta = 0 and no lead. Each bot keeps its own 16-entry view.
+    #
+    # First-frame guard: if prev == (0, 0) (uninit slot — zero-init at load
+    # time), we skip the delta and write a zero velocity instead. Otherwise
+    # the first frame after spawn would lead by the full world position and
+    # send the shot off-map.
+    #
+    # prev_pos_table is updated unconditionally afterward so the next visit
+    # has a real reference. EDX is loaded with &prev_pos[bot_slot][cand_idx]
+    # and reused for both the read-back and the update.
+    a.raw(b'\x8B\x15' + le32(bot_slot_tmp_va))            # mov edx, [bot_slot_tmp]
+    a.raw(b'\xC1\xE2\x04')                                # shl edx, 4  (× 16 entries / row)
+    a.raw(b'\x03\x15' + le32(cand_idx_va))                # add edx, [cand_idx]
+    a.raw(b'\x8D\x14\xD5' + le32(prev_pos_table_va))      # lea edx, [edx*8 + prev_pos_table]
+    a.raw(b'\x8B\x02')                                    # mov eax, [edx]      prev x
+    a.raw(b'\x0B\x42\x04')                                # or  eax, [edx+4]    | prev y
+    a.jnz('pick_have_prev')
+    a.raw(b'\xC7\x05' + le32(cand_vx_va) + le32(0))       # cand_vx = 0
+    a.raw(b'\xC7\x05' + le32(cand_vy_va) + le32(0))       # cand_vy = 0
+    a.jmp('pick_update_prev')
+    a.label('pick_have_prev')
+    a.raw(b'\xD9\x05' + le32(cand_pos_va))                # fld  [cand_pos.x]
+    a.raw(b'\xD8\x22')                                    # fsub [edx]
+    a.raw(b'\xD9\x1D' + le32(cand_vx_va))                 # fstp [cand_vx]
+    a.raw(b'\xD9\x05' + le32(cand_pos_va + 4))            # fld  [cand_pos.y]
+    a.raw(b'\xD8\x62\x04')                                # fsub [edx+4]
+    a.raw(b'\xD9\x1D' + le32(cand_vy_va))                 # fstp [cand_vy]
+    a.label('pick_update_prev')
+    a.raw(b'\xA1' + le32(cand_pos_va))                    # eax = cand_pos.x
+    a.raw(b'\x89\x02')                                    # [edx]   = eax
+    a.raw(b'\xA1' + le32(cand_pos_va + 4))                # eax = cand_pos.y
+    a.raw(b'\x89\x42\x04')                                # [edx+4] = eax
+
     emit_dist_sq_2d(a, cand_pos_va, bot_pos_va,
                     dx_out_va=bot_dx_va,
                     dy_out_va=bot_dy_va,
@@ -140,7 +190,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.call_va(ax.SUB_491380_VA)                           # __thiscall, ret 14h
     a.raw(b'\x84\xC0'); a.jz('pick_next')
 
-    # --- New best — record target, distance², and aim deltas.
+    # --- New best — record target, distance², aim deltas, and the candidate's
+    # estimated velocity (already computed earlier in this iteration from the
+    # prev_pos_table delta). The velocity is committed only when a candidate
+    # wins; non-best candidates' prev_pos values are still updated above so
+    # next-frame deltas remain accurate regardless of who is chosen.
     a.raw(b'\xA1' + le32(cand_tmp_va))
     a.raw(b'\xA3' + le32(best_target_va))
     a.raw(b'\xA1' + le32(curr_dist_sq_va))
@@ -149,6 +203,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xA3' + le32(best_dx_va))
     a.raw(b'\xA1' + le32(bot_dy_va))
     a.raw(b'\xA3' + le32(best_dy_va))
+    a.raw(b'\xA1' + le32(cand_vx_va))
+    a.raw(b'\xA3' + le32(best_vx_va))
+    a.raw(b'\xA1' + le32(cand_vy_va))
+    a.raw(b'\xA3' + le32(best_vy_va))
 
     a.label('pick_next')
     a.raw(b'\xFF\x05' + le32(cand_idx_va))                # inc dword [cand_idx]

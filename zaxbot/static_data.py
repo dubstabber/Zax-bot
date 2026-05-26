@@ -19,6 +19,8 @@ DUMP_TAGS = (
     ('tag_mgr_root', 'mgr_root'),
     ('tag_session', 'session'),
     ('tag_charptr', 'charptr'),
+    ('tag_ai_fire', 'ai_fire'),
+    ('tag_ai_pos',  'ai_pos'),
 )
 
 
@@ -79,6 +81,7 @@ def write_static_scratch_data(
     prompt_ctf_va,
     prompt_sk_va,
     fire_range_sq=90000.0,
+    projectile_speed=600.0,
     force_mode=None,
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
@@ -103,6 +106,7 @@ def write_static_scratch_data(
     layout.write(section, scratch_off, 'max_for_mode', max_for_mode)
     layout.write(section, scratch_off, 'prompts_table', prompts_table)
     layout.write(section, scratch_off, 'fire_range_sq', struct.pack('<f', fire_range_sq))
+    layout.write(section, scratch_off, 'proj_speed', struct.pack('<f', projectile_speed))
 
     # The dump header magic is written once; runtime code rewrites tag/src/len.
     layout.write(section, scratch_off, 'thdr', struct.pack('<I', dump_magic))
