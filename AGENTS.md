@@ -28,7 +28,7 @@ The detailed notes live in `docs/`:
   - `detours/` - capture, safety, controller, fire/aim detours.
 - `zax_dump.bin` - appendable tagged runtime snapshots written by R.
 - `tools/diffdump.py` - parser/comparator for `zax_dump.bin`.
-- `zax_step.log` - one-byte spawn progress markers (`A/M/2/B/C/D/S/T/P/E/V/N/F`).
+- `zax_step.log` - one-byte spawn progress markers (`A/M/2/B/C/D/S/T/P/E/V/N/F/W`).
 
 ## Build and test
 
@@ -45,8 +45,8 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 
 - WM_KEYDOWN hook at `0x599A1A` redirects `call sub_599580` to
   `.zaxbot:hook_entry`, then tail-jumps back to `sub_599580`.
-- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x2000`, RWX.
-- Scratch starts at `0x71B200` (`SCRATCH_OFF = 0x1200`).
+- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x4000`, RWX.
+- Scratch starts at `0x71C000` (`SCRATCH_OFF = 0x2000`).
 - B opens the bot menu via `sub_59B260`; R writes a runtime snapshot.
 - Digit selection calls `do_spawn_with_team`.
 - Spawn injects a synthetic DirectPlay "player added" queue entry at
@@ -104,6 +104,11 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 - Bots do not navigate. They keep a walking controller for idle animation;
   `detour_542360` zeroes movement, and `detour_5436F0` synthesizes aim/fire
   toward the host when range and line of sight allow it.
+- `zaxbot/config.py` can force newly spawned bots to equip an inventory item
+  by name (`FORCE_BOT_ITEM_NAME`, currently `Missile Launcher`) for lead-shot
+  testing. The force path resolves the engine item definition by name, creates
+  a transient pickup item for the new bot, then switches the bot's Primary slot
+  to the bot-local item index.
 
 ## Enabled detours
 

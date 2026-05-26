@@ -96,6 +96,27 @@ keeps the controller and captures it:
 Net result: bots are stationary, animate idly, and can shoot at the host, but
 they do not navigate.
 
+## Debug weapon override
+
+Newly spawned bots can be force-equipped for lead-shot testing without changing
+runtime input handling. In `zaxbot/config.py`, set `FORCE_BOT_ITEM_NAME` to an
+inventory item name such as `Missile Launcher`, or add names to
+`DEBUG_BOT_WEAPON_NAMES` and select one with `DEBUG_BOT_WEAPON_INDEX`. The
+direct override wins if both are set. `None` disables the override and leaves
+the default loadout intact.
+
+The spawn path applies the selected item after character creation by resolving
+the engine inventory item definition by name, creating the same transient
+pickup item the XmasShopping cheat creates, applying it only to the new bot,
+then calling `sub_425590` on the bot inventory to auto-equip it into `Primary`.
+Existing bots are not re-equipped; rebuild with `python3 zax_patch.py` and spawn
+a new bot after changing the config.
+
+Use R snapshots to confirm the active weapon: `weapon_info` records the bot's
+last firing weapon object and inventory item-definition pointer, while
+`host_weapon`/`pc2_weapon` record comparable local item ids and item-definition
+pointers for real players.
+
 ## What is finished
 
 - Host-side B/digit spawn path.

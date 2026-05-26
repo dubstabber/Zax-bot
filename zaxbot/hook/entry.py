@@ -133,7 +133,7 @@ def build_hook(section_va_abs):
         fire_range_sq=cfg.FIRE_RANGE_SQ,
         projectile_speed=cfg.PROJECTILE_SPEED,
         weapon_speeds=cfg.WEAPON_SPEEDS,
-        force_bot_item_id=cfg.FORCE_BOT_ITEM_ID,
+        force_bot_item_name=cfg.resolve_force_bot_item_name(),
         force_mode=cfg.FORCE_MODE,
     )
 

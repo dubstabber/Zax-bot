@@ -3,10 +3,11 @@ import struct
 import unittest
 
 import zax_patch
+from zaxbot import config as cfg
 from zaxbot.asm import Asm, le32
 from zaxbot.build import build_patched_image as build_section_image
 from zaxbot.layout import ScratchField, ScratchLayout, build_scratch_layout
-from zaxbot.pe import PEImage
+from zaxbot.pe import PEImage, RawBytePatch, RelocationPatch
 from zaxbot.patch_manifest import apply_patches
 from zaxbot.static_data import pack_tag, write_bot_name_tables, write_static_scratch_data
 
@@ -58,11 +59,12 @@ class PEImageTests(unittest.TestCase):
 class ScratchLayoutTests(unittest.TestCase):
     def test_current_layout_has_expected_anchor_offsets(self):
         layout = build_scratch_layout(
-            0x71B200,
+            zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA + zax_patch.SCRATCH_OFF,
             zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF,
             zax_patch.NUM_BOT_NAMES,
             zax_patch.NAME_SLOT_SIZE,
             zax_patch.NAME_SLOT_ASCII,
+            cfg.WEAPON_SPEEDS_MAX,
         )
 
         self.assertEqual(layout.off('msg'), 0x30)
@@ -70,7 +72,8 @@ class ScratchLayoutTests(unittest.TestCase):
         self.assertEqual(layout.off('tmp_idx'), 0x7FC)
         self.assertEqual(layout.off('bot_names'), 0x900)
         self.assertEqual(layout.off('bot_names_ascii'), 0xB80)
-        self.assertEqual(layout.used_size, 0xCC0)
+        self.assertEqual(layout.off('force_bot_item_name'), 0x1608)
+        self.assertEqual(layout.used_size, 0x1648)
         self.assertLessEqual(layout.used_size, zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF)
 
     def test_layout_rejects_overlaps_and_overflow(self):
@@ -92,11 +95,12 @@ class StaticDataTests(unittest.TestCase):
 
     def test_bot_name_tables_are_parallel_utf16_and_ascii(self):
         layout = build_scratch_layout(
-            0x71B200,
+            zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA + zax_patch.SCRATCH_OFF,
             zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF,
             1,
             zax_patch.NAME_SLOT_SIZE,
             zax_patch.NAME_SLOT_ASCII,
+            cfg.WEAPON_SPEEDS_MAX,
         )
         section = bytearray(zax_patch.NEW_SECTION_SIZE)
 
@@ -116,11 +120,12 @@ class StaticDataTests(unittest.TestCase):
 
     def test_static_scratch_writer_sets_key_tables(self):
         layout = build_scratch_layout(
-            0x71B200,
+            zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA + zax_patch.SCRATCH_OFF,
             zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF,
             zax_patch.NUM_BOT_NAMES,
             zax_patch.NAME_SLOT_SIZE,
             zax_patch.NAME_SLOT_ASCII,
+            cfg.WEAPON_SPEEDS_MAX,
         )
         section = bytearray(zax_patch.NEW_SECTION_SIZE)
 
@@ -141,14 +146,20 @@ class StaticDataTests(unittest.TestCase):
             prompt_dm_va=layout.va('prompt_dm'),
             prompt_ctf_va=layout.va('prompt_ctf'),
             prompt_sk_va=layout.va('prompt_sk'),
+            weapon_speeds=[(0x12345678, 12.5)],
+            force_bot_item_name=b'Missile Launcher\x00',
         )
 
         msg_off = zax_patch.SCRATCH_OFF + layout.off('msg')
         tag_off = zax_patch.SCRATCH_OFF + layout.off('tag_part')
         name_off = zax_patch.SCRATCH_OFF + layout.off('bot_names_ascii')
+        weapon_off = zax_patch.SCRATCH_OFF + layout.off('weapon_table')
+        force_name_off = zax_patch.SCRATCH_OFF + layout.off('force_bot_item_name')
         self.assertEqual(section[msg_off:msg_off + len(zax_patch.DUMP_MSG)], zax_patch.DUMP_MSG)
         self.assertEqual(section[tag_off:tag_off + 8], b'part[X]\x00')
         self.assertEqual(section[name_off:name_off + 8], b'Crusher\x00')
+        self.assertEqual(section[weapon_off:weapon_off + 8], struct.pack('<If', 0x12345678, 12.5))
+        self.assertEqual(section[force_name_off:force_name_off + 17], b'Missile Launcher\x00')
 
 
 class PatcherTests(unittest.TestCase):
@@ -159,9 +170,15 @@ class PatcherTests(unittest.TestCase):
         _, info = zax_patch.build_hook(zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA)
         for patch in zax_patch.ENABLED_PATCHES:
             with self.subTest(patch=patch.name):
-                self.assertIn(patch.target_key, info)
-                self.assertGreaterEqual(patch.length, 5)
-                self.assertIn(patch.kind, {'call', 'jmp'})
+                if isinstance(patch, RelocationPatch):
+                    self.assertIn(patch.target_key, info)
+                    self.assertGreaterEqual(patch.length, 5)
+                    self.assertIn(patch.kind, {'call', 'jmp'})
+                elif isinstance(patch, RawBytePatch):
+                    self.assertGreater(len(patch.replacement), 0)
+                    self.assertLessEqual(len(patch.replacement), len(patch.original))
+                else:
+                    self.fail(f'unhandled patch type: {type(patch).__name__}')
 
     def test_build_patched_image_is_deterministic(self):
         data1, info1, raw_off1, applied1 = zax_patch.build_patched_image(zax_patch.BAK)
@@ -204,15 +221,24 @@ class PatcherTests(unittest.TestCase):
         for patch in zax_patch.ENABLED_PATCHES:
             with self.subTest(patch=patch.name):
                 off = image.va_to_offset(patch.va)
-                expected_opcode = b'\xE8' if patch.kind == 'call' else b'\xE9'
-                self.assertEqual(image.data[off:off + 1], expected_opcode)
-                self.assertEqual(rel_target(image, patch.va), info[patch.target_key])
-                if patch.length > 5:
+                if isinstance(patch, RelocationPatch):
+                    expected_opcode = b'\xE8' if patch.kind == 'call' else b'\xE9'
+                    self.assertEqual(image.data[off:off + 1], expected_opcode)
+                    self.assertEqual(rel_target(image, patch.va), info[patch.target_key])
+                    if patch.length > 5:
+                        self.assertEqual(
+                            image.data[off + 5:off + patch.length],
+                            b'\x90' * (patch.length - 5),
+                        )
+                    self.assertEqual(image.data[off:off + patch.length], applied[patch.name])
+                elif isinstance(patch, RawBytePatch):
                     self.assertEqual(
-                        image.data[off + 5:off + patch.length],
-                        b'\x90' * (patch.length - 5),
+                        image.data[off:off + len(patch.replacement)],
+                        patch.replacement,
                     )
-                self.assertEqual(image.data[off:off + patch.length], applied[patch.name])
+                    self.assertEqual(applied[patch.name], patch.replacement)
+                else:
+                    self.fail(f'unhandled patch type: {type(patch).__name__}')
 
     def test_apply_patches_helper_matches_manifest(self):
         with open(zax_patch.BAK, 'rb') as f:

@@ -237,24 +237,23 @@ def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, n
         ScratchField('primary_hash',       0x14D0, 0x04, 'weapon: cached hash of "Primary" slot (0 = uninit)'),
         ScratchField('inv_tmp',            0x14D4, 0x04, 'weapon: inventory ptr scratch across sub_523DF0 call'),
         ScratchField('current_weapon_obj', 0x14D8, 0x04, 'weapon: diagnostic — last weapon object ptr'),
-        ScratchField('current_proto_va',   0x14DC, 0x04, 'weapon: diagnostic — last projectile-prototype VA (0=hitscan)'),
-        # FORCE_BOT_ITEM_ID written at build time; 0xFFFFFFFF = no override.
-        ScratchField('force_bot_item_id',  0x14E0, 0x04, 'spawn: item id to force-equip on new bots (-1 = off)'),
-        # weapon_table: (proto_va u32, speed float) pairs + terminating 0 entry.
+        ScratchField('current_proto_va',   0x14DC, 0x04, 'weapon: diagnostic — last inventory item-definition ptr'),
+        ScratchField('force_item_def_idx', 0x14E0, 0x04, 'spawn: temp resolved inventory item-definition index'),
+        # weapon_table: (item_def_va u32, speed float) pairs + terminating 0 entry.
         # Sized to fit WEAPON_SPEEDS_MAX rows plus the sentinel.
         ScratchField('weapon_table',       0x14E4, (weapon_speeds_max + 1) * 8,
-                     'weapon: (proto_va, speed) lookup + 0-VA sentinel'),
+                     'weapon: (item_def_va, speed) lookup + 0-VA sentinel'),
         # Host-side diagnostic — snapshot writes these by running the weapon
         # lookup chain on worldmgr.charArray[0]. Lets the user discover valid
         # item ids by picking up a weapon and pressing R.
         ScratchField('host_weapon_obj',    0x15F0, 0x04, 'host weapon diag: weapon object ptr'),
-        ScratchField('host_proto_va',      0x15F4, 0x04, 'host weapon diag: projectile prototype VA (0=hitscan)'),
+        ScratchField('host_proto_va',      0x15F4, 0x04, 'host weapon diag: inventory item-definition ptr'),
         ScratchField('host_item_id',       0x15F8, 0x04, 'host weapon diag: Primary slot item id'),
         # Parallel diagnostic for PC2 (charArray[1]) — lets us compare a real
         # remote client's weapon layout against the synthetic-DP bot's.
         ScratchField('pc2_weapon_obj',     0x15FC, 0x04, 'pc2 weapon diag: weapon object ptr'),
-        ScratchField('pc2_proto_va',       0x1600, 0x04, 'pc2 weapon diag: projectile prototype VA (0=hitscan)'),
+        ScratchField('pc2_proto_va',       0x1600, 0x04, 'pc2 weapon diag: inventory item-definition ptr'),
         ScratchField('pc2_item_id',        0x1604, 0x04, 'pc2 weapon diag: Primary slot item id'),
+        ScratchField('force_bot_item_name', 0x1608, 0x40, 'spawn: ASCII inventory item name to force-equip; NUL disables'),
     ])
     return ScratchLayout(base_va, scratch_size, fields)
-

@@ -8,13 +8,12 @@ Replicates the engine's own weapon-lookup chain from ``sub_543830``:
     item = sub_425290(this = inv, hash)               ; item id
     wpn  = inv.vtable[+0x68](this = inv, item)        ; weapon object
 
-…then reads ``*(wpn + 0x20)`` (the registered "Projectiles/Projectile"
-prototype). A NULL prototype means the weapon is hitscan — the discharge
-hits instantly and no lead should be applied. Otherwise the prototype VA
-identifies the weapon class; a linear scan over ``weapon_table`` (built
-from ``cfg.WEAPON_SPEEDS`` at patch time) selects the right projectile
-speed. Unknown prototypes fall back to ``cfg.PROJECTILE_SPEED`` which
-remains in ``proj_speed`` from static init.
+…then calls ``sub_4DD480(wpn)`` to read the inventory-item definition pointer.
+The generic item vtable at ``[wpn + 0x00]`` is shared across weapons, so the
+definition pointer is the stable key. A linear scan over ``weapon_table``
+(built from ``cfg.WEAPON_SPEEDS`` at patch time) selects the right projectile
+speed. Unknown definitions fall back to ``cfg.PROJECTILE_SPEED`` which remains
+in ``proj_speed`` from static init.
 
 The ``primary_hash`` value is process-stable, so it's cached on first use
 and reused thereafter — only one call per process pays for the string
@@ -22,23 +21,23 @@ lookup. Every other field touched here (``inv_tmp``, ``current_weapon_obj``,
 ``current_proto_va``, ``is_hitscan``, ``proj_speed``) is per-call scratch.
 
 Diagnostic stashes (``current_weapon_obj``, ``current_proto_va``) feed the
-``weapon_info`` snapshot chunk so the user can identify each weapon's
-prototype VA by switching weapons in-game and pressing R.
+``weapon_info`` snapshot chunk so the user can identify each weapon's item
+definition pointer by switching weapons in-game and pressing R.
 
 Inputs (scratch):
   ``bot_char_tmp`` — bot's char ptr (set by detour_5436F0).
-  ``weapon_table`` — packed (proto_va, speed) entries + 0-VA sentinel.
+  ``weapon_table`` — packed (item_def_va, speed) entries + 0-VA sentinel.
 
 Outputs (scratch):
   ``is_hitscan``        — 1 if weapon has no projectile (skip apply_lead).
   ``proj_speed``        — projectile speed for apply_lead this frame.
   ``current_weapon_obj``— weapon obj ptr (diagnostic).
-  ``current_proto_va``  — projectile prototype VA (0 == hitscan, diagnostic).
+  ``current_proto_va``  — inventory item-definition pointer (diagnostic).
   ``primary_hash``      — cached "Primary" slot hash (lazy init).
   ``inv_tmp``           — inventory ptr held across sub_523DF0 call.
 
-Side effects: 4 engine calls per fire frame per bot (sub_4267E0, possibly
-sub_523DF0 on first call only, sub_425290, inv.vtable[+0x68]). Same chain
+Side effects: 5 engine calls per fire frame per bot (sub_4267E0, possibly
+sub_523DF0 on first call only, sub_425290, inv.vtable[+0x68], sub_4DD480). Same chain
 sub_543830 itself runs, so the net engine overhead roughly doubles for
 those four targets — acceptable.
 
@@ -115,17 +114,17 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x85\xC0'); a.jz('cps_done')                  # NULL weapon -> bail
     a.raw(b'\xA3' + le32(current_weapon_obj_va))          # mov [current_weapon_obj], eax
 
-    # --- (6) Read the weapon-class vtable at [weapon + 0x00]. This is the
-    # stable per-class identifier (same value for every player holding the
-    # same weapon). Kept in `current_proto_va` for diagnostic compatibility
-    # with the existing weapon_info snapshot chunk.
-    a.raw(b'\x8B\x10')                                    # mov edx, [eax]  (weapon vtable)
-    a.raw(b'\x89\x15' + le32(current_proto_va_va))        # mov [current_proto_va], edx
-    a.raw(b'\x85\xD2')                                    # test edx, edx
-    a.jz('cps_done')                                      # NULL vtable shouldn't happen, bail safely
+    # --- (6) Read the inventory item-definition pointer. This is the stable
+    # per-weapon key; [weapon+0] is only the generic CInventoryItem vtable.
+    a.raw(b'\x8B\xC8')                                    # mov ecx, eax (weapon)
+    a.call_va(ax.SUB_4DD480_VA)                           # eax = item definition
+    a.raw(b'\x89\x05' + le32(current_proto_va_va))        # mov [current_proto_va], eax
+    a.raw(b'\x85\xC0')                                    # test eax, eax
+    a.jz('cps_done')
+    a.raw(b'\x8B\xD0')                                    # mov edx, eax (table key)
 
-    # --- (7) Linear scan weapon_table for vtable VA in EDX. Each entry is
-    # 8 bytes: (vtable_va u32, speed float). Zero key terminates. A matched
+    # --- (7) Linear scan weapon_table for item-definition VA in EDX. Each entry is
+    # 8 bytes: (definition_va u32, speed float). Zero key terminates. A matched
     # entry with speed == 0.0 means HITSCAN — set the flag and bail without
     # touching proj_speed (bot_fire_aim will skip apply_lead).
     a.raw(b'\xB8' + le32(weapon_table_va))                # mov eax, weapon_table

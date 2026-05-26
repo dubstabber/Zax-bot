@@ -48,6 +48,8 @@ Current limitations:
 - Bots do not navigate. They keep a real walking controller for idle animation,
   but `detour_542360` zeroes their movement vector.
 - Bots can fire/aim at the host within range and line of sight via `detour_5436F0`.
+  `zaxbot/config.py` can force newly spawned bots to equip a selected debug
+  inventory item name so projectile lead tuning can be tested without bot movement.
 - Host-side bot names are set after spawn; PC2 still does not reliably see the
   chosen name because the synthetic DirectPlay player-data store is not populated.
 

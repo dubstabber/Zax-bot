@@ -67,9 +67,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     #   ai_fire: best_target through proj_speed (64 bytes from cand_pos onward;
     #            captures best_dx/dy, best_vx/vy, host_part, proj_speed).
     #   ai_pos:  prev_pos_table + cand_vx/vy (144 bytes from prev_pos_table).
-    #   weapon_info: 8 bytes — current_weapon_obj + current_proto_va.
-    #                proj_speed is already covered by ai_fire; is_hitscan can
-    #                be inferred from current_proto_va == 0.
+    #   weapon_info: 8 bytes — current_weapon_obj + inventory item definition.
+    #                proj_speed is already covered by ai_fire.
     ai_fire_src_va     = layout.va('cand_pos')
     ai_pos_src_va      = layout.va('prev_pos_table')
     weapon_info_src_va = layout.va('current_weapon_obj')
@@ -134,7 +133,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     emit_chunk(tag_weapon_info_va, b'\xB8' + le32(weapon_info_src_va),    0x08, 'snap_skip_weapon_info')
 
     # --- Host-side weapon lookup (diagnostic). Resolves the host's currently
-    # equipped Primary weapon and stashes (item_id, weapon_obj, proto_va) so
+    # equipped Primary weapon and stashes (item_id, weapon_obj, item_def) so
     # the user can discover valid item ids by picking up weapons in-game and
     # pressing R. Mirrors compute_proj_speed's chain but on charArray[0]
     # instead of the bot. Safe because R is pressed long after the host is
@@ -173,16 +172,17 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xFF\x50' + bytes([ax.INVENTORY_GET_WEAPON_OFF])) # call [eax+0x68]
     a.raw(b'\x85\xC0'); a.jz('snap_skip_host_wpn')
     a.raw(b'\xA3' + le32(host_weapon_obj_va))
-    a.raw(b'\x8B\x10')                                        # edx = [eax]  (weapon class vtable)
-    a.raw(b'\x89\x15' + le32(host_proto_va_va))
+    a.raw(b'\x8B\xC8')                                        # ecx = weapon obj
+    a.call_va(ax.SUB_4DD480_VA)                               # eax = item definition
+    a.raw(b'\xA3' + le32(host_proto_va_va))
     a.label('snap_skip_host_wpn')
 
     emit_chunk(tag_host_weapon_va, b'\xB8' + le32(host_weapon_obj_va), 0x0C, 'snap_skip_host_weapon_dump')
 
-    # --- PC2-side weapon lookup (diagnostic). Same chain as the host block
-    # but on worldmgr.charArray[1] — the slot a real remote client takes
-    # when host + PC2 join before any bot is spawned. Lets us compare a
-    # bot's weapon-object layout against an honest non-synthetic client's.
+    # --- PC2-side weapon lookup (diagnostic). Same chain as the host block.
+    # Prefer charArray[2] so a host+bot+PC2 session samples the real remote
+    # client (charArray[1] is the first bot there); fall back to charArray[1]
+    # for host+PC2 sessions without an earlier bot.
     a.raw(b'\xC7\x05' + le32(pc2_weapon_obj_va) + le32(0))
     a.raw(b'\xC7\x05' + le32(pc2_proto_va_va) + le32(0))
     a.raw(b'\xC7\x05' + le32(pc2_item_id_va) + le32(0xFFFFFFFF))
@@ -190,7 +190,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x85\xC0'); a.jz('snap_skip_pc2_wpn')
     a.raw(b'\x8B\x80\x90\x02\x00\x00')                        # eax = [eax+0x290] (charArray)
     a.raw(b'\x85\xC0'); a.jz('snap_skip_pc2_wpn')
-    a.raw(b'\x8B\x48\x04')                                    # ecx = charArray[1] (PC2 if present)
+    a.raw(b'\x8B\x48\x08')                                    # ecx = charArray[2] (PC2 after bot)
+    a.raw(b'\x85\xC9')                                        # test ecx, ecx
+    a.jnz('snap_pc2_have_char')
+    a.raw(b'\x8B\x48\x04')                                    # fallback: charArray[1]
+    a.label('snap_pc2_have_char')
     a.raw(b'\x85\xC9'); a.jz('snap_skip_pc2_wpn')
     a.call_va(ax.SUB_4267E0_VA)                               # eax = inv
     a.raw(b'\x85\xC0'); a.jz('snap_skip_pc2_wpn')
@@ -215,15 +219,15 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xFF\x50' + bytes([ax.INVENTORY_GET_WEAPON_OFF])) # call [eax+0x68]
     a.raw(b'\x85\xC0'); a.jz('snap_skip_pc2_wpn')
     a.raw(b'\xA3' + le32(pc2_weapon_obj_va))
-    a.raw(b'\x8B\x10')                                        # edx = [eax]  (weapon class vtable)
-    a.raw(b'\x89\x15' + le32(pc2_proto_va_va))
+    a.raw(b'\x8B\xC8')                                        # ecx = weapon obj
+    a.call_va(ax.SUB_4DD480_VA)                               # eax = item definition
+    a.raw(b'\xA3' + le32(pc2_proto_va_va))
     a.label('snap_skip_pc2_wpn')
 
     emit_chunk(tag_pc2_weapon_va, b'\xB8' + le32(pc2_weapon_obj_va), 0x0C, 'snap_skip_pc2_weapon_dump')
 
-    # --- Raw 128-byte dumps of each weapon object so we can compare layouts
-    # and pick a stable per-weapon key (vtable at +0x00 is the most likely
-    # candidate). `ptr_load` here uses `mov eax, [scratch]` (opcode A1) so
+    # --- Raw 128-byte dumps of each weapon object for layout comparison.
+    # `ptr_load` here uses `mov eax, [scratch]` (opcode A1) so
     # the source is the weapon-obj pointer stored at host/pc2_weapon_obj.
     emit_chunk(tag_host_wpn_bytes_va, b'\xA1' + le32(host_weapon_obj_va), 0x80, 'snap_skip_host_wpn_b')
     emit_chunk(tag_pc2_wpn_bytes_va,  b'\xA1' + le32(pc2_weapon_obj_va),  0x80, 'snap_skip_pc2_wpn_b')

@@ -94,27 +94,32 @@ SUB_509100    = 0x509100  # __stdcall(dy, dx) -> angle in ST0
 #   hash = sub_523DF0(this=SLOT_NAME_REGISTRY, "Primary", -1)    ; slot hash
 #   item = sub_425290(this=inv, hash)                            ; item id
 #   wpn  = inv.vtable[+0x68](this=inv, item)                     ; weapon obj
-# Hitscan detection: `*(wpn + 0x20) == NULL` (no "Projectiles/Projectile").
 SUB_4267E0_VA              = 0x4267E0   # __thiscall(char) -> inventory*
 SUB_523DF0_VA              = 0x523DF0   # __thiscall(registry, char* name, int) -> hash; ret 8
 SUB_425290_VA              = 0x425290   # __thiscall(inventory, hash) -> item; ret 4
+SUB_425900_VA              = 0x425900   # __thiscall(inventory, item_def*) -> item; ret 4
+SUB_4DD480_VA              = 0x4DD480   # __thiscall(item_obj) -> inventory item definition*
 SLOT_NAME_REGISTRY_VA      = 0x6C0800   # ECX setup for sub_523DF0 (engine global)
 PRIMARY_STR_VA             = 0x60B780   # ASCII "Primary\0..."
 INVENTORY_GET_WEAPON_OFF   = 0x68       # inv.vtable[+0x68](this, item) -> weapon obj
-# weapon.vtable VA at +0x00 is the per-weapon-class identifier — same across
-# every player holding the same weapon. Confirmed by snapshot diff: host's
-# RL and PC2's RL both have [obj+0x00] = 0x005EE474. The previously-assumed
-# +0x20 ("Projectiles/Projectile" property) is actually per-instance noise
-# (a name string on host, a heap-ptr on PC2, a float on bots — useless as
-# a key).
-WEAPON_CLASS_VTBL_OFF      = 0x00
+# The generic inventory item vtable at [weapon + 0x00] is shared by multiple
+# weapon objects, so per-weapon lead-speed dispatch keys off sub_4DD480(wpn).
 
-# --- Add-weapon-to-inventory (used by FORCE_BOT_ITEM_ID testing knob) ------
+# --- Add/switch weapon inventory helpers (used by force-weapon testing) ----
+ITEM_DEF_REGISTRY_VA        = 0x6C0C08   # inventory item-definition registry
+SUB_48D8F0_VA               = 0x48D8F0   # __thiscall(registry, index) -> definition*
+SUB_5B5F20_VA               = 0x5B5F20   # () -> CZaxInventoryItemDefinition class desc
+SUB_416790_VA               = 0x416790   # __thiscall(obj, class_desc) -> bool is-a
+SUB_5B7AB0_VA               = 0x5B7AB0   # __thiscall(item_def) -> default entity
+SUB_416760_VA               = 0x416760   # __thiscall(default_entity, 0, -1) -> clone item
+SUB_417710_VA               = 0x417710   # __thiscall(size_in_ecx) -> operator new-ish
+SUB_42A2B0_VA               = 0x42A2B0   # __thiscall(mem) -> CInventoryItem ctor
+SUB_54FDB0_VA               = 0x54FDB0   # __thiscall(item, def_index) stores item+8; ret 4
 # __thiscall(this=inv, item_id, slot_hash, a4, a5); ret 0x10.
 # Args matched against the engine's own call at 0x543ACD: push 1; push ebx;
 # push -1; push "Primary"; mov ecx, registry; call sub_523DF0; push eax (=hash);
 # push edi (=item_id); mov ecx, esi (=inv); call sub_425590.
-# a4: void* (engine passes a non-NULL buffer at some sites; we pass 0).
+# a4: owner char pointer (engine passes the firing/owning char at 0x543ACD).
 # a5: auto-equip flag (1 = make this the active weapon).
 SUB_425590_VA              = 0x425590
 

@@ -14,7 +14,7 @@ NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
 NEW_SECTION_SIZE   = 0x4000        # four pages: code + scratch (bumped for diagnostic blocks)
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
-SCRATCH_OFF        = 0x1A00        # writable scratch buffer; ~6.5KB code / ~5.5KB scratch
+SCRATCH_OFF        = 0x2000        # writable scratch buffer; 8KB code / 8KB scratch
 
 ZAXBOT_SECTION = SectionSpec(
     name=NEW_SECTION_NAME,
@@ -45,19 +45,16 @@ FIRE_RANGE_SQ = 90000.0   # squared distance; bot fires when host is within sqrt
 # entirely and ignore this value.
 PROJECTILE_SPEED = 10.0
 
-# Per-weapon projectile speeds, keyed by the weapon-class vtable VA at
-# [weapon + 0x00]. Same vtable for every player holding the same weapon
-# class, so this is a stable identifier (the previous +0x20 keying was
-# per-instance noise — different value per player). Populate by
-# observation: fire each weapon in-game, press R, read `current_proto_va`
-# from the weapon_info snapshot chunk (despite the legacy name, it now
-# holds the vtable VA), and add a (vtable_va, speed) entry here.
-# Unrecognised vtables fall back to PROJECTILE_SPEED.
+# Per-weapon projectile speeds, keyed by the weapon's inventory-item
+# definition pointer returned by sub_4DD480(current_weapon_obj). The generic
+# inventory-item vtable at [weapon + 0x00] is shared across different weapons,
+# so it is not a usable key. Populate by observation: equip/fire a weapon,
+# press R, read the second dword of the `weapon_info`, `host_weapon`, or
+# `pc2_weapon` snapshot chunk, and add a (definition_va, speed) entry here.
+# Unrecognised definitions fall back to PROJECTILE_SPEED.
 #
 # HITSCAN: use speed = 0.0 as the sentinel — the dispatcher will set
-# is_hitscan and skip apply_lead entirely. Known so far (confirmed via
-# host/PC2 snapshot diff):
-#   0x005EE474 — Rocket Launcher class
+# is_hitscan and skip apply_lead entirely.
 WEAPON_SPEEDS = []  # type: list[tuple[int, float]]
 # Slots reserved in scratch for the runtime lookup; bumping this only costs
 # bytes in .zaxbot scratch, so keep some headroom.
@@ -65,14 +62,77 @@ WEAPON_SPEEDS_MAX = 32
 
 # --- Testing knob: force-equip every freshly-spawned bot with this item -----
 # Bots default to whatever the engine's "Players Initial Inventory" gives
-# them — and since they don't move, they can't pick up replacements. This
-# knob is the only way to exercise per-weapon prediction with different
-# weapons. Set to an integer item id; sub_425590 will equip the bot with
-# that weapon right after spawn (replacing its default Primary). Discover
-# usable item ids by iteration: 0, 1, 2, … until the bot fires the weapon
-# you want. The bot's R-press `weapon_info` snapshot confirms which
-# projectile prototype VA each item id maps to. None disables the override.
-FORCE_BOT_ITEM_ID = None  # type: int | None
+# them -- and since they don't move, they can't pick up replacements. These
+# knobs are the safest way to exercise per-weapon prediction with different
+# weapons. This is configured by inventory item *name* (the same names the
+# engine's XmasShopping cheat uses), not by the per-character local item index.
+#
+# Use DEBUG_BOT_WEAPON_NAMES for a curated local test list, then select one
+# entry with DEBUG_BOT_WEAPON_INDEX.
+DEBUG_BOT_WEAPON_NAMES = []  # type: list[str]
+DEBUG_BOT_WEAPON_INDEX = None  # type: int | None
+
+# Valid weapon names from the binary's key-binding dialog (sub_59C550 entries
+# 28..42 at 0x59C550) — the 15 playable firearms that can be bound to a hotkey
+# and carried in the primary/secondary slots:
+#   'Modified Laser Welder'
+#   'Light Pistol'
+#   'Twin Disruptor'
+#   'Semi Auto Pistol'
+#   'Full Auto Pistol'
+#   'Grenade Launcher'
+#   'Nuclear Disruptor'
+#   'Impaction Cannon'
+#   'Alien Electrical Weapon'
+#   'Tri Spread Gun'
+#   'Missile Launcher'
+#   'Heavy Barrell'
+#   'Mega Fusion Disruptor'
+#   'Plasma Thrower'
+#   'Psyonic Wave Glove'
+# Additional weapon-like items emitted by the XmasShopping cheat (sub_5A22C0)
+# that may also resolve via sub_4DD480 — single-player / special pickups:
+#   'Autogun Medium', 'Proximity Mine', 'sphere of zin', 'Globe of Prayer',
+#   'Knife of Sacrifice', 'Reflecting Staff', 'Ring of Fire', 'Staff of Air',
+#   'Plasma Canister'
+# Direct one-off override. If set, this takes precedence over the debug list.
+FORCE_BOT_ITEM_NAME = 'Nuclear Disruptor'  # type: str | None
+
+
+def _validate_bot_item_name(value, label):
+    if type(value) is not str:
+        raise ValueError(f'{label} must be a string item name, got {value!r}')
+    data = value.encode('ascii')
+    if not data:
+        raise ValueError(f'{label} must not be empty')
+    if b'\x00' in data:
+        raise ValueError(f'{label} must not contain NUL bytes')
+    return data + b'\x00'
+
+
+def resolve_force_bot_item_name():
+    """Return the configured forced bot item name as NUL-terminated ASCII."""
+    if FORCE_BOT_ITEM_NAME is not None:
+        return _validate_bot_item_name(FORCE_BOT_ITEM_NAME, 'FORCE_BOT_ITEM_NAME')
+
+    if DEBUG_BOT_WEAPON_INDEX is None:
+        return None
+
+    if type(DEBUG_BOT_WEAPON_INDEX) is not int:
+        raise ValueError(
+            'DEBUG_BOT_WEAPON_INDEX must be an integer index or None, '
+            f'got {DEBUG_BOT_WEAPON_INDEX!r}'
+        )
+    if DEBUG_BOT_WEAPON_INDEX < 0 or DEBUG_BOT_WEAPON_INDEX >= len(DEBUG_BOT_WEAPON_NAMES):
+        raise ValueError(
+            'DEBUG_BOT_WEAPON_INDEX is out of range for DEBUG_BOT_WEAPON_NAMES '
+            f'({DEBUG_BOT_WEAPON_INDEX!r} for {len(DEBUG_BOT_WEAPON_NAMES)} entries)'
+        )
+
+    return _validate_bot_item_name(
+        DEBUG_BOT_WEAPON_NAMES[DEBUG_BOT_WEAPON_INDEX],
+        f'DEBUG_BOT_WEAPON_NAMES[{DEBUG_BOT_WEAPON_INDEX}]',
+    )
 
 # --- Mode-detection override --------------------------------------------
 # Auto-detection (reading [mpd+0] as a vtable) is currently unreliable: mpd

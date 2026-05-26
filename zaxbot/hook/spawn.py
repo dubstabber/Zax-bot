@@ -387,19 +387,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # paints the SK collector still lives above, before sub_59DF90).
     a.call_lbl('apply_bot_colors')
 
-    # --- Optional FORCE_BOT_ITEM_ID override (testing aid). Bots can't move
-    # and so can't pick up weapons; this knob force-equips a specific item
-    # at spawn time. 0xFFFFFFFF sentinel = no override (default loadout).
-    # Mirrors the engine's own give-weapon call at 0x543ACD:
-    #   push 1 (auto-equip); push 0 (a4); push primary_hash; push item_id;
-    #   mov ecx, inv; call sub_425590.
-    # primary_hash is normally warmed by compute_proj_speed on the first bot
-    # fire frame; force this block to compute it if it's still 0 here so a
-    # bot can be force-equipped before it has ever fired.
-    force_va        = layout.va('force_bot_item_id')
-    primary_hash_va = layout.va('primary_hash')
+    # --- Optional FORCE_BOT_ITEM_NAME override (testing aid). Bots can't move
+    # and so can't pick up weapons. The engine's item ids are per-inventory
+    # local indexes, so this resolves an inventory item definition by name,
+    # instantiates that item through the same path as the XmasShopping cheat,
+    # adds it to the bot, then switches Primary to the new local item id.
+    force_name_va         = layout.va('force_bot_item_name')
+    force_item_def_idx_va = layout.va('force_item_def_idx')
+    primary_hash_va       = layout.va('primary_hash')
 
-    a.raw(b'\x83\x3D' + le32(force_va) + b'\xFF')             # cmp [force_bot_item_id], -1
+    a.raw(b'\x80\x3D' + le32(force_name_va) + b'\x00')        # cmp byte [force_bot_item_name], 0
     a.jz('spawn_skip_force_weapon')
     a.raw(b'\xA1' + le32(botchar_va))                         # eax = bot char
     a.raw(b'\x85\xC0'); a.jz('spawn_skip_force_weapon')
@@ -407,6 +404,99 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.call_va(ax.SUB_4267E0_VA)                               # eax = inventory
     a.raw(b'\x85\xC0'); a.jz('spawn_skip_force_weapon')
     a.raw(b'\x89\xC6')                                        # mov esi, eax (save inventory)
+
+    # Resolve configured item definition from the inventory item-definition
+    # registry: idx = sub_523DF0(name, -1); def = sub_48D8F0(registry, idx).
+    a.raw(b'\x6A\xFF')                                        # push -1
+    a.raw(b'\x68' + le32(force_name_va))                      # push force_bot_item_name
+    a.raw(b'\xB9' + le32(ax.ITEM_DEF_REGISTRY_VA))            # mov ecx, item-definition registry
+    a.call_va(ax.SUB_523DF0_VA)
+    a.raw(b'\xA3' + le32(force_item_def_idx_va))              # save definition index
+    a.raw(b'\x50')                                            # push idx
+    a.raw(b'\xB9' + le32(ax.ITEM_DEF_REGISTRY_VA))            # mov ecx, item-definition registry
+    a.call_va(ax.SUB_48D8F0_VA)                               # eax = item definition
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_force_weapon')
+    a.raw(b'\x89\xC7')                                        # mov edi, eax (item definition)
+    # Type guard: item definitions should be CZaxInventoryItemDefinition.
+    a.call_va(ax.SUB_5B5F20_VA)
+    a.raw(b'\x50')                                            # push class desc
+    a.raw(b'\x8B\xCF')                                        # mov ecx, edi
+    a.call_va(ax.SUB_416790_VA)
+    a.raw(b'\x84\xC0'); a.jz('spawn_skip_force_weapon')
+
+    # If the bot already owns this item definition, skip straight to switch.
+    a.raw(b'\x57')                                            # push edi (item definition)
+    a.raw(b'\x8B\xCE')                                        # mov ecx, esi (inventory)
+    a.call_va(ax.SUB_425900_VA)
+    a.raw(b'\x83\xF8\xFF')                                    # cmp eax, -1
+    a.jnz('spawn_force_have_local_item')
+
+    # Create a transient pickup item for this definition and apply it only to
+    # the new bot. Mirrors the single-item inner loop of sub_5A2700 without
+    # giving the item to host/PC2.
+    a.raw(b'\x8B\x47\x1C')                                    # mov eax, [edi+0x1C] (default entity)
+    a.raw(b'\x85\xC0')                                        # test eax, eax
+    a.jz('spawn_force_generic_item')
+    a.raw(b'\x8B\xCF')                                        # mov ecx, edi
+    a.call_va(ax.SUB_5B7AB0_VA)                               # eax = default entity
+    a.raw(b'\x8B\xC8')                                        # mov ecx, eax
+    a.raw(b'\x6A\xFF')                                        # push -1
+    a.raw(b'\x6A\x00')                                        # push 0
+    a.call_va(ax.SUB_416760_VA)                               # eax = cloned item
+    a.jmp('spawn_force_item_created')
+
+    a.label('spawn_force_generic_item')
+    a.raw(b'\xB9\x18\x00\x00\x00')                            # mov ecx, 0x18
+    a.call_va(ax.SUB_417710_VA)                               # eax = memory
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_force_weapon')
+    a.raw(b'\x8B\xC8')                                        # mov ecx, eax
+    a.call_va(ax.SUB_42A2B0_VA)                               # eax = CInventoryItem
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_force_weapon')
+    a.raw(b'\x89\xC5')                                        # mov ebp, eax (item)
+    a.raw(b'\x8B\x55\x00')                                    # mov edx, [ebp]
+    a.raw(b'\x8B\xCD')                                        # mov ecx, ebp
+    a.raw(b'\xFF\x52\x4C')                                    # call [edx+0x4C]
+    a.jmp('spawn_force_item_ready')
+
+    a.label('spawn_force_item_created')
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_force_weapon')
+    a.raw(b'\x89\xC5')                                        # mov ebp, eax (item)
+
+    a.label('spawn_force_item_ready')
+    a.raw(b'\xFF\x35' + le32(force_item_def_idx_va))          # push item definition index
+    a.raw(b'\x8B\xCD')                                        # mov ecx, ebp
+    a.call_va(ax.SUB_54FDB0_VA)                               # item->definition index = idx
+    a.raw(b'\x8B\x55\x00')                                    # mov edx, [ebp]
+    a.raw(b'\x8B\xCD')                                        # mov ecx, ebp
+    a.raw(b'\xFF\x52\x1C')                                    # call [edx+0x1C] (generate/init)
+    a.raw(b'\x8B\x45\x00')                                    # mov eax, [ebp]
+    a.raw(b'\xFF\x35' + le32(botchar_va))                     # push bot char
+    a.raw(b'\x8B\xCD')                                        # mov ecx, ebp
+    a.raw(b'\xFF\x90' + le32(0x80))                           # call [eax+0x80] (can pickup?)
+    a.raw(b'\x84\xC0')                                        # test al, al
+    a.jz('spawn_force_destroy_item')
+    a.raw(b'\x8B\x45\x00')                                    # mov eax, [ebp]
+    a.raw(b'\xFF\x35' + le32(botchar_va))                     # push bot char
+    a.raw(b'\x6A\x00')                                        # push 0
+    a.raw(b'\x8B\xCD')                                        # mov ecx, ebp
+    a.raw(b'\xFF\x90' + le32(0x84))                           # call [eax+0x84] (pickup/add)
+    a.label('spawn_force_destroy_item')
+    a.raw(b'\x85\xED')                                        # test ebp, ebp
+    a.jz('spawn_force_after_give')
+    a.raw(b'\x8B\x45\x00')                                    # mov eax, [ebp]
+    a.raw(b'\x6A\x01')                                        # push 1 (free)
+    a.raw(b'\x8B\xCD')                                        # mov ecx, ebp
+    a.raw(b'\xFF\x50\x04')                                    # call [eax+4] (delete transient item)
+
+    a.label('spawn_force_after_give')
+    a.raw(b'\x57')                                            # push edi (item definition)
+    a.raw(b'\x8B\xCE')                                        # mov ecx, esi (inventory)
+    a.call_va(ax.SUB_425900_VA)                               # eax = bot-local item index
+    a.raw(b'\x83\xF8\xFF')                                    # cmp eax, -1
+    a.jz('spawn_skip_force_weapon')
+
+    a.label('spawn_force_have_local_item')
+    a.raw(b'\x89\xC3')                                        # mov ebx, eax (local item id)
 
     # Lazy-init primary_hash if compute_proj_speed hasn't warmed it yet.
     a.raw(b'\x83\x3D' + le32(primary_hash_va) + b'\x00')      # cmp [primary_hash], 0
@@ -418,47 +508,43 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xA3' + le32(primary_hash_va))                    # mov [primary_hash], eax
     a.label('spawn_force_have_hash')
 
-    # sub_425590(this=inv, item_id, slot_hash, 0, 1).
+    # sub_425590(this=inv, item_id, slot_idx, bot_char, 1).
+    # It only queues the item when the Primary slot's pending-item field
+    # (+0x14) is -1. Bots spawn with a default Primary already pending/current,
+    # so clear that pending field first; otherwise sub_425590 returns failure
+    # and leaves the default weapon intact.
+    a.raw(b'\xA1' + le32(primary_hash_va))                    # mov eax, [primary_hash]
+    a.raw(b'\x8B\x56\x10')                                    # mov edx, [esi+0x10] (slot array)
+    a.raw(b'\x85\xD2'); a.jz('spawn_skip_force_weapon')
+    a.raw(b'\x8D\x04\x40')                                    # lea eax, [eax+eax*2]
+    a.raw(b'\xC1\xE0\x03')                                    # shl eax, 3  (*24)
+    a.raw(b'\xC7\x44\x02\x14\xFF\xFF\xFF\xFF')                # slot[p].pending = -1
+
     # a5=1 triggers the engine's auto-equip path, which routes through the
     # positional-sound wrapper at 0x4FC8A0. That wrapper is patched
     # NULL-tolerant in patch_manifest.RawBytePatch so it skips the sound
     # when the bot's audio emitter slot at char+0x48 is NULL (synthetic-DP
     # bots don't have one).
     a.raw(b'\x6A\x01')                                        # push 1 (a5: auto-equip)
-    a.raw(b'\x6A\x00')                                        # push 0 (a4: void*)
+    a.raw(b'\xFF\x35' + le32(botchar_va))                     # push bot char (a4)
     a.raw(b'\xFF\x35' + le32(primary_hash_va))                # push [primary_hash] (a3)
-    a.raw(b'\xFF\x35' + le32(force_va))                       # push [force_bot_item_id] (a2)
+    a.raw(b'\x53')                                            # push ebx (a2: local item id)
     a.raw(b'\x8B\xCE')                                        # mov ecx, esi (this = inventory)
     a.call_va(ax.SUB_425590_VA)
+    a.raw(b'\x84\xC0')                                        # test al, al
+    a.jz('spawn_skip_force_weapon')
+    # Force the switch immediately. sub_425590 queues into slot +0x14 and
+    # leaves the previous current item at +0x10 until the normal transition
+    # completes; bots keep firing the old current item in the meantime.
+    a.raw(b'\xA1' + le32(primary_hash_va))                    # mov eax, [primary_hash]
+    a.raw(b'\x8B\x56\x10')                                    # mov edx, [esi+0x10] (slot array)
+    a.raw(b'\x85\xD2'); a.jz('spawn_skip_force_weapon')
+    a.raw(b'\x8D\x04\x40')                                    # lea eax, [eax+eax*2]
+    a.raw(b'\xC1\xE0\x03')                                    # shl eax, 3  (*24)
+    a.raw(b'\x89\x5C\x02\x10')                                # slot[p].current = local item id
+    a.raw(b'\xC7\x44\x02\x14\xFF\xFF\xFF\xFF')                # slot[p].pending = -1
+    a.raw(b'\xC7\x44\x02\x0C\x00\x00\x00\x00')                # slot[p].switch_timer = 0
     logc(ord('W'))
-
-    # --- Ammo pump. Bots are spawned without going through the engine's
-    # pickup-event path, which is what normally hands out ammo alongside a
-    # weapon. Result: the force-equipped Primary has zero ammo, the engine
-    # auto-switches off it on the first fire attempt, and the bot ends up
-    # holding whatever weapon happens to have ammo. Workaround: walk the
-    # bot's inventory and set ammo_count (+0x0C, float) to 999.0 on every
-    # populated slot. Energy weapons get full batteries, pool ammo slots
-    # get full pools — symmetric and not weapon-specific.
-    # Layout: inv+0x04 = slot array, each slot is 24 bytes with item_id at
-    # +0x14 (-1 = empty, 0 = uninitialised past the end). ESI is still the
-    # inventory ptr (preserved by __thiscall sub_425590). EBX caps the walk
-    # at 16 slots so we never run off into garbage even if the slot count
-    # field at inv+0x08 reads larger.
-    a.raw(b'\x85\xF6'); a.jz('spawn_skip_ammo')               # test esi, esi
-    a.raw(b'\x8B\x7E\x04')                                    # mov edi, [esi+4]
-    a.raw(b'\x85\xFF'); a.jz('spawn_skip_ammo')
-    a.raw(b'\xBB\x10\x00\x00\x00')                            # mov ebx, 16
-    a.label('spawn_ammo_loop')
-    a.raw(b'\x8B\x47\x14')                                    # mov eax, [edi+0x14] (item_id)
-    a.raw(b'\x85\xC0'); a.jz('spawn_skip_ammo')               # 0 -> past end, stop
-    a.raw(b'\x83\xF8\xFF'); a.jz('spawn_ammo_next')           # -1 -> empty, skip
-    a.raw(b'\xC7\x47\x0C\x00\xC0\x79\x44')                    # mov [edi+0x0C], 999.0f
-    a.label('spawn_ammo_next')
-    a.raw(b'\x83\xC7\x18')                                    # add edi, 24
-    a.raw(b'\x4B')                                            # dec ebx
-    a.jnz('spawn_ammo_loop')
-    a.label('spawn_skip_ammo')
 
     a.label('spawn_skip_force_weapon')
 

@@ -88,7 +88,7 @@ def write_static_scratch_data(
     fire_range_sq=90000.0,
     projectile_speed=600.0,
     weapon_speeds=(),
-    force_bot_item_id=None,
+    force_bot_item_name=None,
     force_mode=None,
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
@@ -119,9 +119,10 @@ def write_static_scratch_data(
     layout.write(section, scratch_off, 'proj_speed', struct.pack('<f', projectile_speed))
     layout.write(section, scratch_off, 'default_proj_speed', struct.pack('<f', projectile_speed))
 
-    # Pack WEAPON_SPEEDS into the runtime table. Each entry is (proto_va u32,
-    # speed float). Terminated by a (0, 0.0) sentinel; the asm scan stops on
-    # the first zero proto_va. Empty list → first dword is 0 → no matches.
+    # Pack WEAPON_SPEEDS into the runtime table. Each entry is
+    # (item_def_va u32, speed float). Terminated by a (0, 0.0) sentinel; the
+    # asm scan stops on the first zero item_def_va. Empty list -> first dword
+    # is 0 -> no matches.
     weapon_field = layout.field('weapon_table')
     max_entries = weapon_field.size // 8 - 1  # one slot reserved for sentinel
     if len(weapon_speeds) > max_entries:
@@ -129,14 +130,20 @@ def write_static_scratch_data(
             f'WEAPON_SPEEDS has {len(weapon_speeds)} rows but scratch holds '
             f'{max_entries} (raise cfg.WEAPON_SPEEDS_MAX)'
         )
-    packed = b''.join(struct.pack('<If', proto_va, speed)
-                       for proto_va, speed in weapon_speeds)
+    packed = b''.join(struct.pack('<If', item_def_va, speed)
+                       for item_def_va, speed in weapon_speeds)
     packed += struct.pack('<If', 0, 0.0)  # sentinel
     layout.write(section, scratch_off, 'weapon_table', packed)
 
-    # FORCE_BOT_ITEM_ID — 0xFFFFFFFF sentinel means "no override".
-    forced_item = 0xFFFFFFFF if force_bot_item_id is None else (force_bot_item_id & 0xFFFFFFFF)
-    layout.write(section, scratch_off, 'force_bot_item_id', struct.pack('<I', forced_item))
+    # FORCE_BOT_ITEM_NAME — empty/NUL first byte means "no override".
+    force_field = layout.field('force_bot_item_name')
+    force_name = b'\x00' if force_bot_item_name is None else force_bot_item_name
+    if len(force_name) > force_field.size:
+        raise ValueError(
+            f'FORCE_BOT_ITEM_NAME is too long for scratch field: '
+            f'{len(force_name)} > {force_field.size}'
+        )
+    layout.write(section, scratch_off, 'force_bot_item_name', force_name)
 
     # The dump header magic is written once; runtime code rewrites tag/src/len.
     layout.write(section, scratch_off, 'thdr', struct.pack('<I', dump_magic))
@@ -157,4 +164,3 @@ def write_static_scratch_data(
         f'BOT_COLORS ({len(bot_colors)}) must be parallel to BOT_NAMES ({len(bot_names)})'
     )
     write_bot_color_table(section, scratch_off, layout, bot_colors)
-
