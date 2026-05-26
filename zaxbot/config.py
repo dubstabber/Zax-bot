@@ -96,7 +96,40 @@ DEBUG_BOT_WEAPON_INDEX = None  # type: int | None
 #   'Knife of Sacrifice', 'Reflecting Staff', 'Ring of Fire', 'Staff of Air',
 #   'Plasma Canister'
 # Direct one-off override. If set, this takes precedence over the debug list.
-FORCE_BOT_ITEM_NAME = 'Nuclear Disruptor'  # type: str | None
+# When non-None, the spawn path also stuffs the bot with the items listed in
+# FORCE_BOT_AMMO_NAMES below (max battery cap + energy refill + every ammo
+# pool) so the forced weapon has full ammo immediately on spawn.
+FORCE_BOT_ITEM_NAME = None  # type: str | None
+
+# Items handed to the bot on spawn whenever FORCE_BOT_ITEM_NAME is set. Order
+# matters: 'Battery Level 3' is the max battery-cap upgrade item (the highest
+# tier the engine ships — there is no Battery Level 4 string in the binary),
+# and each subsequent 'Battery Charge' tops up the energy pool that hosts the
+# energy-based weapons' ammo. The remaining entries cover every non-energy
+# ammo pool so the loaded weapon, whatever it is, has full ammo on spawn.
+# Each name must be a valid inventory-item-definition name (i.e. resolvable
+# via sub_523DF0(name, -1) against the item-definition registry).
+FORCE_BOT_AMMO_NAMES = [
+    'Battery Level 3',
+    'Battery Charge',
+    'Battery Charge',
+    'Battery Charge',
+    'Battery Charge',
+    'Battery Charge',
+    'Battery Charge',
+    'Bullets',
+    'Bullets',
+    'Bullets',
+    'Missiles',
+    'Missiles',
+    'Missiles',
+    'Crystals',
+    'Crystals',
+    'Ore Deposits',
+]
+# Scratch capacity for the ammo list. Each slot is 32 ASCII bytes.
+FORCE_BOT_AMMO_MAX        = 32
+FORCE_BOT_AMMO_SLOT_SIZE  = 32
 
 
 def _validate_bot_item_name(value, label):
@@ -108,6 +141,34 @@ def _validate_bot_item_name(value, label):
     if b'\x00' in data:
         raise ValueError(f'{label} must not contain NUL bytes')
     return data + b'\x00'
+
+
+def resolve_force_bot_ammo_names():
+    """Return the configured FORCE_BOT_AMMO_NAMES as a list of NUL-terminated
+    ASCII byte strings, or an empty list if FORCE_BOT_ITEM_NAME is None.
+
+    Each returned entry fits within FORCE_BOT_AMMO_SLOT_SIZE bytes including
+    the terminator. The total count is bounded by FORCE_BOT_AMMO_MAX.
+    """
+    if FORCE_BOT_ITEM_NAME is None:
+        return []
+    if type(FORCE_BOT_AMMO_NAMES) is not list:
+        raise ValueError('FORCE_BOT_AMMO_NAMES must be a list of strings')
+    if len(FORCE_BOT_AMMO_NAMES) > FORCE_BOT_AMMO_MAX:
+        raise ValueError(
+            f'FORCE_BOT_AMMO_NAMES has {len(FORCE_BOT_AMMO_NAMES)} entries '
+            f'but the scratch table only holds {FORCE_BOT_AMMO_MAX}'
+        )
+    encoded = []
+    for i, value in enumerate(FORCE_BOT_AMMO_NAMES):
+        data = _validate_bot_item_name(value, f'FORCE_BOT_AMMO_NAMES[{i}]')
+        if len(data) > FORCE_BOT_AMMO_SLOT_SIZE:
+            raise ValueError(
+                f'FORCE_BOT_AMMO_NAMES[{i}]={value!r} is too long for a '
+                f'{FORCE_BOT_AMMO_SLOT_SIZE}-byte slot'
+            )
+        encoded.append(data)
+    return encoded
 
 
 def resolve_force_bot_item_name():

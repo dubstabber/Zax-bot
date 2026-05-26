@@ -396,6 +396,145 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     force_item_def_idx_va = layout.va('force_item_def_idx')
     primary_hash_va       = layout.va('primary_hash')
 
+    # --- FORCE_BOT_AMMO_NAMES: stuff the bot with the configured battery +
+    # ammo top-up items so the weapon force-equip step below can hand the
+    # bot ANY weapon, including ones whose `can-pickup` vtable (item +0x80)
+    # rejects the pickup when the bot lacks the matching ammo source — that
+    # rejection is why "Alien Electrical Weapon" and similar energy weapons
+    # fall back to the default Modified Laser Welder when ammo is given
+    # AFTER the weapon. Running the ammo loop first mirrors the XmasShopping
+    # cheat's array order (ammo items come before the weapons in
+    # sub_5A22C0). The ammo table lives in scratch (force_bot_ammo_names)
+    # with the live length in force_bot_ammo_count; both are populated at
+    # patch time by static_data.write_static_scratch_data. Each item is
+    # given via the engine's clone + can-pickup + pickup protocol; the
+    # transient is destroyed after each give, mirroring sub_5A2700's loop.
+    if layout.has_field('force_bot_ammo_count'):
+        ammo_names_va = layout.va('force_bot_ammo_names')
+        ammo_count_va = layout.va('force_bot_ammo_count')
+        ammo_slot_size = cfg.FORCE_BOT_AMMO_SLOT_SIZE
+        # Slot size must be encoded as a single shl k constant. 32 = shl 5.
+        assert ammo_slot_size in (16, 32, 64, 128), (
+            f'FORCE_BOT_AMMO_SLOT_SIZE must be a small power of two; '
+            f'got {ammo_slot_size}'
+        )
+        ammo_slot_shift = ammo_slot_size.bit_length() - 1
+
+        # Gate: same FORCE_BOT_ITEM_NAME byte as the weapon path below.
+        a.raw(b'\x80\x3D' + le32(force_name_va) + b'\x00')        # cmp byte [force_bot_item_name], 0
+        a.jz('spawn_force_ammo_done')
+        a.raw(b'\x83\x3D' + le32(ammo_count_va) + b'\x00')        # cmp [ammo_count], 0
+        a.jz('spawn_force_ammo_done')
+        a.raw(b'\xA1' + le32(botchar_va))                         # eax = bot char
+        a.raw(b'\x85\xC0')
+        a.jz('spawn_force_ammo_done')
+
+        # EBX = loop index (callee-saved across the engine calls below).
+        a.raw(b'\x31\xDB')                                        # xor ebx, ebx
+
+        a.label('spawn_force_ammo_loop')
+        a.raw(b'\x3B\x1D' + le32(ammo_count_va))                  # cmp ebx, [ammo_count]
+        a.jae('spawn_force_ammo_done')
+
+        # EDI = name pointer = ammo_names_va + ebx * slot_size.
+        a.raw(b'\x89\xDF')                                        # mov edi, ebx
+        a.raw(b'\xC1\xE7' + bytes([ammo_slot_shift]))             # shl edi, log2(slot)
+        a.raw(b'\x81\xC7' + le32(ammo_names_va))                  # add edi, names_va
+        a.raw(b'\x80\x3F\x00')                                    # cmp byte [edi], 0
+        a.jz('spawn_force_ammo_next')
+
+        # def_idx = sub_523DF0(this=registry, name, -1).
+        a.raw(b'\x6A\xFF')                                        # push -1
+        a.raw(b'\x57')                                            # push edi
+        a.raw(b'\xB9' + le32(ax.ITEM_DEF_REGISTRY_VA))
+        a.call_va(ax.SUB_523DF0_VA)
+        a.raw(b'\xA3' + le32(force_item_def_idx_va))              # save def_idx
+
+        # def = sub_48D8F0(registry, def_idx).
+        a.raw(b'\x50')                                            # push def_idx (eax)
+        a.raw(b'\xB9' + le32(ax.ITEM_DEF_REGISTRY_VA))
+        a.call_va(ax.SUB_48D8F0_VA)
+        a.raw(b'\x85\xC0')
+        a.jz('spawn_force_ammo_next')
+        a.raw(b'\x89\xC7')                                        # mov edi, eax (def)
+
+        # Type guard: only CZaxInventoryItemDefinitions are giveable.
+        a.call_va(ax.SUB_5B5F20_VA)
+        a.raw(b'\x50')
+        a.raw(b'\x8B\xCF')                                        # mov ecx, edi
+        a.call_va(ax.SUB_416790_VA)
+        a.raw(b'\x84\xC0')
+        a.jz('spawn_force_ammo_next')
+
+        # Create transient item: clone the def's default entity if present
+        # (sub_5A2700's preferred path), else allocate a generic CInventoryItem.
+        a.raw(b'\x8B\x47\x1C')                                    # mov eax, [edi+0x1C]
+        a.raw(b'\x85\xC0')
+        a.jz('spawn_force_ammo_generic')
+        a.raw(b'\x8B\xCF')                                        # mov ecx, edi
+        a.call_va(ax.SUB_5B7AB0_VA)
+        a.raw(b'\x8B\xC8')                                        # mov ecx, eax
+        a.raw(b'\x6A\xFF')                                        # push -1
+        a.raw(b'\x6A\x00')                                        # push 0
+        a.call_va(ax.SUB_416760_VA)
+        a.raw(b'\x85\xC0')
+        a.jz('spawn_force_ammo_next')
+        a.raw(b'\x89\xC5')                                        # mov ebp, eax (item)
+        a.jmp('spawn_force_ammo_ready')
+
+        a.label('spawn_force_ammo_generic')
+        a.raw(b'\xB9\x18\x00\x00\x00')                            # mov ecx, 0x18
+        a.call_va(ax.SUB_417710_VA)
+        a.raw(b'\x85\xC0')
+        a.jz('spawn_force_ammo_next')
+        a.raw(b'\x8B\xC8')                                        # mov ecx, eax
+        a.call_va(ax.SUB_42A2B0_VA)
+        a.raw(b'\x85\xC0')
+        a.jz('spawn_force_ammo_next')
+        a.raw(b'\x89\xC5')                                        # mov ebp, eax (item)
+        a.raw(b'\x8B\x55\x00')                                    # mov edx, [ebp]
+        a.raw(b'\x8B\xCD')                                        # mov ecx, ebp
+        a.raw(b'\xFF\x52\x4C')                                    # call [edx+0x4C]
+
+        a.label('spawn_force_ammo_ready')
+        # Bind the resolved def_idx onto the transient item.
+        a.raw(b'\xFF\x35' + le32(force_item_def_idx_va))
+        a.raw(b'\x8B\xCD')                                        # mov ecx, ebp
+        a.call_va(ax.SUB_54FDB0_VA)
+        a.raw(b'\x8B\x55\x00')                                    # mov edx, [ebp]
+        a.raw(b'\x8B\xCD')                                        # mov ecx, ebp
+        a.raw(b'\xFF\x52\x1C')                                    # call [edx+0x1C] (init)
+
+        # Can-pickup?  [item.vtbl+0x80](this=item, char) -> bool
+        a.raw(b'\x8B\x45\x00')                                    # mov eax, [ebp]
+        a.raw(b'\xFF\x35' + le32(botchar_va))
+        a.raw(b'\x8B\xCD')                                        # mov ecx, ebp
+        a.raw(b'\xFF\x90' + le32(0x80))
+        a.raw(b'\x84\xC0')
+        a.jz('spawn_force_ammo_destroy')
+
+        # Pickup: [item.vtbl+0x84](this=item, 0, char). Mirrors sub_5A2700.
+        a.raw(b'\x8B\x45\x00')                                    # mov eax, [ebp]
+        a.raw(b'\xFF\x35' + le32(botchar_va))                     # push char (a4)
+        a.raw(b'\x6A\x00')                                        # push 0 (a3)
+        a.raw(b'\x8B\xCD')                                        # mov ecx, ebp
+        a.raw(b'\xFF\x90' + le32(0x84))
+
+        a.label('spawn_force_ammo_destroy')
+        # Free the transient: [item.vtbl+0x04](this=item, 1).
+        a.raw(b'\x85\xED')                                        # test ebp, ebp
+        a.jz('spawn_force_ammo_next')
+        a.raw(b'\x8B\x45\x00')                                    # mov eax, [ebp]
+        a.raw(b'\x6A\x01')                                        # push 1 (free)
+        a.raw(b'\x8B\xCD')                                        # mov ecx, ebp
+        a.raw(b'\xFF\x50\x04')
+
+        a.label('spawn_force_ammo_next')
+        a.raw(b'\x43')                                            # inc ebx
+        a.jmp('spawn_force_ammo_loop')
+
+        a.label('spawn_force_ammo_done')
+
     a.raw(b'\x80\x3D' + le32(force_name_va) + b'\x00')        # cmp byte [force_bot_item_name], 0
     a.jz('spawn_skip_force_weapon')
     a.raw(b'\xA1' + le32(botchar_va))                         # eax = bot char

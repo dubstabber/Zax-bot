@@ -79,6 +79,9 @@ class ScratchLayout:
                 )
             prev = field
 
+    def has_field(self, name):
+        return name in self._by_name
+
     def field(self, name):
         return self._by_name[name]
 
@@ -102,7 +105,16 @@ class ScratchLayout:
         return max((field.end for field in self.fields), default=0)
 
 
-def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, name_slot_ascii, weapon_speeds_max):
+def build_scratch_layout(
+    base_va,
+    scratch_size,
+    num_bot_names,
+    name_slot_size,
+    name_slot_ascii,
+    weapon_speeds_max,
+    force_bot_ammo_max=0,
+    force_bot_ammo_slot_size=0,
+):
     BOT_STATE_BASE = 0x180
     MAX_BOT_SLOTS = 16
     bot_state_fields, bot_state_end = _bot_state_block(BOT_STATE_BASE, MAX_BOT_SLOTS)
@@ -256,4 +268,19 @@ def build_scratch_layout(base_va, scratch_size, num_bot_names, name_slot_size, n
         ScratchField('pc2_item_id',        0x1604, 0x04, 'pc2 weapon diag: Primary slot item id'),
         ScratchField('force_bot_item_name', 0x1608, 0x40, 'spawn: ASCII inventory item name to force-equip; NUL disables'),
     ])
+    # Battery + ammo top-up list applied to the bot when
+    # force_bot_item_name is set. force_bot_ammo_count holds the live length;
+    # force_bot_ammo_names is a flat array of (slot_size)-byte ASCII slots.
+    # Both fields are optional — callers that don't need them pass max=0 and
+    # the layout omits them entirely.
+    if force_bot_ammo_max > 0 and force_bot_ammo_slot_size > 0:
+        fields.extend([
+            ScratchField('force_bot_ammo_count', 0x1648, 0x04, 'spawn: live count of force_bot_ammo_names entries'),
+            ScratchField(
+                'force_bot_ammo_names',
+                0x164C,
+                force_bot_ammo_max * force_bot_ammo_slot_size,
+                'spawn: ASCII ammo-item names handed to the bot when force-equip is on',
+            ),
+        ])
     return ScratchLayout(base_va, scratch_size, fields)

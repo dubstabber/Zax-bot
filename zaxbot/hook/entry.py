@@ -68,6 +68,8 @@ def build_hook(section_va_abs):
         cfg.NAME_SLOT_SIZE,
         cfg.NAME_SLOT_ASCII,
         cfg.WEAPON_SPEEDS_MAX,
+        force_bot_ammo_max=cfg.FORCE_BOT_AMMO_MAX,
+        force_bot_ammo_slot_size=cfg.FORCE_BOT_AMMO_SLOT_SIZE,
     )
 
     a = Asm(section_va_abs + cfg.HOOK_ENTRY_OFF)
@@ -134,6 +136,8 @@ def build_hook(section_va_abs):
         projectile_speed=cfg.PROJECTILE_SPEED,
         weapon_speeds=cfg.WEAPON_SPEEDS,
         force_bot_item_name=cfg.resolve_force_bot_item_name(),
+        force_bot_ammo_names=cfg.resolve_force_bot_ammo_names(),
+        force_bot_ammo_slot_size=cfg.FORCE_BOT_AMMO_SLOT_SIZE,
         force_mode=cfg.FORCE_MODE,
     )
 

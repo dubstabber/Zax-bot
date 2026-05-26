@@ -65,6 +65,8 @@ class ScratchLayoutTests(unittest.TestCase):
             zax_patch.NAME_SLOT_SIZE,
             zax_patch.NAME_SLOT_ASCII,
             cfg.WEAPON_SPEEDS_MAX,
+            force_bot_ammo_max=cfg.FORCE_BOT_AMMO_MAX,
+            force_bot_ammo_slot_size=cfg.FORCE_BOT_AMMO_SLOT_SIZE,
         )
 
         self.assertEqual(layout.off('msg'), 0x30)
@@ -73,7 +75,10 @@ class ScratchLayoutTests(unittest.TestCase):
         self.assertEqual(layout.off('bot_names'), 0x900)
         self.assertEqual(layout.off('bot_names_ascii'), 0xB80)
         self.assertEqual(layout.off('force_bot_item_name'), 0x1608)
-        self.assertEqual(layout.used_size, 0x1648)
+        self.assertEqual(layout.off('force_bot_ammo_count'), 0x1648)
+        self.assertEqual(layout.off('force_bot_ammo_names'), 0x164C)
+        expected_end = 0x164C + cfg.FORCE_BOT_AMMO_MAX * cfg.FORCE_BOT_AMMO_SLOT_SIZE
+        self.assertEqual(layout.used_size, expected_end)
         self.assertLessEqual(layout.used_size, zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF)
 
     def test_layout_rejects_overlaps_and_overflow(self):

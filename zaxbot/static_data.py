@@ -89,6 +89,8 @@ def write_static_scratch_data(
     projectile_speed=600.0,
     weapon_speeds=(),
     force_bot_item_name=None,
+    force_bot_ammo_names=(),
+    force_bot_ammo_slot_size=0,
     force_mode=None,
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
@@ -144,6 +146,39 @@ def write_static_scratch_data(
             f'{len(force_name)} > {force_field.size}'
         )
     layout.write(section, scratch_off, 'force_bot_item_name', force_name)
+
+    # FORCE_BOT_AMMO_NAMES — packed flat into the slot table; the count field
+    # tells the asm loop how many slots are populated. Only emit when the
+    # layout actually allocated the ammo fields (callers that don't need them
+    # build the layout with force_bot_ammo_max=0 and the fields are absent).
+    if layout.has_field('force_bot_ammo_count'):
+        ammo_field = layout.field('force_bot_ammo_names')
+        if force_bot_ammo_slot_size <= 0:
+            raise ValueError(
+                'force_bot_ammo_slot_size must be > 0 when force_bot_ammo_names is allocated'
+            )
+        max_slots = ammo_field.size // force_bot_ammo_slot_size
+        if len(force_bot_ammo_names) > max_slots:
+            raise ValueError(
+                f'force_bot_ammo_names has {len(force_bot_ammo_names)} entries '
+                f'but the scratch table only holds {max_slots}'
+            )
+        packed = bytearray(ammo_field.size)
+        for idx, name in enumerate(force_bot_ammo_names):
+            if len(name) > force_bot_ammo_slot_size:
+                raise ValueError(
+                    f'force_bot_ammo_names[{idx}] is {len(name)} bytes; max '
+                    f'{force_bot_ammo_slot_size}'
+                )
+            slot_off = idx * force_bot_ammo_slot_size
+            packed[slot_off:slot_off + len(name)] = name
+        layout.write(section, scratch_off, 'force_bot_ammo_names', bytes(packed))
+        layout.write(
+            section,
+            scratch_off,
+            'force_bot_ammo_count',
+            struct.pack('<I', len(force_bot_ammo_names)),
+        )
 
     # The dump header magic is written once; runtime code rewrites tag/src/len.
     layout.write(section, scratch_off, 'thdr', struct.pack('<I', dump_magic))
