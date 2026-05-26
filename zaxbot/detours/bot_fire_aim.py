@@ -4,13 +4,15 @@ For bot controllers we synthesize fire/aim toward the nearest visible enemy:
 
   - Walk all 16 slots of ``mgr+0x290`` (the char array).
   - Skip NULL and the bot itself.
-  - In CTF (``menu_mode == 1``) only, skip same-team candidates. Teams are
-    read from a scratch cache populated at spawn time (``bot_team[16]`` for
-    bots, ``host_team`` for the local player). The cache exists because
-    the engine's ``sub_5BA820`` helper triggers a worldmgr sync that walks
-    the char array and is unsafe to call in a per-frame hot path (it trips
-    on ``sub_4FC200`` for any non-NULL garbage slot — the same engine bug
-    described in [[garbage-slot-crash]]).
+  - In CTF (``menu_mode == 1``) only, skip same-team candidates. Bot
+    teams are cached at spawn time (``bot_team[16]``); host's team is
+    read live each frame from ``*(host_part+0x14)`` so a mid-match team
+    switch (CTF blue↔red via F1) takes effect on the very next frame.
+    Caching matters for bots because ``sub_5BA820`` triggers a worldmgr
+    sync that walks the char array and is unsafe in a per-frame hot path
+    (it trips on ``sub_4FC200`` for any non-NULL garbage slot — the same
+    engine bug described in [[garbage-slot-crash]]); reading ``host_part``
+    directly avoids that call entirely.
   - Cheapest gates first: distance² against ``FIRE_RANGE_SQ`` before the
     engine LOS sweep at ``sub_491380``.
   - Track the closest survivor and aim/fire at it. No fallback to the host
@@ -34,7 +36,6 @@ from ..layout import ScratchLayout
 def emit(a: Asm, layout: ScratchLayout) -> None:
     bot_indices_va     = layout.va('bot_indices')
     bot_team_va        = layout.va('bot_team')
-    host_team_va       = layout.va('host_team')
     host_part_va       = layout.va('host_part')
     bot_pos_va         = layout.va('bot_pos')
     bot_dx_va          = layout.va('bot_dx')
@@ -122,9 +123,9 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x83\x3D' + le32(our_team_tmp_va) + b'\xFF')  # cmp [our_team_tmp], -1
     a.jz('s5436f0_skip_team_check')
     # Determine candidate's team:
-    #   cand_idx == 0          -> host_team
-    #   bot_indices[i]==cand_idx -> bot_team[i]
-    #   else                    -> unknown (don't filter)
+    #   cand_idx == 0            -> *(host_part+0x14)  (live)
+    #   bot_indices[i]==cand_idx -> bot_team[i]        (cached at spawn)
+    #   else                      -> unknown (don't filter)
     # Load cand_idx once; reused as the loop key for the bot_indices scan.
     # Using bot_indices instead of bot_chars survives natural respawns:
     # detour_542550 re-captures the controller on respawn, but bot_chars[]
@@ -132,18 +133,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x8B\x15' + le32(cand_idx_va))                # mov edx, [cand_idx]
     a.raw(b'\x85\xD2')                                    # test edx, edx
     a.jnz('s5436f0_cand_team_bot_scan')
-    # Host team — refresh live from `*(host_part+0x14)` so a mid-match team
-    # switch (e.g. CTF blue→red via the F1 menu) takes effect immediately
-    # without needing to re-spawn bots. Fall back to the cached sentinel if
-    # host_part isn't captured yet.
+    # Host team — read live from `*(host_part+0x14)` so a mid-match team
+    # switch (e.g. CTF blue→red via the F1 menu) takes effect on the next
+    # frame. host_part is 0 until the first bot spawn captures it; treat
+    # that as "unknown" so the team filter is bypassed.
     a.raw(b'\xA1' + le32(host_part_va))                   # mov eax, [host_part]
     a.raw(b'\x85\xC0')                                    # test eax, eax
-    a.jz('s5436f0_host_team_fallback')
+    a.jz('s5436f0_skip_team_check')                       # uncaptured -> don't filter
     a.raw(b'\x8B\x40\x14')                                # mov eax, [host_part+0x14]
-    a.raw(b'\xA3' + le32(host_team_va))                   # mov [host_team], eax (cache for next time)
-    a.jmp('s5436f0_cand_team_check')
-    a.label('s5436f0_host_team_fallback')
-    a.raw(b'\xA1' + le32(host_team_va))                   # mov eax, [host_team]
     a.jmp('s5436f0_cand_team_check')
 
     a.label('s5436f0_cand_team_bot_scan')

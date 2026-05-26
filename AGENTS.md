@@ -59,15 +59,24 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   PC2 does not reliably see the chosen name because the synthetic DirectPlay
   player-data store is not populated.
 - Each bot name owns a deterministic `(color1, color2)` pair from
-  `BOT_COLORS` in `zaxbot/config.py`. At spawn, the patch mirrors the
-  engine's own `sub_5ABE80` (server-side handler for "client options
-  changed"): walk the bot char's first child via `sub_4FC7C0`/`sub_4FC7D0`,
-  look up the appearance via `sub_418790(dword_6C0520, child)`, and
-  write the chosen colors as floats at `+0x0C` and `+0x18`. The pcfg
-  (`*(stats+0x1C)+4/+8`) is also kept in sync for persistence. After the
-  writes, the active gametype's vtable[+0x9C] (`sub_4698B0` in CTF,
-  `nullsub_3` in DM/SK) is invoked to let CTF replace `color1` with the
-  team hue.
+  `BOT_COLORS` in `zaxbot/config.py`. Coloring is split across two phases:
+  - **Pre-spawn** (before `sub_59DF90`): the patch writes the chosen
+    `(color1, color2)` into the bot's pcfg at `*(stats+0x1C)+4/+8`. SK
+    paints each player's collector during character creation by reading
+    `pcfg.color1` off the bound participant; the colors must be in place
+    before `sub_59DF90` or the collector stays the default yellow until
+    the bot dies and respawns (the respawn path re-reads pcfg).
+  - **Post-spawn** (after `sub_59DF90`): the patch mirrors the engine's
+    own `sub_5ABE80` (server-side handler for "client options changed").
+    Walk the bot char's first child via `sub_4FC7C0`/`sub_4FC7D0`, look up
+    the appearance via `sub_418790(dword_6C0520, child)`, and write the
+    chosen colors as floats at `+0x0C` and `+0x18`. Then invoke the active
+    gametype's vtable[+0x9C] (`sub_4698B0` in CTF, `nullsub_3` in DM/SK)
+    to let CTF replace `color1` with the team hue.
+
+  Both writes share the same `picked_name_idx`; the post-spawn name write
+  reuses it instead of re-rolling RNG so the collector hue (from pcfg) and
+  the character sprite hue (from appearance) always match.
 - Up to map `MaxPlayers` bots are supported, bounded by 16 synthetic ids
   (`0xBADC0DE0..0xBADC0DEF`).
 - `mgr + 0x290` is pre-grown to 16 entries before bot `sub_59DF90` calls.
@@ -75,15 +84,23 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   changes.
 - Mode detection calls the engine's `sub_59FF90(ecx=mgr)` getter to get the
   active `CMultiPlayerGameType` instance and compares `[result+0]` against
-  the three known game-type vtables — 0 (DM), 1 (CTF), or 2 (SK). CTF is
-  the only team mode: digit `'1'`/`'2'` writes team `0`/`1` (Blue/Red).
-  DM and SK are both free-for-all (each player has their own collector
-  base in SK), so each bot gets `slot + 0x10` (16..31) — unique per bot
-  to dodge the same-team spawn-picker pathology, and well above the
-  real-player team range (host=0, PC2=1, …) so `sub_51D400` never
-  mis-labels a bot kill as a "TEAMMATE" kill. Unknown vtables drop a
-  one-shot 0x200-byte dump of the game-type object and fall back to DM.
-  `zaxbot/config.py` exposes a `FORCE_MODE` knob for offline testing.
+  the three known game-type vtables — 0 (DM), 1 (CTF), or 2 (SK). Bot team
+  id (`stats + 0x14`) is mode-specific:
+  - **CTF** (1): user-chosen team verbatim (`0`=Blue, `1`=Red).
+  - **SK** (2): `botidx` — unique per bot AND inside `[0, MaxPlayers)`, the
+    valid range for per-player collector ownership. `slot + 0x10` falls
+    outside that range, which makes the engine fall back to a single shared
+    collector for every bot (observed as "one bot has a collector, the
+    rest are red" with 12 bots). Bots still all have different team ids
+    so `sub_51D400` doesn't mis-label cross-bot kills as TEAMMATE.
+  - **DM** (0): `slot + 0x10` (16..31) — unique per bot and above the real-
+    player team range (host=0, PC2=1, …) so `sub_51D400` never mis-labels a
+    bot kill as TEAMMATE. DM has no per-player collector, so the out-of-
+    range id doesn't bite anything.
+
+  Unknown vtables drop a one-shot 0x200-byte dump of the game-type object
+  and fall back to DM. `zaxbot/config.py` exposes a `FORCE_MODE` knob for
+  offline testing.
 - Bots do not navigate. They keep a walking controller for idle animation;
   `detour_542360` zeroes movement, and `detour_5436F0` synthesizes aim/fire
   toward the host when range and line of sight allow it.

@@ -10,12 +10,16 @@ Flow:
   4. Inject a synthetic "player added" entry into ``dpmgr+0x44D`` and call
      ``sub_480800`` synchronously with ``edi = host_char_ptr`` — the engine
      creates the participant via its natural factory path.
-  5. Bind the bot's team in stats+0x14 via ``sub_5BA820``.
-  6. Pre-grow ``mgr+0x290`` to capacity 16 if still at initial size (avoids
+  5. Bind the bot's team in stats+0x14 (mode-specific: see comment in body).
+  6. Pre-spawn: roll the bot's name/color idx and write color1/color2 into
+     pcfg so SK's collector binding picks them up at character creation.
+  7. Pre-grow ``mgr+0x290`` to capacity 16 if still at initial size (avoids
      the 9th-char OOB crash; see [[garbage-slot-crash]] memory).
-  7. Call ``sub_59DF90(mgr, a2, botidx, 0, 0)`` to create + place the char.
-  8. Pick a random name and copy it into the participant's stats CString.
-  9. Cache the bot's character pointer in the ``bot_chars`` scratch table.
+  8. Call ``sub_59DF90(mgr, a2, botidx, 0, 0)`` to create + place the char.
+  9. Copy the picked bot name into the participant's stats CString.
+ 10. Cache the bot's character pointer in the ``bot_chars`` scratch table.
+ 11. Apply color1/color2 floats to the appearance child and let the gametype's
+     vtable[+0x9C] override color1 (CTF only).
 """
 
 from .. import addresses as ax
@@ -35,7 +39,6 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     bot_indices_va      = layout.va('bot_indices')
     bot_chars_va        = layout.va('bot_chars')
     bot_team_va         = layout.va('bot_team')
-    host_team_va        = layout.va('host_team')
     host_part_va        = layout.va('host_part')
     botp_va             = layout.va('botp')
     botidx_va           = layout.va('botidx')
@@ -180,14 +183,19 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x05' + le32(phase_b_in_flight_va) + le32(0))
     leave_cs(a)
 
-    # --- Bind bot team (stats+0x14). CTF is the only team mode — write the
-    # user-chosen team verbatim ({0=Blue, 1=Red} per the resolver at
-    # sub_4698B0). DM and SK are both free-for-all with per-player colors,
-    # so each bot gets `slot + 0x10` to (a) stay unique per bot — dodging
-    # the same-team spawn-picker pathology / collector-base collapse — and
-    # (b) avoid colliding with real-player team ids (host=0, PC2=1, ...,
-    # observed in snapshots). A collision with PC2's team would make
-    # `sub_51D400` format the kill message as "killed TEAMMATE" in DM.
+    # --- Bind bot team (stats+0x14). Mode-specific:
+    # - CTF (menu_mode == 1): chosen team verbatim ({0=Blue, 1=Red} per the
+    #   resolver at sub_4698B0).
+    # - SK  (menu_mode == 2): `botidx` — unique per bot AND within [0, 16),
+    #   the valid range for per-player collector ownership. Using
+    #   `slot + 0x10` here makes every bot's team id land outside that range,
+    #   which makes the engine fall back to a single shared collector (the
+    #   "one bot has a collector, the rest are red" symptom observed in
+    #   12-bot SK matches). Bots still all have *different* team ids, so
+    #   sub_51D400 doesn't mis-label cross-bot kills as TEAMMATE.
+    # - DM  (default): `slot + 0x10` to dodge sub_51D400's TEAMMATE mis-label
+    #   when a bot kills a real client (host=0, PC2=1, …). DM has no per-
+    #   player collector, so the out-of-range id doesn't bite anything.
     a.raw(b'\x83\x3D' + le32(botp_va) + b'\x00')
     a.jz('spawn_skip_team')
     a.raw(b'\x8B\x0D' + le32(botidx_va))                     # ecx = botidx (arg to sub_5BA820)
@@ -195,8 +203,13 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x85\xC0'); a.jz('spawn_skip_team')
     a.raw(b'\x83\x3D' + le32(menu_mode_va) + b'\x01')        # cmp menu_mode, 1 (CTF?)
     a.jz('spawn_team_chosen')
-    a.raw(b'\x8B\x15' + le32(active_bot_slot_va))            # DM/SK: team = slot + 0x10
+    a.raw(b'\x83\x3D' + le32(menu_mode_va) + b'\x02')        # cmp menu_mode, 2 (SK?)
+    a.jz('spawn_team_sk')
+    a.raw(b'\x8B\x15' + le32(active_bot_slot_va))            # DM: team = slot + 0x10
     a.raw(b'\x83\xC2\x10')
+    a.jmp('spawn_team_write')
+    a.label('spawn_team_sk')
+    a.raw(b'\x8B\x15' + le32(botidx_va))                     # SK: team = botidx (unique in [0, 16))
     a.jmp('spawn_team_write')
     a.label('spawn_team_chosen')
     a.raw(b'\x8B\x15' + le32(chosen_team_va))                # CTF: chosen_team (0=Blue, 1=Red)
@@ -209,6 +222,38 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x89\x14\x85' + le32(bot_team_va))               # mov [bot_team + eax*4], edx
     logc(ord('T'))
     a.label('spawn_skip_team')
+
+    # --- Pre-spawn: pick the bot's name/color idx and write color1/color2
+    # into the bot's pcfg (*(stats+0x1C)+4/+8) BEFORE sub_59DF90 runs. SK's
+    # collector binding reads pcfg.color1 during character creation; writing
+    # only after sub_59DF90 leaves every bot's collector yellow until it dies
+    # and respawns (the engine re-reads pcfg on respawn, hiding the bug).
+    # The picked idx is stashed in picked_name_idx_va and reused by the
+    # post-spawn name and appearance writes — they must NOT re-roll RNG, or
+    # the collector (painted from the pre-spawn pcfg) and the character
+    # sprite (painted from the post-spawn appearance) would disagree.
+    a.raw(b'\x83\x3D' + le32(botp_va) + b'\x00')              # cmp [botp], 0
+    a.jz('spawn_skip_prewrite')
+    a.raw(b'\x6A' + bytes([cfg.NUM_BOT_NAMES - 1]))           # push (NUM-1)
+    a.raw(b'\x6A\x00')                                         # push 0
+    a.raw(b'\xB9' + le32(ax.RNG_OBJ_VA))                       # mov ecx, RNG
+    a.call_va(ax.RNG_SUB)                                      # eax = idx in [0,NUM-1]
+    a.raw(b'\xA3' + le32(picked_name_idx_va))                  # mov [picked_name_idx], eax
+    a.raw(b'\x8B\x0D' + le32(botidx_va))                       # ecx = botidx
+    a.call_va(ax.SUB_5BA820)                                   # eax = bot stats
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_prewrite')
+    a.raw(b'\x8B\x40\x1C')                                     # eax = *(stats+0x1C) = pcfg*
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_prewrite')
+    a.raw(b'\x3D' + le32(ax.HOST_PLAYER_CFG_VA))               # cmp eax, &dword_6BD2F8
+    a.jz('spawn_skip_prewrite')                                # never clobber host local config
+    a.raw(b'\x8B\x15' + le32(picked_name_idx_va))              # edx = idx
+    a.raw(b'\xC1\xE2\x03')                                     # shl edx, 3
+    a.raw(b'\x81\xC2' + le32(bot_colors_va))                   # add edx, bot_colors
+    a.raw(b'\x8B\x0A')                                         # ecx = [edx]    color1 int
+    a.raw(b'\x89\x48\x04')                                     # mov [eax+4], ecx
+    a.raw(b'\x8B\x4A\x04')                                     # ecx = [edx+4]  color2 int
+    a.raw(b'\x89\x48\x08')                                     # mov [eax+8], ecx
+    a.label('spawn_skip_prewrite')
 
     # --- Create + place the character: sub_59DF90(mgr, a2, botidx, 0, 0).
     logc(ord('P'))
@@ -283,14 +328,12 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
 
     logc(ord('V'))
 
-    # --- Set the bot's display name via sub_4E1930(stats, ASCII name).
+    # --- Set the bot's display name via sub_4E1930(stats, ASCII name). Reuses
+    # the picked_name_idx set in the pre-spawn block above — must not re-roll
+    # or the name will pair with one color and the collector with another.
     a.raw(b'\xA1' + le32(botp_va))                            # mov eax, [botp]
     a.raw(b'\x85\xC0'); a.jz('spawn_skip_name')
-    a.raw(b'\x6A' + bytes([cfg.NUM_BOT_NAMES - 1]))           # push (NUM-1)
-    a.raw(b'\x6A\x00')                                         # push 0
-    a.raw(b'\xB9' + le32(ax.RNG_OBJ_VA))                       # mov ecx, RNG
-    a.call_va(ax.RNG_SUB)                                      # eax = idx in [0,NUM-1]
-    a.raw(b'\xA3' + le32(picked_name_idx_va))                  # mov [picked_name_idx], eax
+    a.raw(b'\xA1' + le32(picked_name_idx_va))                  # eax = picked idx (pre-spawn)
     a.raw(b'\xC1\xE0\x04')                                     # shl eax, 4  (NAME_SLOT_ASCII=16)
     a.raw(b'\x05' + le32(bot_names_ascii_va))                  # add eax, table
     a.raw(b'\x50')                                             # push eax (Source)
@@ -323,23 +366,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # Bot chars take the child branch (sub_4FC7C0 > 0 in practice), and
     # that child IS what carries the appearance lookup the renderer reads.
     # CTF preempts color1 with the team palette at render time — harmless.
-    # Also mirror the colors into the bot's pcfg (*(stats+0x1C)+4/+8) so the
-    # next match's setup picks them up on its own re-sync.
-    a.raw(b'\x8B\x0D' + le32(botidx_va))                      # ecx = botidx
-    a.call_va(ax.SUB_5BA820)                                   # eax = bot stats
-    a.raw(b'\x85\xC0'); a.jz('spawn_skip_pcfg_write')
-    a.raw(b'\x8B\x40\x1C')                                     # eax = *(stats+0x1C) = pcfg*
-    a.raw(b'\x85\xC0'); a.jz('spawn_skip_pcfg_write')
-    a.raw(b'\x3D' + le32(ax.HOST_PLAYER_CFG_VA))              # cmp eax, &dword_6BD2F8
-    a.jz('spawn_skip_pcfg_write')                              # never clobber host local config
-    a.raw(b'\x8B\x15' + le32(picked_name_idx_va))              # edx = idx
-    a.raw(b'\xC1\xE2\x03')                                     # shl edx, 3
-    a.raw(b'\x81\xC2' + le32(bot_colors_va))                   # add edx, bot_colors
-    a.raw(b'\x8B\x0A')                                         # ecx = [edx]    color1 int
-    a.raw(b'\x89\x48\x04')                                     # mov [eax+4], ecx
-    a.raw(b'\x8B\x4A\x04')                                     # ecx = [edx+4]  color2 int
-    a.raw(b'\x89\x48\x08')                                     # mov [eax+8], ecx
-    a.label('spawn_skip_pcfg_write')
+    # The pcfg mirror happens in the pre-spawn block above (must precede
+    # sub_59DF90 so the SK collector picks up the right color on first paint).
 
     # Apply colors via the child-entity appearance path.
     a.raw(b'\xA1' + le32(botchar_va))                         # eax = bot char
@@ -388,22 +416,20 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
 
     a.label('spawn_skipai')
 
-    # Capture host's participant ptr (and initial team) once per match;
-    # sentinel -1 means still unset. fire/aim re-reads `*(host_part+0x14)`
-    # live so a mid-match team switch (CTF blue→red) takes effect on the
-    # very next frame without us recapturing. Doing this AFTER sub_59DF90
-    # has run for the new bot keeps the worldmgr's internal char-array
-    # sync in a known-good state — calling sub_5BA820(0) earlier crashes
-    # inside the auto-sync via the [[garbage-slot-crash]] path.
-    a.raw(b'\x83\x3D' + le32(host_team_va) + b'\xFF')        # cmp [host_team], -1
-    a.jnz('spawn_skip_host_team')
+    # Capture host's participant ptr once per match (sentinel 0 = unset).
+    # fire/aim reads team live from `*(host_part+0x14)` each frame so a
+    # mid-match team switch (CTF blue→red) takes effect immediately
+    # without re-spawning. Doing this AFTER sub_59DF90 has run for the new
+    # bot keeps the worldmgr's internal char-array sync in a known-good
+    # state — calling sub_5BA820(0) earlier crashes inside the auto-sync
+    # via the [[garbage-slot-crash]] path.
+    a.raw(b'\x83\x3D' + le32(host_part_va) + b'\x00')        # cmp [host_part], 0
+    a.jnz('spawn_skip_host_part')
     a.raw(b'\x31\xC9')                                        # xor ecx, ecx (host idx = 0)
     a.call_va(ax.SUB_5BA820)                                  # eax = host participant
-    a.raw(b'\x85\xC0'); a.jz('spawn_skip_host_team')
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_host_part')
     a.raw(b'\xA3' + le32(host_part_va))                       # mov [host_part], eax
-    a.raw(b'\x8B\x40\x14')                                    # mov eax, [part+0x14]
-    a.raw(b'\xA3' + le32(host_team_va))                       # mov [host_team], eax
-    a.label('spawn_skip_host_team')
+    a.label('spawn_skip_host_part')
 
     # Confirm with on-screen message.
     a.raw(b'\xC7\x05' + le32(active_bot_slot_va) + le32(0xFFFFFFFF))

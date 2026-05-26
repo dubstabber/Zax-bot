@@ -19,7 +19,6 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     cap_a2              = layout.va('cap_a2')
     bot_participants_va = layout.va('bot_participants')
     bot_team_va         = layout.va('bot_team')
-    host_team_va        = layout.va('host_team')
     host_part_va        = layout.va('host_part')
 
     a.label('detour_df90')
@@ -36,9 +35,9 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xFC')                                # cld
     a.raw(b'\xF3\xAB')                            # rep stosd
     a.raw(b'\xBF' + le32(bot_team_va))            # mov edi, bot_team_va
-    a.raw(b'\xB9\x11\x00\x00\x00')                # mov ecx, 17  (16 bot_team + 1 host_team)
+    a.raw(b'\xB9\x10\x00\x00\x00')                # mov ecx, 16  (bot_team[16])
     a.raw(b'\x83\xC8\xFF')                        # or eax, -1
-    a.raw(b'\xF3\xAB')                            # rep stosd (writes bot_team[16] + host_team)
+    a.raw(b'\xF3\xAB')                            # rep stosd
     # Clear cached host participant ptr to NULL so the next match's first
     # spawn re-captures it. Must be 0 (not -1) so fire/aim's `test eax`
     # guard works without dereferencing a bogus pointer.
