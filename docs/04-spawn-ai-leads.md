@@ -88,13 +88,72 @@ keeps the controller and captures it:
 - `detour_5AA4E0` skips the camera tracker while `botmode == 1`.
 - `detour_542550` captures the bot's `CPlayerWalkingControlAI` by active slot
   during spawn and by player index after natural respawn.
-- `detour_542360` returns a zero movement vector for captured bot controllers,
-  so the bot stands still without stealing host input.
+- `detour_542360` synthesizes a movement vector for captured bot controllers
+  (wander + hazard repulse + item attractor — see "Bot movement" below).
+  Falls back to a zero vector when `MOVEMENT_ENABLED == 0`.
 - `detour_5436F0` synthesizes aim/fire for captured bot controllers when the
   host is within `FIRE_RANGE_SQ` and `sub_491380` reports line of sight.
 
-Net result: bots are stationary, animate idly, and can shoot at the host, but
-they do not navigate.
+Net result (DM): bots wander the map, drift toward visible pickups within
+range, steer away from cached damage zones, and shoot at the host when in
+sight. CTF/SK bots still wander but don't pursue objectives.
+
+## Bot movement (DM)
+
+The movement detour at `0x542360` synthesizes a 2D velocity by accumulating
+three contributions and writing the normalized direction (scaled by
+`cfg.BOT_MOVE_SPEED`) along with `atan2(dy, dx)` via `sub_509100` to the
+engine's per-call output pointers.
+
+1. **Random-target wander.** Each bot tracks a `(wander_x, wander_y)` and a
+   tick counter (`bot_wander_ticks[slot]`). When the counter expires or
+   stuck-detection trips, the detour rolls a new target via
+   `sub_55C4E0(RNG, -R, +R)` on each axis (same RNG the lead coin-flip uses),
+   added to the bot's current position. `cfg.WANDER_TARGET_RADIUS` sets R.
+2. **Hazard repulse.** `scan_hazards` (in `zaxbot/detours/world_scan.py`)
+   walks the world entity array at `mgr+0x2BC..0x2C0` once per match (called
+   from `detour_df90` after the state wipe) and caches every entity of
+   class `CDamageExpandingRadiusAI` (descriptor at `dword_6BD74C`, lazy-init
+   via accessor `sub_4764A0`) into `hazard_table`. Per tick, each cached
+   hazard within `cfg.HAZARD_REPULSION_RADIUS_SQ` contributes
+   `weight / sqrt(d²) * (bot - hazard)` to the accumulator.
+3. **Item attractor.** `pick_pickup` does the same walk but for class
+   `CPickupAI` (descriptor `dword_6D0B9C`, accessor `sub_53D190`),
+   tracking the closest entity within `cfg.ITEM_ATTRACTOR_RADIUS_SQ` and
+   LOS-testing the winner via `sub_491380`. The result is cached per bot
+   for `cfg.ITEM_SCAN_INTERVAL_FRAMES` frames; when valid, the cached
+   target contributes `weight * (pickup - bot)` to the accumulator. Engine
+   collision (`sub_4303F0`, downstream) triggers the pickup itself when
+   the bot walks over it.
+
+Stuck detection compares the bot's current position against
+`bot_last_x/y[slot]` (refreshed every tick); if `d² < STUCK_DELTA_SQ` for
+`STUCK_FRAMES_THRESHOLD` consecutive frames, the wander target is
+re-rolled immediately. This catches bots wedged against walls or
+unreachable random targets.
+
+A `MOVEMENT_ENABLED = False` panic switch reverts to the original
+zero-vector behavior with a one-byte scratch flip; no rebuild needed if
+the scratch is patched at runtime, otherwise rebuild.
+
+### Movement calibration recipe
+
+The engine multiplies the velocity output by ~100 inside `sub_543CED`
+before `sub_4303F0`, so `cfg.BOT_MOVE_SPEED` is in small units. Default
+3.0 ≈ human walk pace empirically.
+
+1. Spawn one bot (B → 1 in DM). Watch its walk speed compared to a
+   strafing host.
+2. If the bot crawls, raise `BOT_MOVE_SPEED` (try 5.0, 8.0). If it
+   teleports / clips through walls, lower (try 1.5, 1.0).
+3. Press R, decode the `ai_move` snapshot chunk via `tools/diffdump.py`
+   — verify `bot_wander_x/y` is within `WANDER_TARGET_RADIUS` of the
+   bot's current position and `stuck_count` stays near zero while the
+   bot is moving. `tag_hazard` shows the cached `hazard_table` entries.
+4. If hazard avoidance doesn't kick in for lava on a specific map, the
+   shipped lava entity probably isn't `CDamageExpandingRadiusAI` — the
+   `hazard_table` chunk will be empty. Add candidate descriptor VAs to
+   `cfg.HAZARD_CLASSES` (currently a single-entry tuple).
 
 ## Debug weapon override
 
@@ -233,13 +292,14 @@ ignore this knob (they skip `apply_lead` unconditionally).
 
 ## Still open
 
-- Movement/navigation. Movement is bundled with either the player's walking
-  controller or monster move behavior. The current hook only zeroes movement;
-  it does not feed a bot movement vector.
-- Objective AI. Bots spawn correctly in all three modes and shoot at the
-  host within range, but they do not navigate — so CTF bots can't chase
-  flags and SK bots can't collect salvage at their own base. Same
-  navigation/goal-seeking workstream as DM movement.
+- Engine-waypoint navigation. The current DM movement is a random-target
+  wander with hazard repulse and item attractor; bots will bump walls and
+  re-roll instead of routing around them. The shipped `CWayPointMap` /
+  `CWayPointPath` infrastructure should give a proper navigation graph
+  per level — bolts onto the existing `bot_wander_x/y` slot.
+- CTF/SK objective AI. CTF bots now move but don't pursue flags; SK bots
+  don't gather at their own collector. Both require team/objective
+  awareness on top of the movement primitive.
 - Remote display name. Host writes the stats CString after spawn, but the
   synthetic DirectPlay player-data store is not populated for PC2.
 

@@ -55,6 +55,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     tag_pc2_weapon_va  = layout.va('tag_pc2_weapon')
     tag_host_wpn_bytes_va = layout.va('tag_host_wpn_bytes')
     tag_pc2_wpn_bytes_va  = layout.va('tag_pc2_wpn_bytes')
+    tag_ai_move_va        = layout.va('tag_ai_move')
+    tag_hazard_va         = layout.va('tag_hazard')
     primary_hash_va    = layout.va('primary_hash')
     host_weapon_obj_va = layout.va('host_weapon_obj')
     host_proto_va_va   = layout.va('host_proto_va')
@@ -78,6 +80,17 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     ai_fire_src_va     = layout.va('cand_pos')
     ai_pos_src_va      = layout.va('prev_pos_table')
     weapon_info_src_va = layout.va('current_weapon_obj')
+
+    # Bot-movement scratch dump regions:
+    #   ai_move: bot_wander_x through bot_pickup_valid (10 contiguous parallel
+    #            u32 arrays × 16 bot slots × 4 bytes = 640 bytes). Exposes the
+    #            current wander target, last-position cache, stuck counter,
+    #            item-scan stagger, and pickup cache per slot.
+    #   hazard:  hazard_count + hazard_table (4 + 32*12 = 388 bytes). Inspect
+    #            after pressing R to verify the proactive scan picked up
+    #            damage zones on the current map.
+    ai_move_src_va = layout.va('bot_wander_x')
+    hazard_src_va  = layout.va('hazard_count')
 
     a.label('do_snapshot')
     # Open zax_dump.bin (append).
@@ -138,6 +151,13 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     emit_chunk(tag_ai_pos_va,    b'\xB8' + le32(ai_pos_src_va),         0x100, 'snap_skip_ai_pos')
     emit_chunk(tag_weapon_info_va, b'\xB8' + le32(weapon_info_src_va),    0x14, 'snap_skip_weapon_info')
 
+    # Bot-movement scratch dumps. ai_move covers 12 per-bot fields × 16
+    # slots × 4 bytes = 768 = 0x300 (wander state + stuck + item attractor
+    # cache + last_damage + flee_ticks). hazard covers hazard_count +
+    # hazard_table.
+    emit_chunk(tag_ai_move_va,   b'\xB8' + le32(ai_move_src_va),        0x300, 'snap_skip_ai_move')
+    emit_chunk(tag_hazard_va,    b'\xB8' + le32(hazard_src_va),         0x190, 'snap_skip_hazard')
+
     # --- Host-side weapon lookup (diagnostic). Resolves the host's currently
     # equipped Primary weapon and stashes (item_id, weapon_obj, item_def) so
     # the user can discover valid item ids by picking up weapons in-game and
@@ -153,6 +173,13 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x85\xC0'); a.jz('snap_skip_host_wpn')
     a.raw(b'\x8B\x08')                                        # ecx = charArray[0] (host char)
     a.raw(b'\x85\xC9'); a.jz('snap_skip_host_wpn')
+    # Range-check the char ptr before calling sub_4267E0 (`mov eax,[ecx];
+    # jmp [eax+0x90]`). On lava maps the host slot occasionally holds a
+    # small sentinel (observed: 4) rather than a heap pointer, which
+    # page-faults `mov eax,[ecx]`. Char pointers are heap-allocated, so
+    # require >= 0x100000 (above the static .data area).
+    a.raw(b'\x81\xF9\x00\x00\x10\x00')                        # cmp ecx, 0x100000
+    a.jb('snap_skip_host_wpn')
     a.call_va(ax.SUB_4267E0_VA)                               # eax = inv
     a.raw(b'\x85\xC0'); a.jz('snap_skip_host_wpn')
     a.raw(b'\x89\xC6')                                        # esi = inv
@@ -202,6 +229,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x8B\x48\x04')                                    # fallback: charArray[1]
     a.label('snap_pc2_have_char')
     a.raw(b'\x85\xC9'); a.jz('snap_skip_pc2_wpn')
+    # Same range check as host_weapon — see note above. The PC2 slot is
+    # the actual crash-trigger on the lava map (charArray[2] = 4 sentinel
+    # caused #PF on sub_4267E0's `mov eax, [ecx]`).
+    a.raw(b'\x81\xF9\x00\x00\x10\x00')                        # cmp ecx, 0x100000
+    a.jb('snap_skip_pc2_wpn')
     a.call_va(ax.SUB_4267E0_VA)                               # eax = inv
     a.raw(b'\x85\xC0'); a.jz('snap_skip_pc2_wpn')
     a.raw(b'\x89\xC6')                                        # esi = inv

@@ -203,6 +203,35 @@ SUB_480800_VA = 0x480800   # ecx=dpmgr, edi=host_char; consumes our DP-queue ent
 # --- sub_4F1050 (mgr -> active char) ---------------------------------------
 SUB_4F1050_VA = 0x4F1050   # __thiscall(mgr) -> active char ptr (0 if none)
 
+# --- World-manager entity array (used by bot movement to enumerate hazards
+# and pickups). Distinct from the per-class char array at `mgr + 0x290`: this
+# is the master list of every spawned entity (chars, pickups, damage zones,
+# projectiles, etc.). Confirmed via sub_4F1050 / sub_4F0C70 disasm — the
+# latter decrements `[esi+0x2C0]` when an entity is removed. Iteration form
+# from `sub_4F1050`:
+#   count = *(u32*)(mgr + 0x2C0)
+#   arr   = *(u32*)(mgr + 0x2BC)
+#   for (i in 0..count): ent = arr[i*4]   # array of DWORD ptrs, NULL = gap
+WORLDMGR_ENT_LIST_OFF  = 0x2BC
+WORLDMGR_ENT_COUNT_OFF = 0x2C0
+
+# --- AI-component class descriptors (used by world_scan to identify which
+# entities are hazards vs pickups). Each accessor lazy-inits the global on
+# first call and then returns the cached pointer; calling the accessor at
+# scan time is safer than reading the global cold.
+CPICKUP_AI_CLASS_VA          = 0x6D0B9C   # dword_6D0B9C — CPickupAI class descriptor
+CPICKUP_AI_ACCESSOR_VA       = 0x53D190   # () -> dword_6D0B9C (lazy init)
+CDAMAGE_RADIUS_AI_CLASS_VA   = 0x6BD74C   # dword_6BD74C — CDamageExpandingRadiusAI class descriptor
+CDAMAGE_RADIUS_AI_ACCESSOR_VA = 0x4764A0  # () -> dword_6BD74C (lazy init)
+
+# CEntityDestructable schema field: "Cur Damage" — float at char + 0x7C —
+# accumulates total damage taken. Snapshotted as 83.94 on a bot that walked
+# over lava, vs 0.0 on the unhurt host. Used by detour_542360 for reactive
+# hazard avoidance: when cur_damage increases between frames the bot took
+# damage from SOMETHING (lava, fire, weapon, etc.) and we force an immediate
+# wander retarget. Source: sub_48C380 (CEntityDestructable schema init).
+CHAR_CUR_DAMAGE_OFF = 0x7C
+
 # --- operator new / delete (used by mgr+0x290 pre-grow) --------------------
 OP_NEW_VA     = 0x5D034A   # __cdecl operator new(size_t) -> ptr in eax
 OP_DELETE_VA  = 0x5D0330   # __cdecl operator delete(ptr)

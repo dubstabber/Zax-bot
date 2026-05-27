@@ -64,6 +64,10 @@ class Asm:
         self.raw(b'\x0F\x87')
         self._rel32_fixup(label, 'lbl')
 
+    def jbe(self, label):     # 0F 86 rel32 (unsigned <=)
+        self.raw(b'\x0F\x86')
+        self._rel32_fixup(label, 'lbl')
+
     def jge(self, label):     # 0F 8D rel32 (signed >=)
         self.raw(b'\x0F\x8D')
         self._rel32_fixup(label, 'lbl')

@@ -26,6 +26,8 @@ DUMP_TAGS = (
     ('tag_pc2_weapon',  'pc2_weapon'),
     ('tag_host_wpn_bytes', 'host_wpn_b'),
     ('tag_pc2_wpn_bytes',  'pc2_wpn_b'),
+    ('tag_ai_move', 'ai_move'),
+    ('tag_hazard',  'hazard'),
 )
 
 
@@ -95,6 +97,19 @@ def write_static_scratch_data(
     force_bot_ammo_names=(),
     force_bot_ammo_slot_size=0,
     force_mode=None,
+    movement_enabled=True,
+    wander_target_radius=600.0,
+    wander_target_timeout_frames=600,
+    stuck_frames_threshold=30,
+    stuck_delta_sq=4.0,
+    item_attractor_radius_sq=40000.0,
+    item_attractor_weight=0.7,
+    item_scan_interval_frames=30,
+    hazard_repulsion_radius_sq=90000.0,
+    hazard_repulsion_weight=2.0,
+    hazard_default_radius_sq=90000.0,
+    bot_move_speed=3.0,
+    hazard_flee_frames=120,
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
     # meaningful — "spawn one bot"); CTF is the only team mode and accepts
@@ -191,6 +206,36 @@ def write_static_scratch_data(
             'force_bot_ammo_count',
             struct.pack('<I', len(force_bot_ammo_names)),
         )
+
+    # --- Bot movement knobs (DM-only first pass) --------------------------
+    # All written here so the per-frame movement detour can read them as
+    # plain DWORDs without re-encoding constants every build.
+    layout.write(section, scratch_off, 'movement_enabled',
+                 struct.pack('<I', 1 if movement_enabled else 0))
+    layout.write(section, scratch_off, 'wander_target_radius',
+                 struct.pack('<f', wander_target_radius))
+    layout.write(section, scratch_off, 'wander_target_timeout',
+                 struct.pack('<I', wander_target_timeout_frames))
+    layout.write(section, scratch_off, 'stuck_frames_threshold',
+                 struct.pack('<I', stuck_frames_threshold))
+    layout.write(section, scratch_off, 'stuck_delta_sq',
+                 struct.pack('<f', stuck_delta_sq))
+    layout.write(section, scratch_off, 'item_attractor_radius_sq',
+                 struct.pack('<f', item_attractor_radius_sq))
+    layout.write(section, scratch_off, 'item_attractor_weight',
+                 struct.pack('<f', item_attractor_weight))
+    layout.write(section, scratch_off, 'item_scan_interval',
+                 struct.pack('<I', item_scan_interval_frames))
+    layout.write(section, scratch_off, 'hazard_repulsion_radius_sq',
+                 struct.pack('<f', hazard_repulsion_radius_sq))
+    layout.write(section, scratch_off, 'hazard_repulsion_weight',
+                 struct.pack('<f', hazard_repulsion_weight))
+    layout.write(section, scratch_off, 'hazard_default_radius_sq',
+                 struct.pack('<f', hazard_default_radius_sq))
+    layout.write(section, scratch_off, 'bot_move_speed',
+                 struct.pack('<f', bot_move_speed))
+    layout.write(section, scratch_off, 'hazard_flee_frames',
+                 struct.pack('<I', hazard_flee_frames))
 
     # The dump header magic is written once; runtime code rewrites tag/src/len.
     layout.write(section, scratch_off, 'thdr', struct.pack('<I', dump_magic))

@@ -11,10 +11,10 @@ from .build import SectionSpec
 # --- new section parameters (.zaxbot) -------------------------------------
 NEW_SECTION_NAME   = b'.zaxbot\x00'
 NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
-NEW_SECTION_SIZE   = 0x4000        # four pages: code + scratch (bumped for diagnostic blocks)
+NEW_SECTION_SIZE   = 0x5000        # five pages: code + scratch (bumped for movement helpers)
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
-SCRATCH_OFF        = 0x2000        # writable scratch buffer; 8KB code / 8KB scratch
+SCRATCH_OFF        = 0x3000        # writable scratch buffer; 12KB code / 8KB scratch
 
 ZAXBOT_SECTION = SectionSpec(
     name=NEW_SECTION_NAME,
@@ -107,6 +107,74 @@ WEAPON_SPEEDS = []  # type: list[tuple[int, float]]
 # Slots reserved in scratch for the runtime lookup; bumping this only costs
 # bytes in .zaxbot scratch, so keep some headroom.
 WEAPON_SPEEDS_MAX = 32
+
+# --- Bot movement / wander policy (DM-only first pass) -------------------
+# Master switch — set False to revert to the original zero-vector behavior
+# (bots stand still). Useful for A/B-comparing fire/aim regressions.
+MOVEMENT_ENABLED = True
+
+# Bot picks a random world-space target within ±WANDER_TARGET_RADIUS px of
+# its current position, walks toward it, then re-rolls when the timer expires
+# or stuck detection trips. Targets aren't bounded to the map — out-of-bounds
+# picks are corrected by stuck detection retargeting within a second or so.
+WANDER_TARGET_RADIUS         = 600.0
+WANDER_TARGET_TIMEOUT_FRAMES = 600     # ≈10 s at 60Hz
+
+# Stuck detection: if (x-last_x)² + (y-last_y)² stays under STUCK_DELTA_SQ for
+# STUCK_FRAMES_THRESHOLD consecutive frames, force a retarget. Threshold is
+# generous — bots animate idle frames with tiny float jitter even when truly
+# stuck against a wall.
+STUCK_FRAMES_THRESHOLD = 30
+STUCK_DELTA_SQ         = 4.0
+
+# Mild item attractor: if a CPickupAI entity is within sqrt(radius_sq) and
+# line-of-sight passes, blend WEIGHT * (pickup - bot) into the movement
+# vector. sub_4303F0 (engine collision) handles the actual pickup on
+# walk-over, so the attractor only nudges; it doesn't need to land on the
+# pixel. Scan is staggered per bot at ITEM_SCAN_INTERVAL_FRAMES to spread the
+# entity-iteration cost across frames.
+ITEM_ATTRACTOR_RADIUS_SQ   = 40000.0   # 200px reach
+ITEM_ATTRACTOR_WEIGHT      = 0.7
+ITEM_SCAN_INTERVAL_FRAMES  = 30
+
+# Proactive hazard avoidance: at match start, scan world entities of class
+# CDamageExpandingRadiusAI and cache (x, y, default_radius_sq). The movement
+# detour then treats each cached hazard as a repulsor scaled by inverse
+# distance, blended into the base direction.
+#
+# Currently DORMANT — the entity-array offset hypothesis (mgr+0x2BC/0x2C0)
+# was wrong (that field pair only stores 1 active char, not the full entity
+# list), so the proactive scan finds nothing. The reactive cur_damage-based
+# avoidance below is the active hazard-handling path. Re-enable once the
+# real entity iterator is identified.
+HAZARD_REPULSION_RADIUS_SQ = 90000.0   # 300px reach
+HAZARD_REPULSION_WEIGHT    = 2.0
+HAZARD_DEFAULT_RADIUS_SQ   = 90000.0   # used as the per-entity bubble until we read it off the AI
+
+# Reactive hazard avoidance: when `[char+0x7C]` (cur_damage) increases, the
+# bot took damage from SOMETHING — lava, fire, projectile, etc. We
+# immediately bias the wander target opposite to the bot's recent motion,
+# commit to the flee for HAZARD_FLEE_FRAMES, and suppress stuck-based and
+# timer-based retargets during the flee. This gives the bot a deliberate
+# back-off rather than a 50/50 random retarget (which would keep the bot
+# wandering back onto lava). Higher values commit longer to the flee
+# direction; lower values resume wander sooner.
+HAZARD_FLEE_FRAMES = 120
+
+# Per-frame velocity magnitude written to the movement vector after
+# normalize. The engine reads our |v| and computes a ratio
+# `(|v| - model_min) / (model_max - model_min)` clamped to [0, 1], then
+# scales position by that ratio against the model's per-frame step. Without
+# knowing the bot model's exact min/max bounds, this knob is empirical:
+# too high ⇒ engine clamps to full-speed (bot teleports off the map and
+# crashes the collision lookup); too low ⇒ engine sees |v| < min and
+# treats as no movement.
+#
+# 1.0 is a safe-ish starting point — well under typical model max (which
+# AGENTS.md notes as 300..4000 px/sec at +0x60 of CModel). Halve/double
+# empirically. If the bot looks slow but stationary, raise; if it streaks
+# across the map and crashes, lower.
+BOT_MOVE_SPEED = 1.0
 
 # --- Testing knob: force-equip every freshly-spawned bot with this item -----
 # Bots default to whatever the engine's "Players Initial Inventory" gives

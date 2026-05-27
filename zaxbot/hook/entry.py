@@ -25,6 +25,7 @@ from ..detours import (
     name_block,
     spawn_safety,
     walk_controller,
+    world_scan,
 )
 
 
@@ -95,6 +96,11 @@ def build_hook(section_va_abs):
     dp_poll.emit(a, layout)
     df90_match_change.emit(a, layout)
     walk_controller.emit(a, layout)
+    # world_scan must precede bot_movement so the `call_lbl 'pick_pickup'`
+    # forward reference is at a sane distance (matches the `pick_target`
+    # precedent — the linker is two-pass so source order isn't required, but
+    # adjacency keeps the section grep-friendly).
+    world_scan.emit(a, layout)
     bot_movement.emit(a, layout)
     # pick_target must be emitted before bot_fire_aim's detour body so the
     # call_lbl inside detour_5436F0 resolves to a forward-defined label
@@ -142,6 +148,19 @@ def build_hook(section_va_abs):
         force_bot_ammo_names=cfg.resolve_force_bot_ammo_names(),
         force_bot_ammo_slot_size=cfg.FORCE_BOT_AMMO_SLOT_SIZE,
         force_mode=cfg.FORCE_MODE,
+        movement_enabled=cfg.MOVEMENT_ENABLED,
+        wander_target_radius=cfg.WANDER_TARGET_RADIUS,
+        wander_target_timeout_frames=cfg.WANDER_TARGET_TIMEOUT_FRAMES,
+        stuck_frames_threshold=cfg.STUCK_FRAMES_THRESHOLD,
+        stuck_delta_sq=cfg.STUCK_DELTA_SQ,
+        item_attractor_radius_sq=cfg.ITEM_ATTRACTOR_RADIUS_SQ,
+        item_attractor_weight=cfg.ITEM_ATTRACTOR_WEIGHT,
+        item_scan_interval_frames=cfg.ITEM_SCAN_INTERVAL_FRAMES,
+        hazard_repulsion_radius_sq=cfg.HAZARD_REPULSION_RADIUS_SQ,
+        hazard_repulsion_weight=cfg.HAZARD_REPULSION_WEIGHT,
+        hazard_default_radius_sq=cfg.HAZARD_DEFAULT_RADIUS_SQ,
+        bot_move_speed=cfg.BOT_MOVE_SPEED,
+        hazard_flee_frames=cfg.HAZARD_FLEE_FRAMES,
     )
 
     info = {

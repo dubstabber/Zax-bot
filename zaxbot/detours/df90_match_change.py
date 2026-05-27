@@ -22,6 +22,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     bot_team_va         = layout.va('bot_team')
     host_part_va        = layout.va('host_part')
     used_names_va       = layout.va('used_names')
+    wander_x_va         = layout.va('bot_wander_x')
+    bot_pickup_valid_va = layout.va('bot_pickup_valid')
+    hazard_count_va     = layout.va('hazard_count')
+    frame_counter_va    = layout.va('frame_counter')
 
     a.label('detour_df90')
     a.raw(b'\x50')                                # push eax
@@ -40,6 +44,17 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xB9\x10\x00\x00\x00')                # mov ecx, 16  (bot_team[16])
     a.raw(b'\x83\xC8\xFF')                        # or eax, -1
     a.raw(b'\xF3\xAB')                            # rep stosd
+    # Clear all per-bot AI state (12 contiguous parallel u32 arrays starting
+    # at bot_wander_x, each 16 entries × 4 bytes = 64 bytes). This wipes
+    # wander targets, stuck counters, item-scan stagger, pickup caches,
+    # last_damage and flee_ticks so a fresh match starts clean.
+    a.raw(b'\xBF' + le32(wander_x_va))            # mov edi, bot_wander_x
+    a.raw(b'\xB9' + le32(12 * cfg.MAX_BOT_SLOTS)) # ecx = 12 fields * 16 slots dwords
+    a.raw(b'\x31\xC0')                            # xor eax, eax
+    a.raw(b'\xF3\xAB')                            # rep stosd
+    # Reset frame counter so per-bot scan-stagger math doesn't see a fake
+    # huge delta on the first frame of the new match.
+    a.raw(b'\xC7\x05' + le32(frame_counter_va) + le32(0))
     # Clear cached host participant ptr to NULL so the next match's first
     # spawn re-captures it. Must be 0 (not -1) so fire/aim's `test eax`
     # guard works without dereferencing a bogus pointer.
@@ -70,6 +85,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x31\xC0')                            # xor eax, eax
     a.raw(b'\xF3\xAB')                            # rep stosd
     a.label('df90_skip_mgr_clear')
+    # Rebuild the hazard cache. scan_hazards is __cdecl-ish (pushad/popad,
+    # no args, no return) and self-clears hazard_count internally, so
+    # calling it unconditionally on every match change is safe even if
+    # the world manager is briefly NULL.
+    a.call_lbl('scan_hazards')
     a.raw(b'\x58\x59\x5F')                        # pop eax; pop ecx; pop edi
     a.label('df90_same_match')
     a.raw(b'\xA3' + le32(cap_a2))                 # mov [cap_a2], eax

@@ -101,9 +101,28 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   Unknown vtables drop a one-shot 0x200-byte dump of the game-type object
   and fall back to DM. `zaxbot/config.py` exposes a `FORCE_MODE` knob for
   offline testing.
-- Bots do not navigate. They keep a walking controller for idle animation;
-  `detour_542360` zeroes movement, and `detour_5436F0` synthesizes aim/fire
-  toward the host when range and line of sight allow it.
+- DM bots wander via `detour_542360` synthesizing a movement vector from
+  three contributions: a random wander target (re-rolled on timer or stuck
+  detection) plus a hazard repulse and a pickup attractor. The hazard cache
+  is rebuilt once per match by `scan_hazards` (called from `detour_df90`),
+  walking the world entity array at `mgr+0x2BC..0x2C0` and filtering by
+  `CDamageExpandingRadiusAI`. The attractor uses the same iteration to find
+  the closest `CPickupAI` within range, then LOS-tests via `sub_491380`.
+  Engine `sub_4303F0` handles wall collision and pickup-on-walkover for
+  free. `cfg.MOVEMENT_ENABLED = False` reverts to the original zero-vector
+  behavior. `detour_5436F0` still synthesizes aim/fire when range + LOS
+  allow.
+- Lava and other tile hazards are handled REACTIVELY: when a bot's
+  `[char+0x7C]` (cur_damage) increases between frames, the wander target
+  is biased to the opposite of the bot's recent motion direction and
+  committed for `cfg.HAZARD_FLEE_FRAMES` (default 120). Tile-grid
+  reverse-engineering attempts didn't yield a reliable signal — the
+  `CPlasmaTileMap` plane-0 dwords aren't direct `CGroundTextureFrame*`
+  pointers (they're packed values resolved via a separate texture list).
+  Proper navigation around tile hazards is deferred to the planned
+  waypoint system, which will route bots over the level designer's
+  intended paths. The reactive flee remains the backstop for any hazard
+  the waypoints don't cover.
 - Shot prediction is fully wired. `compute_proj_speed` reads the active
   weapon's projectile speed from `[CModel + 0x60]` via
   `sub_48D8F0(dword_6CFDD8, [def + 0x20])`; NULL projectile key or zero
@@ -190,8 +209,12 @@ Older emitted labels or disabled detours are not active unless they appear in
 
 ## Open work
 
-- Feed real movement/navigation into bot controllers without stealing host
-  camera/input. CTF/SK bots are now team-correct but still stationary, so
-  they cannot pursue flags or collect salvage on their own.
+- Replace the random-target wander with engine-waypoint navigation.
+  `CWayPointMap` / `CWayPointPath` are shipped engine constructs that
+  monsters patrol; reading the live waypoint graph would let bots route
+  around walls instead of bumping and re-rolling.
+- CTF/SK objective behavior on top of the DM wander primitive: CTF bots
+  need flag-aware target selection, SK bots need collector-aware return
+  paths.
 - Populate or hook DirectPlay player data so PC2 sees chosen bot names
   (and team colors in CTF/SK).

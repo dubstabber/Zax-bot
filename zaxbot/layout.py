@@ -248,6 +248,8 @@ def build_scratch_layout(
         ScratchField('tag_pc2_weapon',  0x850, 0x10),
         ScratchField('tag_host_wpn_bytes', 0x860, 0x10),
         ScratchField('tag_pc2_wpn_bytes',  0x870, 0x10),
+        ScratchField('tag_ai_move',        0x880, 0x10, 'diag: bot wander/stuck/attractor state'),
+        ScratchField('tag_hazard',         0x890, 0x10, 'diag: cached hazard table'),
         ScratchField('bot_names', 0x900, num_bot_names * name_slot_size),
         ScratchField('bot_names_ascii', 0xB80, num_bot_names * name_slot_ascii),
         # Per-bot, per-char-slot last-seen position cache for the lead-shot
@@ -310,4 +312,77 @@ def build_scratch_layout(
                 'spawn: ASCII ammo-item names handed to the bot when force-equip is on',
             ),
         ])
+    # --- Bot movement / wander state (DM-only first pass) -------------------
+    # Per-bot fields (MAX_BOT_SLOTS * 4 each) live at 0x1A60+. They are NOT
+    # appended to BOT_STATE_FIELDS because the per-call fire/aim block uses
+    # `bot_state_end + N` relative offsets while `host_part` is anchored at
+    # absolute 0x2F0 — adding to BOT_STATE_FIELDS would push cand_pos onto
+    # host_part. Standalone fields here avoid that shift entirely.
+    #
+    # frame_counter is incremented once per movement detour invocation; the
+    # item-scan stagger uses it to spread cost across frames. hazard_table is
+    # a packed array of (x:float, y:float, radius_sq:float), populated once
+    # per match by detour_df90 -> scan_hazards.
+    AI_BASE       = 0x1A60
+    AI_STRIDE     = MAX_BOT_SLOTS * 4                # 0x40 per per-bot field
+    AI_PERBOT_FIELDS = (
+        ('bot_wander_x',        'wander: random target x (float)'),
+        ('bot_wander_y',        'wander: random target y (float)'),
+        ('bot_wander_ticks',    'wander: frames left on current target'),
+        ('bot_last_x',          'stuck: last-tick x (float)'),
+        ('bot_last_y',          'stuck: last-tick y (float)'),
+        ('bot_stuck_count',     'stuck: frames with delta < STUCK_DELTA_SQ'),
+        ('bot_last_item_scan',  'attractor: frame_counter at last pickup scan'),
+        ('bot_pickup_x_cache',  'attractor: cached pickup target x (float)'),
+        ('bot_pickup_y_cache',  'attractor: cached pickup target y (float)'),
+        ('bot_pickup_valid',    'attractor: 1 if cache has a live target'),
+        ('bot_last_damage',     'reactive: last-tick [char+0x7C] cur_damage float'),
+        ('bot_flee_ticks',      'reactive: frames left committed to flee target'),
+    )
+    ai_off = AI_BASE
+    for ai_name, ai_note in AI_PERBOT_FIELDS:
+        fields.append(ScratchField(ai_name, ai_off, AI_STRIDE, ai_note))
+        ai_off += AI_STRIDE
+    # Scalars and hazard cache (hazard_table is 32 entries × 12 B).
+    AI_HAZARD_CAP = 32
+    fields.extend([
+        ScratchField('frame_counter', ai_off,        0x04, 'movement: per-detour frame tick'),
+        ScratchField('hazard_count',  ai_off + 0x04, 0x04, 'movement: live hazard_table entries'),
+        ScratchField(
+            'hazard_table',
+            ai_off + 0x08,
+            AI_HAZARD_CAP * 12,
+            'movement: (x, y, radius_sq) float triples; populated by detour_df90',
+        ),
+        # Movement static knobs (packed at build time by static_data).
+        ScratchField('movement_enabled',          ai_off + 0x08 + AI_HAZARD_CAP * 12,         0x04,
+                     'movement: master enable flag (0 = original zero-vector behavior)'),
+        ScratchField('wander_target_radius',      ai_off + 0x0C + AI_HAZARD_CAP * 12,         0x04,
+                     'movement: ±radius for random target picks (float)'),
+        ScratchField('wander_target_timeout',     ai_off + 0x10 + AI_HAZARD_CAP * 12,         0x04,
+                     'movement: frame timeout before re-rolling target'),
+        ScratchField('stuck_frames_threshold',    ai_off + 0x14 + AI_HAZARD_CAP * 12,         0x04,
+                     'movement: stuck-frames count that forces retarget'),
+        ScratchField('stuck_delta_sq',            ai_off + 0x18 + AI_HAZARD_CAP * 12,         0x04,
+                     'movement: float² threshold for "didn\'t move"'),
+        ScratchField('item_attractor_radius_sq',  ai_off + 0x1C + AI_HAZARD_CAP * 12,         0x04,
+                     'attractor: float² reach for pickup attractor'),
+        ScratchField('item_attractor_weight',     ai_off + 0x20 + AI_HAZARD_CAP * 12,         0x04,
+                     'attractor: blend weight (float)'),
+        ScratchField('item_scan_interval',        ai_off + 0x24 + AI_HAZARD_CAP * 12,         0x04,
+                     'attractor: frames between pickup scans per bot'),
+        ScratchField('hazard_repulsion_radius_sq', ai_off + 0x28 + AI_HAZARD_CAP * 12,        0x04,
+                     'hazard: float² reach for repulsion'),
+        ScratchField('hazard_repulsion_weight',   ai_off + 0x2C + AI_HAZARD_CAP * 12,         0x04,
+                     'hazard: blend weight (float)'),
+        ScratchField('hazard_default_radius_sq',  ai_off + 0x30 + AI_HAZARD_CAP * 12,         0x04,
+                     'hazard: per-entity bubble radius² (float)'),
+        ScratchField('bot_move_speed',            ai_off + 0x34 + AI_HAZARD_CAP * 12,         0x04,
+                     'movement: per-frame velocity magnitude (float)'),
+        ScratchField('hazard_flee_frames',        ai_off + 0x38 + AI_HAZARD_CAP * 12,         0x04,
+                     'reactive: frames to commit to flee target after damage'),
+        # Per-tick scratch (used inside the bot_movement detour).
+        ScratchField('move_tmp_pos',              ai_off + 0x3C + AI_HAZARD_CAP * 12,         0x08,
+                     'movement: scratch (x, y) for sub_4FB0A0 reads'),
+    ])
     return ScratchLayout(base_va, scratch_size, fields)
