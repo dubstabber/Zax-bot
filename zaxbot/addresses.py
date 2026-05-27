@@ -105,6 +105,19 @@ INVENTORY_GET_WEAPON_OFF   = 0x68       # inv.vtable[+0x68](this, item) -> weapo
 # The generic inventory item vtable at [weapon + 0x00] is shared by multiple
 # weapon objects, so per-weapon lead-speed dispatch keys off sub_4DD480(wpn).
 
+# --- CInventoryItemDefinition / CModel field offsets (used for per-weapon -
+# projectile-speed and hitscan detection in compute_proj_speed). Field offsets
+# are taken from the engine's own schema-init at sub_4D5620 (CInventoryItem
+# Definition, registry dword_6C0D54) and sub_5159B0 (CModel, registry
+# dword_6CFDD4). [def + PROJ_PROTO_OFF] is a registry KEY (small integer,
+# NOT a resolved pointer) — sub_54E560's field-descriptor type stores keys
+# that resolve lazily via sub_48D8F0(registry, key) -> object*. Same pattern
+# the engine uses internally at sub_489A40:0x489a57. Key == 0 means the def
+# didn't define a projectile reference (hitscan weapon).
+PROJ_PROTO_OFF             = 0x20       # CInventoryItemDefinition "Projectiles/Projectile" key (resolve via sub_48D8F0 on MODEL_REGISTRY_VA)
+MODEL_MAX_VEL_OFF          = 0x60       # CModel "Move/Max Velocity" (float, pixels/sec)
+MODEL_REGISTRY_VA          = 0x6CFDD8   # CModel registry (pass as `this` to sub_48D8F0)
+
 # --- Add/switch weapon inventory helpers (used by force-weapon testing) ----
 ITEM_DEF_REGISTRY_VA        = 0x6C0C08   # inventory item-definition registry
 SUB_48D8F0_VA               = 0x48D8F0   # __thiscall(registry, index) -> definition*
@@ -129,6 +142,28 @@ SUB_425590_VA              = 0x425590
 # in between (and the target's vtable[77] filter accepts src); 0 otherwise.
 # Canonical caller pattern (sub_46E890): sub_491380(src, tgt, 0, NULL, 2, NULL)
 SUB_491380_VA = 0x491380
+
+# --- sub_491A40 (CEntityProjectile ctor) -----------------------------------
+# We patch the 5-byte function epilogue (mov eax, esi; pop edi; pop esi; ret)
+# with a JMP to our capture hook, which stashes ESI (the just-allocated
+# projectile pointer) into scratch.last_proj_va before re-emitting the same
+# epilogue. ESI holds the projectile ptr because sub_491A40 does
+# `mov esi, eax` right after the allocator returns it.
+S491A40_EPILOGUE_VA   = 0x491AEA
+# The actual encoding the compiler used is `8B C6` (MOV r32, r/m32 form) for
+# `mov eax, esi`, NOT `89 F0` (MOV r/m32, r32 form). Same instruction, two
+# valid encodings — both 2 bytes. Verified empirically against the original
+# Zax.exe.bak. The re-emit in the detour must match for the engine's caller
+# to see identical state.
+S491A40_EPILOGUE_ORIG = b'\x8B\xC6\x5F\x5E\xC3'  # mov eax,esi; pop edi; pop esi; ret
+
+# CEntityProjectile's final vtable. sub_491A40 sets it as the LAST step before
+# its epilogue (after a transient intermediate vtable), so every live
+# projectile holds this pointer at [+0x00]. Used by the snapshot dump as a
+# sanity check before dereferencing last_proj_va — if the value at +0 doesn't
+# match (heap memory reused), the chunk is skipped to avoid reading freed
+# memory that may have been remapped to something else.
+CENTITYPROJECTILE_VTABLE_VA = 0x5F23D4
 
 # --- sub_542550 (controller player_num init) -------------------------------
 S542550_VA     = 0x542550

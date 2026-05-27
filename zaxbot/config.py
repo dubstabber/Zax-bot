@@ -37,24 +37,58 @@ STEP_FILENAME = b'zax_step.log\x00'   # one-letter progress markers, flushed per
 # --- Bot fire/aim policy -------------------------------------------------
 FIRE_RANGE_SQ = 90000.0   # squared distance; bot fires when host is within sqrt(FIRE_RANGE_SQ)
 
-# Projectile speed used for shot leading. Units are engine-world units
-# per pick_target call (≈ per frame), matching the per-frame delta the
-# perception loop uses to estimate target velocity. This is the FALLBACK
-# used when the bot's current weapon prototype is not listed in
-# WEAPON_SPEEDS below. Hitscan weapons (no projectile) bypass apply_lead
-# entirely and ignore this value.
+# Projectile speed used as the last-resort fallback for shot leading. Units
+# are engine-world units per pick_target call (≈ per frame), matching the
+# per-frame delta the perception loop uses to estimate target velocity. Only
+# reached if both the manual WEAPON_SPEEDS override and the dynamic def-read
+# fall through (e.g. NULL weapon or NULL item-def). Hitscan weapons (no
+# projectile) bypass apply_lead entirely and ignore this value.
 PROJECTILE_SPEED = 10.0
 
-# Per-weapon projectile speeds, keyed by the weapon's inventory-item
-# definition pointer returned by sub_4DD480(current_weapon_obj). The generic
-# inventory-item vtable at [weapon + 0x00] is shared across different weapons,
-# so it is not a usable key. Populate by observation: equip/fire a weapon,
-# press R, read the second dword of the `weapon_info`, `host_weapon`, or
-# `pc2_weapon` snapshot chunk, and add a (definition_va, speed) entry here.
-# Unrecognised definitions fall back to PROJECTILE_SPEED.
+# Conversion factor applied to the engine's per-weapon raw "Move/Max
+# Velocity" field (pixels per second, schema range ~300..4000) to bring it
+# into the per-pick_target-call units apply_lead's time math expects.
+# Default 1/60 because the engine ticks at ~60Hz under Wine; if frames slow
+# down, the dt term cancels algebraically in
+# `lead = vx*t = (real_vel*dt) * (dist/(raw*dt))`, so one tuned constant
+# covers every weapon. Calibrate empirically: spawn a bot with Missile
+# Launcher (slow projectile), watch a strafing host, halve/double until
+# shots land. See docs/04-spawn-ai-leads.md "Calibration recipe".
+SPEED_SCALE = 1.0 / 60.0
+
+# Muzzle spawn offset (pixels) — the engine spawns projectiles at the gun
+# barrel tip, which is some distance in front of the bot's character center
+# along the firing angle. Without compensation, our lead math over-predicts
+# the bullet's flight distance by this amount (bullet arrives at the aim
+# point sooner than expected ⇒ target hasn't moved as far ⇒ bot over-leads
+# by `vel * muzzle / proj_speed` pixels per shot).
 #
-# HITSCAN: use speed = 0.0 as the sentinel — the dispatcher will set
-# is_hitscan and skip apply_lead entirely.
+# Confirmed empirically: with a stationary bot firing Missile Launcher
+# (CModel velocity = 800 px/sec), the captured projectile entity's spawn
+# position back-extrapolated to ~20 px from the bot center. Calibrate by
+# testing with a strafing host: too-high MUZZLE_OFFSET makes the bot UNDER-
+# lead (bullets land behind target); too-low MUZZLE_OFFSET retains the
+# original OVER-lead.
+#
+# Applied as a constant across all weapons. CProjectileInfo at def+0x44
+# stores per-weapon X/Y offsets if a more precise fix is needed later;
+# for now one global constant covers the typical case.
+MUZZLE_OFFSET = 20.0
+
+# Per-weapon projectile-speed OVERRIDE table, keyed by the weapon's inventory-
+# item definition pointer returned by sub_4DD480(current_weapon_obj). Looked
+# up first by compute_proj_speed; on a hit the override wins. On no match
+# the dispatcher falls through to a runtime read of [def + 0x20] (projectile
+# prototype) and [proto + 0x60] (Move/Max Velocity), scaled by SPEED_SCALE.
+# That dynamic path handles every standard weapon out of the box — leave
+# this list empty unless you need to pin a specific weapon's speed for
+# tuning. Populate by observation: equip/fire a weapon, press R, read the
+# `current_proto_va` dword from the `weapon_info` snapshot chunk, and add a
+# `(definition_va, speed)` entry here.
+#
+# HITSCAN OVERRIDE: use speed = 0.0 as the sentinel — the dispatcher will set
+# is_hitscan and skip apply_lead entirely, even if the engine's def has a
+# (perhaps very fast) projectile prototype.
 WEAPON_SPEEDS = []  # type: list[tuple[int, float]]
 # Slots reserved in scratch for the runtime lookup; bumping this only costs
 # bytes in .zaxbot scratch, so keep some headroom.
@@ -99,7 +133,7 @@ DEBUG_BOT_WEAPON_INDEX = None  # type: int | None
 # When non-None, the spawn path also stuffs the bot with the items listed in
 # FORCE_BOT_AMMO_NAMES below (max battery cap + energy refill + every ammo
 # pool) so the forced weapon has full ammo immediately on spawn.
-FORCE_BOT_ITEM_NAME = None  # type: str | None
+FORCE_BOT_ITEM_NAME = "Modified Laser Welder"  # type: str | None
 
 # Items handed to the bot on spawn whenever FORCE_BOT_ITEM_NAME is set. Order
 # matters: 'Battery Level 3' is the max battery-cap upgrade item (the highest

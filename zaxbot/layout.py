@@ -179,6 +179,27 @@ def build_scratch_layout(
         ScratchField('best_vx',    0x2F4, 0x04, 'fire/aim: winning target velocity x (for lead)'),
         ScratchField('best_vy',    0x2F8, 0x04, 'fire/aim: winning target velocity y (for lead)'),
         ScratchField('proj_speed', 0x2FC, 0x04, 'fire/aim: projectile speed (from cfg.PROJECTILE_SPEED)'),
+        # Per-fire-call scratch for apply_lead's quadratic intercept solver.
+        # Holds the coefficients of a*t² + b*t + c = 0 plus the discriminant
+        # so the asm can branch on disc<0 / a>=0 via integer sign-bit tests
+        # instead of FPU compares (much cleaner control flow). quad_c holds
+        # the *muzzle-adjusted* squared distance (|d|² - muzzle²) so both the
+        # discriminant and the citardauq numerator use the corrected value.
+        ScratchField('quad_a',    0x3D0, 0x04, 'apply_lead: |v|² - proj_speed² (quad solver)'),
+        ScratchField('quad_b',    0x3D4, 0x04, 'apply_lead: 2*(d·v) - 2*muzzle*p (quad solver, muzzle-adjusted)'),
+        ScratchField('quad_disc', 0x3D8, 0x04, 'apply_lead: b² - 4ac (quad solver discriminant)'),
+        ScratchField('quad_c',    0x3E4, 0x04, 'apply_lead: |d|² - muzzle² (muzzle-adjusted c)'),
+        # Build-time constants for muzzle-offset compensation. muzzle_sq is
+        # MUZZLE_OFFSET² packed once so the per-fire asm doesn't have to
+        # re-square at runtime.
+        ScratchField('muzzle_offset', 0x3E8, 0x04, 'apply_lead: muzzle spawn distance from bot center (px)'),
+        ScratchField('muzzle_sq',     0x3EC, 0x04, 'apply_lead: muzzle_offset² (packed at build time)'),
+        # Captured by detour_491A40 every time the engine's CEntityProjectile
+        # ctor returns. Overwritten by every shot (host, PC2, bot) — when
+        # R is pressed, this holds the most recent projectile pointer so the
+        # snapshot can read its live velocity at +0xE8/+0xEC.
+        ScratchField('last_proj_va', 0x3DC, 0x04, 'proj capture: last spawned CEntityProjectile ptr'),
+        ScratchField('proj_count',   0x3E0, 0x04, 'proj capture: cumulative spawn count (sanity)'),
     ])
     fields.extend([
         # Per-name color tables. bot_colors holds (color1, color2) dword pairs
@@ -228,6 +249,40 @@ def build_scratch_layout(
         ScratchField('tag_pc2_weapon',  0x850, 0x10),
         ScratchField('tag_host_wpn_bytes', 0x860, 0x10),
         ScratchField('tag_pc2_wpn_bytes',  0x870, 0x10),
+        # Dumps the full CModel struct at current_proto_model_va (the
+        # projectile prototype resolved from the bot's currently held
+        # weapon). Lets the user see all 196 bytes of the CModel layout
+        # without rebuilding — useful for figuring out whether
+        # Move/Max Velocity (+0x60) is the actual launch velocity or
+        # something else like Friction (+0xE4) / Velocity X (+0xE8) come
+        # into play for specific weapons.
+        ScratchField('tag_proto_bytes',    0x880, 0x10),
+        # Dumps the Default Entity that the CModel points to at +0x74.
+        # The actual launched projectile entity is cloned from this
+        # prototype, so any velocity/acceleration defaults stored on it
+        # (CEntityMovable inherits Velocity X/Y at +0xE8/+0xEC and
+        # Acceleration X/Y at +0xF4/+0xF8) become the launch values.
+        ScratchField('tag_default_entity', 0x890, 0x10),
+        # Dumps the most-recently-spawned projectile entity (live, in-flight).
+        # Captured by detour_491A40 right after the CEntityProjectile ctor
+        # returns. The caller (engine fire path) sets velocity at +0xE8/+0xEC
+        # immediately after — so by the time R is pressed the bullet's
+        # Velocity X/Y reflect the engine's actual launch values, which we
+        # can compare against our predicted proj_speed.
+        ScratchField('tag_proj_now',       0x8A0, 0x10),
+        # Small scratch dump covering last_proj_va, proj_count, quad_c, and
+        # muzzle_offset — useful for confirming the per-shot projectile
+        # count (multi-spawn weapons like Twin Disruptor / Tri Spread Gun
+        # bump proj_count by 2+ per fire-tick).
+        ScratchField('tag_proj_stats',     0x8B0, 0x10),
+        # Dumps the full CInventoryItemDefinition (96 bytes) of the bot's
+        # current weapon. Key fields to inspect:
+        #   +0x40 "Projectiles/Num Projectile" (int count)  — confirms multi
+        #   +0x44 array pointer of CProjectileInfo references
+        #   +0x34 Weapon/Strike Damage, +0x48 Reuse Delay
+        # Without this we can only guess multi-spawn from proj_count vs
+        # observed shot-rate; with it the count is in the raw bytes.
+        ScratchField('tag_def_bytes',      0x8C0, 0x10),
         ScratchField('bot_names', 0x900, num_bot_names * name_slot_size),
         ScratchField('bot_names_ascii', 0xB80, num_bot_names * name_slot_ascii),
         # Per-bot, per-char-slot last-seen position cache for the lead-shot
@@ -250,23 +305,30 @@ def build_scratch_layout(
         ScratchField('inv_tmp',            0x14D4, 0x04, 'weapon: inventory ptr scratch across sub_523DF0 call'),
         ScratchField('current_weapon_obj', 0x14D8, 0x04, 'weapon: diagnostic — last weapon object ptr'),
         ScratchField('current_proto_va',   0x14DC, 0x04, 'weapon: diagnostic — last inventory item-definition ptr'),
-        ScratchField('force_item_def_idx', 0x14E0, 0x04, 'spawn: temp resolved inventory item-definition index'),
+        # Diagnostic fields read by compute_proj_speed's def-field fallback;
+        # placed contiguously with current_weapon_obj/current_proto_va so a
+        # single widened weapon_info snapshot chunk captures all four runtime
+        # values plus the build-time speed_scale constant in one shot.
+        ScratchField('current_proto_model_va', 0x14E0, 0x04, 'weapon: diagnostic — [def+0x20] projectile CModel*, 0 if hitscan'),
+        ScratchField('proto_speed_raw',        0x14E4, 0x04, 'weapon: diagnostic — [proto+0x60] raw pixels/sec from def'),
+        ScratchField('speed_scale',            0x14E8, 0x04, 'weapon: cfg.SPEED_SCALE — multiplier from pixels/sec to per-call units'),
+        ScratchField('force_item_def_idx', 0x14EC, 0x04, 'spawn: temp resolved inventory item-definition index'),
         # weapon_table: (item_def_va u32, speed float) pairs + terminating 0 entry.
         # Sized to fit WEAPON_SPEEDS_MAX rows plus the sentinel.
-        ScratchField('weapon_table',       0x14E4, (weapon_speeds_max + 1) * 8,
+        ScratchField('weapon_table',       0x14F0, (weapon_speeds_max + 1) * 8,
                      'weapon: (item_def_va, speed) lookup + 0-VA sentinel'),
         # Host-side diagnostic — snapshot writes these by running the weapon
         # lookup chain on worldmgr.charArray[0]. Lets the user discover valid
         # item ids by picking up a weapon and pressing R.
-        ScratchField('host_weapon_obj',    0x15F0, 0x04, 'host weapon diag: weapon object ptr'),
-        ScratchField('host_proto_va',      0x15F4, 0x04, 'host weapon diag: inventory item-definition ptr'),
-        ScratchField('host_item_id',       0x15F8, 0x04, 'host weapon diag: Primary slot item id'),
+        ScratchField('host_weapon_obj',    0x15FC, 0x04, 'host weapon diag: weapon object ptr'),
+        ScratchField('host_proto_va',      0x1600, 0x04, 'host weapon diag: inventory item-definition ptr'),
+        ScratchField('host_item_id',       0x1604, 0x04, 'host weapon diag: Primary slot item id'),
         # Parallel diagnostic for PC2 (charArray[1]) — lets us compare a real
         # remote client's weapon layout against the synthetic-DP bot's.
-        ScratchField('pc2_weapon_obj',     0x15FC, 0x04, 'pc2 weapon diag: weapon object ptr'),
-        ScratchField('pc2_proto_va',       0x1600, 0x04, 'pc2 weapon diag: inventory item-definition ptr'),
-        ScratchField('pc2_item_id',        0x1604, 0x04, 'pc2 weapon diag: Primary slot item id'),
-        ScratchField('force_bot_item_name', 0x1608, 0x40, 'spawn: ASCII inventory item name to force-equip; NUL disables'),
+        ScratchField('pc2_weapon_obj',     0x1608, 0x04, 'pc2 weapon diag: weapon object ptr'),
+        ScratchField('pc2_proto_va',       0x160C, 0x04, 'pc2 weapon diag: inventory item-definition ptr'),
+        ScratchField('pc2_item_id',        0x1610, 0x04, 'pc2 weapon diag: Primary slot item id'),
+        ScratchField('force_bot_item_name', 0x1614, 0x40, 'spawn: ASCII inventory item name to force-equip; NUL disables'),
     ])
     # Battery + ammo top-up list applied to the bot when
     # force_bot_item_name is set. force_bot_ammo_count holds the live length;
@@ -275,10 +337,10 @@ def build_scratch_layout(
     # the layout omits them entirely.
     if force_bot_ammo_max > 0 and force_bot_ammo_slot_size > 0:
         fields.extend([
-            ScratchField('force_bot_ammo_count', 0x1648, 0x04, 'spawn: live count of force_bot_ammo_names entries'),
+            ScratchField('force_bot_ammo_count', 0x1654, 0x04, 'spawn: live count of force_bot_ammo_names entries'),
             ScratchField(
                 'force_bot_ammo_names',
-                0x164C,
+                0x1658,
                 force_bot_ammo_max * force_bot_ammo_slot_size,
                 'spawn: ASCII ammo-item names handed to the bot when force-equip is on',
             ),

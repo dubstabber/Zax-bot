@@ -50,6 +50,11 @@ def build_enabled_patches():
             'sub_4F5150 char iter null-skip', 'jmp', ax.S4F5204_VA,
             ax.S4F5204_ORIG, 'detour_4F5204_va', 6,
         ),
+        RelocationPatch(
+            'sub_491A40 CEntityProjectile ctor capture',
+            'jmp', ax.S491A40_EPILOGUE_VA,
+            ax.S491A40_EPILOGUE_ORIG, 'detour_491A40_va',
+        ),
         # Inline NULL-guard for sub_4FC8A0 (the positional-sound dispatch
         # wrapper). The function does `mov ecx, [ecx+0x48]; call sub_4EA880`
         # — when called on a synthetic-DP bot whose audio emitter at +0x48

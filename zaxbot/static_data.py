@@ -26,6 +26,11 @@ DUMP_TAGS = (
     ('tag_pc2_weapon',  'pc2_weapon'),
     ('tag_host_wpn_bytes', 'host_wpn_b'),
     ('tag_pc2_wpn_bytes',  'pc2_wpn_b'),
+    ('tag_proto_bytes',    'proto_b'),
+    ('tag_default_entity', 'def_ent'),
+    ('tag_proj_now',       'proj_now'),
+    ('tag_proj_stats',     'proj_stat'),
+    ('tag_def_bytes',      'def_b'),
 )
 
 
@@ -87,6 +92,8 @@ def write_static_scratch_data(
     prompt_sk_va,
     fire_range_sq=90000.0,
     projectile_speed=600.0,
+    speed_scale=1.0 / 60.0,
+    muzzle_offset=20.0,
     weapon_speeds=(),
     force_bot_item_name=None,
     force_bot_ammo_names=(),
@@ -117,9 +124,15 @@ def write_static_scratch_data(
     layout.write(section, scratch_off, 'fire_range_sq', struct.pack('<f', fire_range_sq))
     # proj_speed is what apply_lead reads each frame; compute_proj_speed
     # rewrites it per fire call. default_proj_speed is the immutable fallback
-    # copied in when the current weapon's prototype isn't in WEAPON_SPEEDS.
+    # copied in if both the WEAPON_SPEEDS override AND the dynamic def-read
+    # paths bail out (NULL weapon, NULL def, etc.). speed_scale is the
+    # multiplier applied to the engine's raw pixels/sec field when the
+    # def-read path takes over (see hook/weapon_speed.py:cps_try_def_field).
     layout.write(section, scratch_off, 'proj_speed', struct.pack('<f', projectile_speed))
     layout.write(section, scratch_off, 'default_proj_speed', struct.pack('<f', projectile_speed))
+    layout.write(section, scratch_off, 'speed_scale', struct.pack('<f', speed_scale))
+    layout.write(section, scratch_off, 'muzzle_offset', struct.pack('<f', muzzle_offset))
+    layout.write(section, scratch_off, 'muzzle_sq', struct.pack('<f', muzzle_offset * muzzle_offset))
 
     # Pack WEAPON_SPEEDS into the runtime table. Each entry is
     # (item_def_va u32, speed float). Terminated by a (0, 0.0) sentinel; the

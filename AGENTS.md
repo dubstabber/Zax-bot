@@ -147,6 +147,10 @@ Older emitted labels or disabled detours are not active unless they appear in
 | `sub_59FF90` | `__usercall(this=ecx, hint=esi)` -> active game-type instance |
 | `sub_4E1930` | `CString::operator=(this, char*)` |
 | `sub_4F1050` | active char getter / `a2` fallback |
+| `def + 0x20` | CInventoryItemDefinition "Projectiles/Projectile" - integer registry key (not a pointer); resolve with `sub_48D8F0(dword_6CFDD8, key)` → `CModel*` (key 0 ⇒ hitscan weapon) |
+| `proto + 0x60` | CModel "Move/Max Velocity" - float pixels/sec (schema range ~300..4000); scaled by `cfg.SPEED_SCALE` for per-tick lead math |
+| `dword_6CFDD8` | CModel registry, passed as `this` to `sub_48D8F0` to resolve "Projectiles/Projectile" and similar `sub_54E560` reference fields |
+| `sub_48D8F0` | `__thiscall(registry, key) -> object*`; registry-key resolver used for both `dword_6C0C08` item-defs and `dword_6CFDD8` CModel lookups |
 | `sub_418790` | `__thiscall(class, char)` -> appearance component (color1@+0xC, color2@+0x18, floats); query the **child** entity, not the player char |
 | `sub_4FC7C0` | `__thiscall(char)` -> child-list count |
 | `sub_4FC7D0` | `__thiscall(char, idx)` -> child entity |

@@ -23,6 +23,7 @@ from ..detours import (
     df90_match_change,
     dp_poll,
     name_block,
+    projectile_capture,
     spawn_safety,
     walk_controller,
 )
@@ -46,6 +47,7 @@ _DETOUR_LABEL_KEYS = {
     'detour_name_query2':      'detour_name_query2_va',
     'detour_name_block_skip':  'detour_name_block_skip_va',
     'detour_4F5204':           'detour_4F5204_va',
+    'detour_491A40':           'detour_491A40_va',
 }
 
 
@@ -107,6 +109,7 @@ def build_hook(section_va_abs):
     spawn_safety.emit(a, layout)
     name_block.emit(a, layout)
     char_iter.emit(a, layout)
+    projectile_capture.emit(a, layout)
 
     code = a.link()
     assert len(code) <= cfg.SCRATCH_OFF, (
@@ -134,6 +137,8 @@ def build_hook(section_va_abs):
         prompt_sk_va=layout.va('prompt_sk'),
         fire_range_sq=cfg.FIRE_RANGE_SQ,
         projectile_speed=cfg.PROJECTILE_SPEED,
+        speed_scale=cfg.SPEED_SCALE,
+        muzzle_offset=cfg.MUZZLE_OFFSET,
         weapon_speeds=cfg.WEAPON_SPEEDS,
         force_bot_item_name=cfg.resolve_force_bot_item_name(),
         force_bot_ammo_names=cfg.resolve_force_bot_ammo_names(),

@@ -112,10 +112,62 @@ then calling `sub_425590` on the bot inventory to auto-equip it into `Primary`.
 Existing bots are not re-equipped; rebuild with `python3 zax_patch.py` and spawn
 a new bot after changing the config.
 
-Use R snapshots to confirm the active weapon: `weapon_info` records the bot's
-last firing weapon object and inventory item-definition pointer, while
-`host_weapon`/`pc2_weapon` record comparable local item ids and item-definition
-pointers for real players.
+Use R snapshots to confirm the active weapon: `weapon_info` records, in
+order, the bot's last firing weapon object, the inventory item-definition
+pointer, the resolved CModel pointer (the projectile prototype after
+`sub_48D8F0` resolves `[def + 0x20]`; zero ⇒ hitscan weapon or NULL
+resolution), the raw `Move/Max Velocity` float read from `[proto + 0x60]`
+(pixels/sec, schema range ≈ 300..4000), and the build-time `speed_scale`.
+`host_weapon`/`pc2_weapon` record comparable local item ids and item-
+definition pointers for real players.
+
+## Per-weapon aim leading
+
+`compute_proj_speed` runs once per fire-tick per bot and drives `apply_lead`.
+Three-tier dispatch:
+
+1. **Manual override** — `cfg.WEAPON_SPEEDS` is a `(item_def_va, speed)`
+   list scanned linearly. On a hit, the override wins; `speed = 0.0` forces
+   hitscan even if the engine has a projectile prototype. Leave the list
+   empty (the default) unless you need to pin a specific weapon's speed.
+2. **Dynamic def read** — on no override, the hook reads `[def + 0x20]`
+   (CInventoryItemDefinition "Projectiles/Projectile"). That field is a
+   small-integer registry key, NOT a resolved pointer — the engine
+   resolves it lazily via `sub_48D8F0(dword_6CFDD8, key)` → `CModel*`,
+   the same resolver the force-equip path uses for item-defs. Key 0 or a
+   resolved CModel with `Move/Max Velocity == 0` ⇒ hitscan weapon (Semi
+   Auto Pistol, Alien Electrical Weapon, …); `is_hitscan` is set and
+   `apply_lead` is skipped. Non-zero velocity ⇒ multiplied by
+   `cfg.SPEED_SCALE` to land in the per-fire-tick units `apply_lead`
+   expects.
+3. **Static fallback** — `cfg.PROJECTILE_SPEED` is the last-resort speed
+   used if both lookup paths bail (NULL weapon, NULL def, etc.).
+
+### Unit conversion: why a single scale works
+
+`apply_lead` computes `lead = vx * t` with `t = sqrt(dist²) / proj_speed`.
+`vx` is the target's per-pick_target-call delta (pixels per call), and
+`proj_speed` after the def read is `raw_pixels_per_sec * SPEED_SCALE`. The
+frame-time `dt` term cancels algebraically — `lead = (real_vel*dt) *
+(dist/(raw*dt))` — so one tuned `SPEED_SCALE` covers every weapon as long
+as gameplay frame rate is roughly stable (which it is in this single-
+threaded engine). Default is `1/60` because the engine ticks at ~60Hz.
+
+### Calibration recipe
+
+1. Set `FORCE_BOT_ITEM_NAME = "Missile Launcher"` (slow projectile, easy to
+   see lead) and rebuild with `python3 zax_patch.py`.
+2. Spawn one bot, host strafes a circle at ~150 px from the bot.
+3. If shots land in front, lower `SPEED_SCALE` (e.g. `1/120`). If behind,
+   raise it (e.g. `1/30`). One factor-of-2 step usually brackets the right
+   value. The same value then works for every other projectile weapon.
+4. Switch `FORCE_BOT_ITEM_NAME` to `"Semi Auto Pistol"` and
+   `"Alien Electrical Weapon"` and confirm shots land regardless of host
+   strafing — these should resolve as hitscan, so the bot should aim
+   directly at the current position with no lead. Press R and verify in
+   the snapshot that either `current_proto_model_va == 0` (key 0 → no
+   resolution) or `proto_speed_raw == 0` (resolved CModel has zero
+   velocity), and `is_hitscan == 1` in the `ai_fire` chunk.
 
 ## What is finished
 
