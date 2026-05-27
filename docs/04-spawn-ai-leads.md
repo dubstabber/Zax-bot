@@ -143,31 +143,77 @@ Three-tier dispatch:
 3. **Static fallback** — `cfg.PROJECTILE_SPEED` is the last-resort speed
    used if both lookup paths bail (NULL weapon, NULL def, etc.).
 
+### Intercept solver
+
+`apply_lead` solves the exact quadratic intercept
+
+```
+|d + v*t|² = (muzzle + p*t)²
+  ⇒  (|v|² - p²) * t² + 2*(d·v - muzzle*p) * t + (|d|² - muzzle²) = 0
+```
+
+and picks the positive root using the numerically-stable citardauq form
+`t = 2c' / (-b' + sqrt(disc))`. This handles non-perpendicular motion
+correctly (the first-order `t = dist/p` approximation was systematically
+off by the `d·v` cross-term). Fall back to first-order
+`t = (sqrt(c) - muzzle) / p` if `disc < 0`, `a >= 0`, or `c' < 0` (target
+inside the muzzle).
+
 ### Unit conversion: why a single scale works
 
-`apply_lead` computes `lead = vx * t` with `t = sqrt(dist²) / proj_speed`.
 `vx` is the target's per-pick_target-call delta (pixels per call), and
 `proj_speed` after the def read is `raw_pixels_per_sec * SPEED_SCALE`. The
 frame-time `dt` term cancels algebraically — `lead = (real_vel*dt) *
 (dist/(raw*dt))` — so one tuned `SPEED_SCALE` covers every weapon as long
-as gameplay frame rate is roughly stable (which it is in this single-
-threaded engine). Default is `1/60` because the engine ticks at ~60Hz.
+as gameplay frame rate is roughly stable (confirmed: engine main loop at
+`sub_40F5F0` calls the per-frame tick with `dt = 1/60` exactly).
+
+### Muzzle compensation
+
+`cfg.MUZZLE_OFFSET` (default 20 px) accounts for the gun-barrel spawn
+position — bullets don't spawn at the bot's character center, they spawn
+at the muzzle tip ~20 px out along the firing angle. Without this, the
+bullet's actual flight distance is `dist - muzzle` instead of `dist`, so
+the bot would consistently over-lead by `vel * muzzle / proj_speed`
+pixels per shot.
+
+Calibrated empirically against Missile Launcher / Light Pistol / Modified
+Laser Welder. Some other weapons (Twin Disruptor and others with
+asymmetric bullet bounds polygons at `CModel +0x78..+0xA0`) have engine-
+side rendering quirks that no muzzle constant can fix.
+
+### Lead randomization
+
+`cfg.LEAD_PROBABILITY` (default 0.5) controls a per-shot coin-flip
+between "apply lead" and "shoot at current position":
+
+```
+roll = sub_55C4E0(RNG, 0, 99)            ; engine RNG, [0, 99]
+if (roll < lead_threshold) apply_lead()  ; threshold = int(PROBABILITY*100)
+```
+
+0.0 = always shoot straight, 1.0 = always lead, 0.5 = coin-flip. The
+mix makes bots feel more human — a strafing target can't just
+counter-strategy against constant prediction; sometimes the bot fires
+where you currently are, sometimes where you're going. Hitscan weapons
+ignore this knob (they skip `apply_lead` unconditionally).
 
 ### Calibration recipe
 
-1. Set `FORCE_BOT_ITEM_NAME = "Missile Launcher"` (slow projectile, easy to
-   see lead) and rebuild with `python3 zax_patch.py`.
-2. Spawn one bot, host strafes a circle at ~150 px from the bot.
-3. If shots land in front, lower `SPEED_SCALE` (e.g. `1/120`). If behind,
-   raise it (e.g. `1/30`). One factor-of-2 step usually brackets the right
-   value. The same value then works for every other projectile weapon.
-4. Switch `FORCE_BOT_ITEM_NAME` to `"Semi Auto Pistol"` and
+1. Set `FORCE_BOT_ITEM_NAME = "Missile Launcher"` (slow projectile, easy
+   to see lead) and rebuild with `python3 zax_patch.py`.
+2. Set `cfg.LEAD_PROBABILITY = 1.0` temporarily so every shot uses
+   prediction (eliminates the randomization variable while calibrating).
+3. Spawn one bot, host strafes a circle at ~150 px from the bot.
+4. If shots consistently miss in front of the target (over-lead), raise
+   `cfg.MUZZLE_OFFSET` (e.g. 25, 30). If they miss behind (under-lead),
+   lower it (e.g. 15, 10).
+5. Switch `FORCE_BOT_ITEM_NAME` to `"Semi Auto Pistol"` and
    `"Alien Electrical Weapon"` and confirm shots land regardless of host
-   strafing — these should resolve as hitscan, so the bot should aim
-   directly at the current position with no lead. Press R and verify in
-   the snapshot that either `current_proto_model_va == 0` (key 0 → no
-   resolution) or `proto_speed_raw == 0` (resolved CModel has zero
-   velocity), and `is_hitscan == 1` in the `ai_fire` chunk.
+   strafing — these should resolve as hitscan, so the bot aims at the
+   current position with no lead. The `ai_fire` snapshot chunk shows
+   `is_hitscan == 1` for these.
+6. Restore `LEAD_PROBABILITY` to your preferred mix (0.5 default).
 
 ## What is finished
 
@@ -180,6 +226,10 @@ threaded engine). Default is `1/60` because the engine ticks at ~60Hz.
 - Multi-bot support up to map cap, bounded by 16 bot slots.
 - Scratch-array cleanup on match change.
 - Stationary controller handling with custom fire/aim.
+- Per-weapon dynamic projectile speed via engine def lookup.
+- Quadratic intercept solver with muzzle-offset compensation.
+- Per-shot lead vs straight-shot randomization (`LEAD_PROBABILITY`).
+- Hitscan detection (Semi Auto Pistol, Alien Electrical Weapon).
 
 ## Still open
 

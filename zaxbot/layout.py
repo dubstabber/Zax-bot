@@ -199,12 +199,6 @@ def build_scratch_layout(
         # >= this threshold. Encoded as int(cfg.LEAD_PROBABILITY * 100), so
         # 0 = never lead, 100 = always lead, 50 = coin-flip.
         ScratchField('lead_threshold', 0x3F0, 0x04, 'bot_fire_aim: lead-randomization threshold (0..100)'),
-        # Captured by detour_491A40 every time the engine's CEntityProjectile
-        # ctor returns. Overwritten by every shot (host, PC2, bot) — when
-        # R is pressed, this holds the most recent projectile pointer so the
-        # snapshot can read its live velocity at +0xE8/+0xEC.
-        ScratchField('last_proj_va', 0x3DC, 0x04, 'proj capture: last spawned CEntityProjectile ptr'),
-        ScratchField('proj_count',   0x3E0, 0x04, 'proj capture: cumulative spawn count (sanity)'),
     ])
     fields.extend([
         # Per-name color tables. bot_colors holds (color1, color2) dword pairs
@@ -254,40 +248,6 @@ def build_scratch_layout(
         ScratchField('tag_pc2_weapon',  0x850, 0x10),
         ScratchField('tag_host_wpn_bytes', 0x860, 0x10),
         ScratchField('tag_pc2_wpn_bytes',  0x870, 0x10),
-        # Dumps the full CModel struct at current_proto_model_va (the
-        # projectile prototype resolved from the bot's currently held
-        # weapon). Lets the user see all 196 bytes of the CModel layout
-        # without rebuilding — useful for figuring out whether
-        # Move/Max Velocity (+0x60) is the actual launch velocity or
-        # something else like Friction (+0xE4) / Velocity X (+0xE8) come
-        # into play for specific weapons.
-        ScratchField('tag_proto_bytes',    0x880, 0x10),
-        # Dumps the Default Entity that the CModel points to at +0x74.
-        # The actual launched projectile entity is cloned from this
-        # prototype, so any velocity/acceleration defaults stored on it
-        # (CEntityMovable inherits Velocity X/Y at +0xE8/+0xEC and
-        # Acceleration X/Y at +0xF4/+0xF8) become the launch values.
-        ScratchField('tag_default_entity', 0x890, 0x10),
-        # Dumps the most-recently-spawned projectile entity (live, in-flight).
-        # Captured by detour_491A40 right after the CEntityProjectile ctor
-        # returns. The caller (engine fire path) sets velocity at +0xE8/+0xEC
-        # immediately after — so by the time R is pressed the bullet's
-        # Velocity X/Y reflect the engine's actual launch values, which we
-        # can compare against our predicted proj_speed.
-        ScratchField('tag_proj_now',       0x8A0, 0x10),
-        # Small scratch dump covering last_proj_va, proj_count, quad_c, and
-        # muzzle_offset — useful for confirming the per-shot projectile
-        # count (multi-spawn weapons like Twin Disruptor / Tri Spread Gun
-        # bump proj_count by 2+ per fire-tick).
-        ScratchField('tag_proj_stats',     0x8B0, 0x10),
-        # Dumps the full CInventoryItemDefinition (96 bytes) of the bot's
-        # current weapon. Key fields to inspect:
-        #   +0x40 "Projectiles/Num Projectile" (int count)  — confirms multi
-        #   +0x44 array pointer of CProjectileInfo references
-        #   +0x34 Weapon/Strike Damage, +0x48 Reuse Delay
-        # Without this we can only guess multi-spawn from proj_count vs
-        # observed shot-rate; with it the count is in the raw bytes.
-        ScratchField('tag_def_bytes',      0x8C0, 0x10),
         ScratchField('bot_names', 0x900, num_bot_names * name_slot_size),
         ScratchField('bot_names_ascii', 0xB80, num_bot_names * name_slot_ascii),
         # Per-bot, per-char-slot last-seen position cache for the lead-shot

@@ -55,14 +55,6 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     tag_pc2_weapon_va  = layout.va('tag_pc2_weapon')
     tag_host_wpn_bytes_va = layout.va('tag_host_wpn_bytes')
     tag_pc2_wpn_bytes_va  = layout.va('tag_pc2_wpn_bytes')
-    tag_proto_bytes_va    = layout.va('tag_proto_bytes')
-    tag_default_entity_va = layout.va('tag_default_entity')
-    tag_proj_now_va       = layout.va('tag_proj_now')
-    tag_proj_stats_va     = layout.va('tag_proj_stats')
-    tag_def_bytes_va      = layout.va('tag_def_bytes')
-    current_proto_model_va_va = layout.va('current_proto_model_va')
-    current_proto_va_va   = layout.va('current_proto_va')
-    last_proj_va_va       = layout.va('last_proj_va')
     primary_hash_va    = layout.va('primary_hash')
     host_weapon_obj_va = layout.va('host_weapon_obj')
     host_proto_va_va   = layout.va('host_proto_va')
@@ -145,69 +137,6 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     emit_chunk(tag_ai_fire_va,   b'\xB8' + le32(ai_fire_src_va),         0x40, 'snap_skip_ai_fire')
     emit_chunk(tag_ai_pos_va,    b'\xB8' + le32(ai_pos_src_va),         0x100, 'snap_skip_ai_pos')
     emit_chunk(tag_weapon_info_va, b'\xB8' + le32(weapon_info_src_va),    0x14, 'snap_skip_weapon_info')
-
-    # Full CModel projectile prototype dump. Source pointer is loaded via
-    # `mov eax, [current_proto_model_va]` so emit_chunk follows the
-    # diagnostic stash to wherever the engine has the resolved CModel,
-    # and bails cleanly if it's NULL (hitscan weapon). 0xC4 covers the
-    # whole CModel struct (sub_5159B0 registers size 196).
-    emit_chunk(tag_proto_bytes_va, b'\xA1' + le32(current_proto_model_va_va), 0xC4, 'snap_skip_proto_bytes')
-
-    # Default Entity dump. CModel+0x74 holds a pointer to the actual entity
-    # prototype that gets cloned per shot. Bullets/missiles inherit the
-    # Velocity X/Y (+0xE8/+0xEC) and Acceleration X/Y (+0xF4/+0xF8) fields
-    # stored on it. 0x110 covers CEntityMovable's full extent (264 bytes)
-    # including the velocity defaults. The double-deref is done inline:
-    #   mov eax, [current_proto_model_va] ; eax = CModel*
-    #   test eax, eax                      ; skip if NULL
-    #   mov eax, [eax + 0x74]              ; eax = Default Entity*
-    # The skip-on-NULL inside emit_chunk handles the second NULL case too.
-    a.raw(b'\xA1' + le32(current_proto_model_va_va))         # mov eax, [proto_model_va]
-    a.raw(b'\x85\xC0'); a.jz('snap_skip_default_entity')      # bail if CModel is NULL
-    a.raw(b'\x8B\x40\x74')                                    # mov eax, [eax + 0x74]
-    a.raw(b'\xA3' + le32(saved_src_va_va))                    # stash so emit_chunk can re-read
-    emit_chunk(tag_default_entity_va, b'\xA1' + le32(saved_src_va_va), 0x110, 'snap_skip_default_entity')
-
-    # Live projectile dump. detour_491A40 stashes the latest spawned
-    # CEntityProjectile pointer in last_proj_va; this chunk dumps 0x114 bytes
-    # (the full CEntityProjectile size) so the user can read the actual
-    # launch velocity at +0xE8/+0xEC and compare against our proj_speed
-    # prediction.
-    #
-    # Safety: the pointer can go stale if the bullet expires between firing
-    # and R-press (engine deallocates the heap slot, sometimes returning the
-    # page to the OS — which would AV the dump). Two guards:
-    #   1. Reject if [last_proj_va + 0] != CENTITYPROJECTILE_VTABLE_VA
-    #      (heap slot has been reused for a different class type).
-    #   2. After a successful dump, zero last_proj_va so the next R-press
-    #      only dumps if a new projectile was captured in the meantime.
-    # The vtable read can still AV if the page was unmapped — but in
-    # practice the heap manager keeps pages around for re-allocation, so
-    # this is good enough for the common case.
-    a.raw(b'\xA1' + le32(last_proj_va_va))                    # mov eax, [last_proj_va]
-    a.raw(b'\x85\xC0'); a.jz('snap_skip_proj_now')             # NULL → skip entirely
-    a.raw(b'\x81\x38' + le32(ax.CENTITYPROJECTILE_VTABLE_VA))  # cmp dword [eax], vtable
-    a.jnz('snap_clear_proj_now')                               # mismatch → skip dump, still clear
-    emit_chunk(tag_proj_now_va, b'\xA1' + le32(last_proj_va_va), 0x114, 'snap_proj_after_dump')
-    a.label('snap_clear_proj_now')
-    a.raw(b'\xC7\x05' + le32(last_proj_va_va) + le32(0))       # mov [last_proj_va], 0
-    a.label('snap_skip_proj_now')
-
-    # Projectile-capture stats: dumps last_proj_va (just cleared), proj_count
-    # (cumulative spawn count — jumps by 1 per single-shot weapon, 2+ per
-    # multi-projectile weapon like Twin Disruptor), quad_c (apply_lead's
-    # muzzle-adjusted distance²), and muzzle_offset (constant, sanity check).
-    # 16 bytes from last_proj_va covers all four.
-    emit_chunk(tag_proj_stats_va, b'\xB8' + le32(last_proj_va_va), 0x10, 'snap_skip_proj_stats')
-
-    # Full CInventoryItemDefinition dump for the bot's current weapon. Source
-    # pointer dereferenced via current_proto_va so emit_chunk follows the
-    # diagnostic stash to the actual def in heap. 0x60 = size of the struct
-    # per sub_4D5620's schema-init. The key field is +0x40
-    # "Projectiles/Num Projectile" (int) which tells us how many bullets
-    # spawn per fire-tick — 1 for single-shot weapons, 2+ for multi-spawn
-    # like Twin Disruptor or Tri Spread.
-    emit_chunk(tag_def_bytes_va, b'\xA1' + le32(current_proto_va_va), 0x60, 'snap_skip_def_bytes')
 
     # --- Host-side weapon lookup (diagnostic). Resolves the host's currently
     # equipped Primary weapon and stashes (item_id, weapon_obj, item_def) so

@@ -147,7 +147,7 @@ DEBUG_BOT_WEAPON_INDEX = None  # type: int | None
 # When non-None, the spawn path also stuffs the bot with the items listed in
 # FORCE_BOT_AMMO_NAMES below (max battery cap + energy refill + every ammo
 # pool) so the forced weapon has full ammo immediately on spawn.
-FORCE_BOT_ITEM_NAME = "Modified Laser Welder"  # type: str | None
+FORCE_BOT_ITEM_NAME = None  # type: str | None
 
 # Items handed to the bot on spawn whenever FORCE_BOT_ITEM_NAME is set. Order
 # matters: 'Battery Level 3' is the max battery-cap upgrade item (the highest

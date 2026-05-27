@@ -104,11 +104,19 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 - Bots do not navigate. They keep a walking controller for idle animation;
   `detour_542360` zeroes movement, and `detour_5436F0` synthesizes aim/fire
   toward the host when range and line of sight allow it.
+- Shot prediction is fully wired. `compute_proj_speed` reads the active
+  weapon's projectile speed from `[CModel + 0x60]` via
+  `sub_48D8F0(dword_6CFDD8, [def + 0x20])`; NULL projectile key or zero
+  velocity ⇒ `is_hitscan` (Semi Auto Pistol, Alien Electrical Weapon).
+  `apply_lead` solves the exact intercept quadratic with muzzle-offset
+  compensation (`cfg.MUZZLE_OFFSET = 20px`); `bot_fire_aim` rolls
+  `cfg.LEAD_PROBABILITY` (default 0.5) per shot to mix prediction with
+  straight-shooting for a less robotic feel.
 - `zaxbot/config.py` can force newly spawned bots to equip an inventory item
-  by name (`FORCE_BOT_ITEM_NAME`, currently `Missile Launcher`) for lead-shot
-  testing. The force path resolves the engine item definition by name, creates
-  a transient pickup item for the new bot, then switches the bot's Primary slot
-  to the bot-local item index.
+  by name (`FORCE_BOT_ITEM_NAME`) for lead-shot testing. The force path
+  resolves the engine item definition by name, creates a transient pickup
+  item for the new bot, then switches the bot's Primary slot to the
+  bot-local item index.
 
 ## Enabled detours
 
@@ -151,6 +159,9 @@ Older emitted labels or disabled detours are not active unless they appear in
 | `proto + 0x60` | CModel "Move/Max Velocity" - float pixels/sec (schema range ~300..4000); scaled by `cfg.SPEED_SCALE` for per-tick lead math |
 | `dword_6CFDD8` | CModel registry, passed as `this` to `sub_48D8F0` to resolve "Projectiles/Projectile" and similar `sub_54E560` reference fields |
 | `sub_48D8F0` | `__thiscall(registry, key) -> object*`; registry-key resolver used for both `dword_6C0C08` item-defs and `dword_6CFDD8` CModel lookups |
+| `sub_55C4E0` | `__thiscall(rng, low, high) -> int`; engine PRNG, used by `bot_fire_aim` for the `LEAD_PROBABILITY` coin-flip and by `name_block` for bot-name picks |
+| `dword_7124C0` | engine RNG instance (passed as `this` to `sub_55C4E0`) |
+| `sub_40F5F0` | engine main loop; calls the per-frame tick with `dt = 1/60` exactly (confirms `cfg.SPEED_SCALE = 1.0/60.0`) |
 | `sub_418790` | `__thiscall(class, char)` -> appearance component (color1@+0xC, color2@+0x18, floats); query the **child** entity, not the player char |
 | `sub_4FC7C0` | `__thiscall(char)` -> child-list count |
 | `sub_4FC7D0` | `__thiscall(char, idx)` -> child entity |

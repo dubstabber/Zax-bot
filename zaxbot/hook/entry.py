@@ -23,7 +23,6 @@ from ..detours import (
     df90_match_change,
     dp_poll,
     name_block,
-    projectile_capture,
     spawn_safety,
     walk_controller,
 )
@@ -47,7 +46,6 @@ _DETOUR_LABEL_KEYS = {
     'detour_name_query2':      'detour_name_query2_va',
     'detour_name_block_skip':  'detour_name_block_skip_va',
     'detour_4F5204':           'detour_4F5204_va',
-    'detour_491A40':           'detour_491A40_va',
 }
 
 
@@ -109,7 +107,6 @@ def build_hook(section_va_abs):
     spawn_safety.emit(a, layout)
     name_block.emit(a, layout)
     char_iter.emit(a, layout)
-    projectile_capture.emit(a, layout)
 
     code = a.link()
     assert len(code) <= cfg.SCRATCH_OFF, (

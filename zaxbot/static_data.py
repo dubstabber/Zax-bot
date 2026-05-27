@@ -26,11 +26,6 @@ DUMP_TAGS = (
     ('tag_pc2_weapon',  'pc2_weapon'),
     ('tag_host_wpn_bytes', 'host_wpn_b'),
     ('tag_pc2_wpn_bytes',  'pc2_wpn_b'),
-    ('tag_proto_bytes',    'proto_b'),
-    ('tag_default_entity', 'def_ent'),
-    ('tag_proj_now',       'proj_now'),
-    ('tag_proj_stats',     'proj_stat'),
-    ('tag_def_bytes',      'def_b'),
 )
 
 
