@@ -75,6 +75,20 @@ SPEED_SCALE = 1.0 / 60.0
 # for now one global constant covers the typical case.
 MUZZLE_OFFSET = 20.0
 
+# Probability that the bot applies projectile lead on a given fire-tick.
+# 0.0 = always shoot at target's current position (no prediction at all),
+# 1.0 = always lead (perfect tracking), 0.5 = coin-flip per shot.
+#
+# Why randomize: perfect lead feels robotic — every shot lands the same way
+# and a human player can learn to micro-zigzag to dodge consistently. A
+# 50/50 mix gives bots a more human feel: half the shots predict your
+# motion, the other half just shoot where you are right now, so dodging
+# requires actual reflexes rather than a fixed counter-strategy.
+#
+# Hitscan weapons (Semi Auto Pistol, Alien Electrical Weapon) ignore this
+# knob — they're instant-hit so leading is meaningless either way.
+LEAD_PROBABILITY = 0.6
+
 # Per-weapon projectile-speed OVERRIDE table, keyed by the weapon's inventory-
 # item definition pointer returned by sub_4DD480(current_weapon_obj). Looked
 # up first by compute_proj_speed; on a hit the override wins. On no match

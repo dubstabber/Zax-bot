@@ -39,6 +39,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     our_team_tmp_va    = layout.va('our_team_tmp')
     bot_char_tmp_va    = layout.va('bot_char_tmp')
     is_hitscan_va      = layout.va('is_hitscan')
+    lead_threshold_va  = layout.va('lead_threshold')
 
     a.label('detour_5436F0')
 
@@ -79,6 +80,20 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.call_lbl('compute_proj_speed')
     a.raw(b'\x83\x3D' + le32(is_hitscan_va) + b'\x00')    # cmp [is_hitscan], 0
     a.jnz('s5436f0_skip_lead')
+
+    # Per-shot lead randomization. Roll [0,99] from the engine's RNG and
+    # only apply_lead when the roll is below `lead_threshold`
+    # (= int(cfg.LEAD_PROBABILITY * 100)). At 50/50, half the shots predict
+    # the target's motion and half just shoot at its current position —
+    # gives bots a more human feel than perfect deterministic tracking.
+    # Threshold of 0 ⇒ never lead; 100 ⇒ always lead.
+    a.raw(b'\x6A\x63')                                    # push 99 (high)
+    a.raw(b'\x6A\x00')                                    # push 0 (low)
+    a.raw(b'\xB9' + le32(ax.RNG_OBJ_VA))                  # mov ecx, RNG instance
+    a.call_va(ax.RNG_SUB)                                 # eax = rand in [0, 99]
+    a.raw(b'\x3B\x05' + le32(lead_threshold_va))          # cmp eax, [lead_threshold]
+    a.jge('s5436f0_skip_lead')                            # roll >= threshold → straight shot
+
     a.call_lbl('apply_lead')                              # rewrite best_dx/best_dy
     a.label('s5436f0_skip_lead')
 

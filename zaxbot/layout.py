@@ -194,6 +194,11 @@ def build_scratch_layout(
         # re-square at runtime.
         ScratchField('muzzle_offset', 0x3E8, 0x04, 'apply_lead: muzzle spawn distance from bot center (px)'),
         ScratchField('muzzle_sq',     0x3EC, 0x04, 'apply_lead: muzzle_offset² (packed at build time)'),
+        # Threshold for the per-shot lead-randomization roll. bot_fire_aim
+        # calls sub_55C4E0(RNG, 0, 99) and skips apply_lead when the roll
+        # >= this threshold. Encoded as int(cfg.LEAD_PROBABILITY * 100), so
+        # 0 = never lead, 100 = always lead, 50 = coin-flip.
+        ScratchField('lead_threshold', 0x3F0, 0x04, 'bot_fire_aim: lead-randomization threshold (0..100)'),
         # Captured by detour_491A40 every time the engine's CEntityProjectile
         # ctor returns. Overwritten by every shot (host, PC2, bot) — when
         # R is pressed, this holds the most recent projectile pointer so the

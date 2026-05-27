@@ -94,6 +94,7 @@ def write_static_scratch_data(
     projectile_speed=600.0,
     speed_scale=1.0 / 60.0,
     muzzle_offset=20.0,
+    lead_probability=0.5,
     weapon_speeds=(),
     force_bot_item_name=None,
     force_bot_ammo_names=(),
@@ -133,6 +134,9 @@ def write_static_scratch_data(
     layout.write(section, scratch_off, 'speed_scale', struct.pack('<f', speed_scale))
     layout.write(section, scratch_off, 'muzzle_offset', struct.pack('<f', muzzle_offset))
     layout.write(section, scratch_off, 'muzzle_sq', struct.pack('<f', muzzle_offset * muzzle_offset))
+    # Clamp to [0, 100] and round to nearest. 0 ⇒ never lead, 100 ⇒ always.
+    lead_threshold = max(0, min(100, int(round(lead_probability * 100))))
+    layout.write(section, scratch_off, 'lead_threshold', struct.pack('<I', lead_threshold))
 
     # Pack WEAPON_SPEEDS into the runtime table. Each entry is
     # (item_def_va u32, speed float). Terminated by a (0, 0.0) sentinel; the

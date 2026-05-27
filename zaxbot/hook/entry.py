@@ -139,6 +139,7 @@ def build_hook(section_va_abs):
         projectile_speed=cfg.PROJECTILE_SPEED,
         speed_scale=cfg.SPEED_SCALE,
         muzzle_offset=cfg.MUZZLE_OFFSET,
+        lead_probability=cfg.LEAD_PROBABILITY,
         weapon_speeds=cfg.WEAPON_SPEEDS,
         force_bot_item_name=cfg.resolve_force_bot_item_name(),
         force_bot_ammo_names=cfg.resolve_force_bot_ammo_names(),
