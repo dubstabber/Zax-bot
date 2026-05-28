@@ -13,7 +13,7 @@ from .. import config as cfg
 from ..asm import Asm
 from ..layout import build_scratch_layout
 from ..static_data import write_static_scratch_data
-from . import aim_lead, apply_colors, detect_mode, dispatcher, snapshot, spawn, weapon_speed
+from . import aim_lead, apply_colors, detect_mode, dispatcher, snapshot, spawn, waypoint_diag, waypoint_edit, weapon_speed
 from .helpers import emit_logc_body, emit_wbuf_body
 from ..detours import (
     bot_fire_aim,
@@ -23,6 +23,7 @@ from ..detours import (
     df90_match_change,
     dp_poll,
     name_block,
+    overlay,
     spawn_safety,
     walk_controller,
     world_scan,
@@ -47,6 +48,7 @@ _DETOUR_LABEL_KEYS = {
     'detour_name_query2':      'detour_name_query2_va',
     'detour_name_block_skip':  'detour_name_block_skip_va',
     'detour_4F5204':           'detour_4F5204_va',
+    'detour_5693A0':           'detour_5693A0_va',
 }
 
 
@@ -71,6 +73,8 @@ def build_hook(section_va_abs):
         cfg.WEAPON_SPEEDS_MAX,
         force_bot_ammo_max=cfg.FORCE_BOT_AMMO_MAX,
         force_bot_ammo_slot_size=cfg.FORCE_BOT_AMMO_SLOT_SIZE,
+        overlay_vertex_max=cfg.OVERLAY_VERTEX_MAX,
+        overlay_edge_max=cfg.OVERLAY_EDGE_MAX,
     )
 
     a = Asm(section_va_abs + cfg.HOOK_ENTRY_OFF)
@@ -85,6 +89,8 @@ def build_hook(section_va_abs):
     apply_colors.emit(a, layout)
     emit_wbuf_body(a, dummy_va=layout.va('dummy'))
     snapshot.emit(a, layout)
+    waypoint_diag.emit(a, layout)
+    waypoint_edit.emit(a, layout)
     emit_logc_body(
         a,
         stepfn_va=layout.va('stepfn'),
@@ -113,11 +119,14 @@ def build_hook(section_va_abs):
     spawn_safety.emit(a, layout)
     name_block.emit(a, layout)
     char_iter.emit(a, layout)
+    overlay.emit(a, layout)
 
     code = a.link()
     assert len(code) <= cfg.SCRATCH_OFF, (
         f'hook code overflows scratch: {len(code):#x}'
     )
+
+    overlay_waypoints, overlay_edges = cfg.resolve_overlay_data()
 
     section = bytearray(cfg.NEW_SECTION_SIZE)
     section[cfg.HOOK_ENTRY_OFF:cfg.HOOK_ENTRY_OFF + len(code)] = code
@@ -161,6 +170,15 @@ def build_hook(section_va_abs):
         hazard_default_radius_sq=cfg.HAZARD_DEFAULT_RADIUS_SQ,
         bot_move_speed=cfg.BOT_MOVE_SPEED,
         hazard_flee_frames=cfg.HAZARD_FLEE_FRAMES,
+        overlay_enabled=cfg.OVERLAY_ENABLED,
+        overlay_waypoints=overlay_waypoints,
+        overlay_edges=overlay_edges,
+        overlay_vertex_color=cfg.OVERLAY_VERTEX_COLOR,
+        overlay_edge_color=cfg.OVERLAY_EDGE_COLOR,
+        overlay_selected_color=cfg.OVERLAY_SELECTED_COLOR,
+        overlay_vertex_radius=cfg.OVERLAY_VERTEX_RADIUS,
+        overlay_vertex_aspect=cfg.OVERLAY_VERTEX_ASPECT,
+        wp_snap_radius_sq=cfg.WP_SNAP_RADIUS_SQ,
     )
 
     info = {

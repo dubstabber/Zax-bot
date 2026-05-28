@@ -57,6 +57,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     tag_pc2_wpn_bytes_va  = layout.va('tag_pc2_wpn_bytes')
     tag_ai_move_va        = layout.va('tag_ai_move')
     tag_hazard_va         = layout.va('tag_hazard')
+    tag_wp_diag_va        = layout.va('tag_wp_diag')
+    tag_wp_lv_va          = layout.va('tag_wp_lv')
+    tag_wp_lay_va         = layout.va('tag_wp_lay')
+    tag_wp_map_va         = layout.va('tag_wp_map')
+    wp_diag_data_va       = layout.va('wp_diag_data')
     primary_hash_va    = layout.va('primary_hash')
     host_weapon_obj_va = layout.va('host_weapon_obj')
     host_proto_va_va   = layout.va('host_proto_va')
@@ -157,6 +162,22 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # hazard_table.
     emit_chunk(tag_ai_move_va,   b'\xB8' + le32(ai_move_src_va),        0x300, 'snap_skip_ai_move')
     emit_chunk(tag_hazard_va,    b'\xB8' + le32(hazard_src_va),         0x190, 'snap_skip_hazard')
+
+    # Waypoint-graph probe. wp_compute populates wp_diag_data[0..7]:
+    #   [+0x00] MGR, [+0x04] WM, [+0x08] LV, [+0x0C] WPM,
+    #   [+0x10] char count, [+0x14] layer_arr, [+0x18] LAY, [+0x1C] WPM_REAL.
+    # `wp_lv`  dumps 0x200B from LV  (vtbl[0x184] object, expected non-CLayer)
+    # `wp_lay` dumps 0x200B from LAY (active CLayer; expect [+0x134] to be a
+    #          heap ptr to a CWayPointMap with vtable 0x5FC760).
+    a.call_lbl('wp_compute')
+    emit_chunk(tag_wp_diag_va, b'\xB8' + le32(wp_diag_data_va),         0x20,  'snap_skip_wp_diag')
+    emit_chunk(tag_wp_lv_va,   b'\xA1' + le32(wp_diag_data_va + 0x08),  0x200, 'snap_skip_wp_lv')
+    emit_chunk(tag_wp_lay_va,  b'\xA1' + le32(wp_diag_data_va + 0x18),  0x200, 'snap_skip_wp_lay')
+    # CWayPointMap is 52 bytes (vtable + two embedded 16-byte CLists +
+    # MinDist/MaxDist/extra ints). Dump 0x40 for a bit of padding so we
+    # can confirm the vtable matches 0x5FC760 and read the two CList
+    # counts to learn whether the map has any polygons/nodes.
+    emit_chunk(tag_wp_map_va,  b'\xA1' + le32(wp_diag_data_va + 0x1C),  0x40,  'snap_skip_wp_map')
 
     # --- Host-side weapon lookup (diagnostic). Resolves the host's currently
     # equipped Primary weapon and stashes (item_id, weapon_obj, item_def) so

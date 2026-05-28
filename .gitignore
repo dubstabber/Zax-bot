@@ -31,10 +31,17 @@ ReadMe.txt
 *.nam
 *.til
 
+# Ghidra folders and files
+zax-bot.rep/
+zax-bot.lock
+zax-bot.gpr
+
 # Runtime diagnostics from patched builds
 zax_*.log
 zax_*.bin
 zax_*.bin.old
+zax_dump.bin*
+zax_step.log*
 debug-output.txt
 
 # Local OS/editor noise

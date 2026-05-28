@@ -78,10 +78,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('scan_haz_loop')
     a.raw(b'\x8B\x04\xBA')                                      # mov eax, [edx + edi*4]
     a.raw(b'\x85\xC0'); a.jz('scan_haz_next')
-    # Image-base range check
+    # Wide heap range — entities live in Wine's userland heap at
+    # 0x01xxxxxx..0x05xxxxxx, NOT in the PE-image 0x004xxxxx..0x006xxxxx
+    # range. The old narrow filter silently rejected every entity, so this
+    # scan and pick_pickup both returned empty. Mirrors snapshot.py's
+    # range check at lines 335-338.
     a.raw(b'\x3D\x00\x00\x40\x00')                              # cmp eax, 0x00400000
     a.jb('scan_haz_next')
-    a.raw(b'\x3D\x00\x00\x70\x00')                              # cmp eax, 0x00700000
+    a.raw(b'\x3D\x00\x00\x00\x70')                              # cmp eax, 0x70000000
     a.jae('scan_haz_next')
 
     a.raw(b'\xA3' + le32(cand_tmp_va))                          # save ent ptr
@@ -170,9 +174,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('pp_loop')
     a.raw(b'\x8B\x04\xBA')                                      # eax = arr[idx]
     a.raw(b'\x85\xC0'); a.jz('pp_next')
-    a.raw(b'\x3D\x00\x00\x40\x00')                              # cmp eax, 0x400000
+    # See scan_haz_loop note: wide heap range, not PE-image range.
+    a.raw(b'\x3D\x00\x00\x40\x00')                              # cmp eax, 0x00400000
     a.jb('pp_next')
-    a.raw(b'\x3D\x00\x00\x70\x00')                              # cmp eax, 0x700000
+    a.raw(b'\x3D\x00\x00\x00\x70')                              # cmp eax, 0x70000000
     a.jae('pp_next')
 
     a.raw(b'\xA3' + le32(cand_tmp_va))                          # save ent ptr

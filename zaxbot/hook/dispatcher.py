@@ -28,9 +28,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x83\x3D' + le32(menu_state_va) + b'\x00')       # cmp dword [menu_state], 0
     a.jnz('handle_menu_open')
 
-    # --- IDLE state: B opens menu; R takes a diagnostic snapshot ---
-    a.raw(b'\x80\xF9' + bytes([ax.VK_R]))                    # cmp cl, VK_R
-    a.jz('handle_R')
+    # --- IDLE state: B opens menu; R takes a diagnostic snapshot
+    # (R's snapshot includes the waypoint-graph diag chunks now;
+    # no separate hotkey since W is bound to "move up" in-game).
+    # N/J/X drive the waypoint editor (drop / select / delete). ---
+    a.raw(b'\x80\xF9' + bytes([ax.VK_R])); a.jz('handle_R')
+    a.raw(b'\x80\xF9' + bytes([ax.VK_N])); a.jz('handle_N')
+    a.raw(b'\x80\xF9' + bytes([ax.VK_J])); a.jz('handle_J')
+    a.raw(b'\x80\xF9' + bytes([ax.VK_X])); a.jz('handle_X')
     a.raw(b'\x80\xF9' + bytes([ax.VK_B]))                    # cmp cl, VK_B
     a.jnz('passthru')
 
@@ -57,6 +62,30 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     mp_gate(a, 'pop_passthru')                                 # same chain as B handler
     a.call_lbl('do_snapshot')
     a.raw(b'\x61')                                             # popad
+    a.jmp_va(ax.ORIG_TARGET_VA)
+
+    # --- Waypoint-editor handlers (N drop, J select, X delete) ---
+    # Each is gated by mp_gate so editing only fires inside an active match
+    # (host char isn't a valid entity outside MP).
+    a.label('handle_N')
+    a.raw(b'\x60')
+    mp_gate(a, 'pop_passthru')
+    a.call_lbl('wp_drop')
+    a.raw(b'\x61')
+    a.jmp_va(ax.ORIG_TARGET_VA)
+
+    a.label('handle_J')
+    a.raw(b'\x60')
+    mp_gate(a, 'pop_passthru')
+    a.call_lbl('wp_select')
+    a.raw(b'\x61')
+    a.jmp_va(ax.ORIG_TARGET_VA)
+
+    a.label('handle_X')
+    a.raw(b'\x60')
+    mp_gate(a, 'pop_passthru')
+    a.call_lbl('wp_delete')
+    a.raw(b'\x61')
     a.jmp_va(ax.ORIG_TARGET_VA)
 
     # --- MENU_OPEN: digit '1'..'4' in range -> spawn; otherwise cancel ---

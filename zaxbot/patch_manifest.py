@@ -50,6 +50,15 @@ def build_enabled_patches():
             'sub_4F5150 char iter null-skip', 'jmp', ax.S4F5204_VA,
             ax.S4F5204_ORIG, 'detour_4F5204_va', 6,
         ),
+        # Page-flip detour: draws OVERLAY_WAYPOINTS / OVERLAY_EDGES via the
+        # engine's renderer just before the back-buffer is presented. The
+        # detour body fast-skips when cfg.OVERLAY_ENABLED is False, so
+        # leaving this patch installed always is cheap (single cmp/jz on
+        # entry) and matches the project's other always-on detours.
+        RelocationPatch(
+            'sub_5693A0 waypoint overlay', 'jmp', ax.S5693A0_VA,
+            ax.S5693A0_PROLOGUE, 'detour_5693A0_va', 5,
+        ),
         # Inline NULL-guard for sub_4FC8A0 (the positional-sound dispatch
         # wrapper). The function does `mov ecx, [ecx+0x48]; call sub_4EA880`
         # — when called on a synthetic-DP bot whose audio emitter at +0x48

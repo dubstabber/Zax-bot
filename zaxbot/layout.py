@@ -114,6 +114,8 @@ def build_scratch_layout(
     weapon_speeds_max,
     force_bot_ammo_max=0,
     force_bot_ammo_slot_size=0,
+    overlay_vertex_max=0,
+    overlay_edge_max=0,
 ):
     BOT_STATE_BASE = 0x180
     MAX_BOT_SLOTS = 16
@@ -250,6 +252,10 @@ def build_scratch_layout(
         ScratchField('tag_pc2_wpn_bytes',  0x870, 0x10),
         ScratchField('tag_ai_move',        0x880, 0x10, 'diag: bot wander/stuck/attractor state'),
         ScratchField('tag_hazard',         0x890, 0x10, 'diag: cached hazard table'),
+        ScratchField('tag_wp_diag',        0x8A0, 0x10, 'diag: waypoint probe summary (8 u32)'),
+        ScratchField('tag_wp_lv',          0x8B0, 0x10, 'diag: raw bytes from vtbl[0x184] result'),
+        ScratchField('tag_wp_lay',         0x8C0, 0x10, 'diag: raw bytes from active CLayer'),
+        ScratchField('tag_wp_map',         0x8D0, 0x10, 'diag: raw bytes from CWayPointMap'),
         ScratchField('bot_names', 0x900, num_bot_names * name_slot_size),
         ScratchField('bot_names_ascii', 0xB80, num_bot_names * name_slot_ascii),
         # Per-bot, per-char-slot last-seen position cache for the lead-shot
@@ -384,5 +390,105 @@ def build_scratch_layout(
         # Per-tick scratch (used inside the bot_movement detour).
         ScratchField('move_tmp_pos',              ai_off + 0x3C + AI_HAZARD_CAP * 12,         0x08,
                      'movement: scratch (x, y) for sub_4FB0A0 reads'),
+        # Waypoint-diagnostic raw-dword scratch. ``wp_compute`` populates
+        # eight contiguous u32 fields:
+        #   [+0x00] MGR ptr        (dword_713F14 content)
+        #   [+0x04] WM ptr         (dword_6C2080 content; MGR == WM at runtime)
+        #   [+0x08] LV ptr         (mgr.vtbl[0x184]() — NOT a CLayer; junk
+        #                           at +0x134 confirmed in earlier R dump)
+        #   [+0x0C] WPM ptr        ([LV + 0x134]; kept for comparison)
+        #   [+0x10] char count     ([WM + 0x294])
+        #   [+0x14] layer_arr ptr  ([WM + 0x2BC] — array of layers per
+        #                           sub_4F1050 disasm; count at +0x2C0
+        #                           reads 1 in MP, so element 0 is the
+        #                           active layer)
+        #   [+0x18] LAY ptr        ([layer_arr + 0] — the active CLayer;
+        #                           this is what sub_4ECA80 stores the
+        #                           CWayPointMap on)
+        #   [+0x1C] WPM_REAL ptr   ([LAY + 0x134] — the actual CWayPointMap
+        #                           if our hypothesis is right)
+        # Two raw-bytes chunks accompany this struct in the snapshot:
+        # ``wp_lv`` (0x200 bytes from LV) for offline post-mortem of the
+        # vtbl[0x184] object, and ``wp_lay`` (0x200 bytes from LAY) to
+        # confirm the CLayer hypothesis and locate the CWayPointMap.
+        ScratchField('wp_diag_data',              ai_off + 0x44 + AI_HAZARD_CAP * 12,         0x20,
+                     'waypoint diag: 8 raw u32 fields populated by wp_compute'),
     ])
+    # --- Waypoint overlay state -------------------------------------------
+    # Renderable waypoint set baked from cfg.OVERLAY_WAYPOINTS / EDGES at
+    # build time. Capacity ceilings are passed in so detours/overlay.py can
+    # iterate by the LIVE count fields without growing the section per
+    # waypoint set. Anchored at 0x2000 to keep a clear visual gap from the
+    # bot-AI scratch (ends near 0x1F4C) and survive future field churn.
+    OVERLAY_BASE = 0x2000
+    overlay_color_size = 16          # CColor struct (BGRA + palette idx + flags)
+    overlay_vertex_stride = 8        # float[2] per vertex
+    overlay_edge_stride   = 4        # u16[2] per edge
+    overlay_vertex_max_capped = max(0, overlay_vertex_max)
+    overlay_edge_max_capped   = max(0, overlay_edge_max)
+
+    overlay_fields = [
+        ScratchField('overlay_enabled',       OVERLAY_BASE + 0x00, 0x04,
+                     'overlay: master enable flag (0 = skip detour body)'),
+        ScratchField('overlay_vertex_color',  OVERLAY_BASE + 0x04, overlay_color_size,
+                     'overlay: vertex CColor; rebuilt each frame by sub_53F010'),
+        ScratchField('overlay_edge_color',    OVERLAY_BASE + 0x14, overlay_color_size,
+                     'overlay: edge CColor; rebuilt each frame by sub_53F010'),
+        ScratchField('overlay_vertex_radius', OVERLAY_BASE + 0x24, 0x04,
+                     'overlay: oval radius (float, world-space pixels)'),
+        ScratchField('overlay_vertex_aspect', OVERLAY_BASE + 0x28, 0x04,
+                     'overlay: oval y/x aspect (float; 1.0 = circle)'),
+        ScratchField('overlay_vertex_count',  OVERLAY_BASE + 0x2C, 0x04,
+                     'overlay: live count <= overlay_vertex_max'),
+        ScratchField('overlay_edge_count',    OVERLAY_BASE + 0x30, 0x04,
+                     'overlay: live count <= overlay_edge_max'),
+        ScratchField('overlay_renderer_tmp',  OVERLAY_BASE + 0x34, 0x04,
+                     'overlay: cached renderer ptr for inner-loop reuse'),
+        # Per-frame screen-edge camera read from the host's tracker layer
+        # (`layer+0xC0/0xC4` floats), used to pre-transform world coords
+        # to screen coords before passing to the engine. ``overlay_cam_ok``
+        # is a sentinel: 0 means lookup failed and we should skip drawing.
+        ScratchField('overlay_cam_x',         OVERLAY_BASE + 0x38, 0x04,
+                     'overlay: screen-edge cam x (float, world coord of screen left)'),
+        ScratchField('overlay_cam_y',         OVERLAY_BASE + 0x3C, 0x04,
+                     'overlay: screen-edge cam y (float, world coord of screen top)'),
+        ScratchField('overlay_cam_ok',        OVERLAY_BASE + 0x40, 0x04,
+                     'overlay: 1 if cam_x/y are valid, 0 = skip draw'),
+        ScratchField('overlay_tmp_p1',        OVERLAY_BASE + 0x44, 0x08,
+                     'overlay: float[2] screen p1 for line/oval draw'),
+        ScratchField('overlay_tmp_p2',        OVERLAY_BASE + 0x4C, 0x08,
+                     'overlay: float[2] screen p2 for line draw'),
+        # Waypoint-editor state. wp_selected_idx is the "cursor": index into
+        # overlay_vertices of the currently-selected node, or 0xFFFFFFFF for
+        # no selection. Auto-set to the new node by wp_drop and to the nearest
+        # node by wp_select; consumed by wp_drop (auto-edge source) and by the
+        # overlay draw pass (highlight render). wp_scratch is 8 bytes of
+        # per-call scratch for the position read used by wp_drop/select/delete.
+        ScratchField('wp_selected_idx',       OVERLAY_BASE + 0x54, 0x04,
+                     'waypoint edit: selected node index (0xFFFFFFFF = none)'),
+        ScratchField('wp_scratch',            OVERLAY_BASE + 0x58, 0x08,
+                     'waypoint edit: float[2] for sub_4FB0A0 host-pos reads'),
+        ScratchField('overlay_selected_color', OVERLAY_BASE + 0x60, overlay_color_size,
+                     'overlay: selected-vertex CColor (rebuilt per-frame)'),
+        ScratchField('wp_snap_radius_sq',     OVERLAY_BASE + 0x70, 0x04,
+                     'waypoint edit: snap radius² (float, world units)'),
+    ]
+    # Vertex / edge tables start at +0x80 (after the per-frame scratch
+    # above, including waypoint-editor state) so growing the fix-up state
+    # doesn't shift the tables.
+    OVERLAY_TABLE_OFF = 0x80
+    if overlay_vertex_max_capped > 0:
+        overlay_fields.append(ScratchField(
+            'overlay_vertices', OVERLAY_BASE + OVERLAY_TABLE_OFF,
+            overlay_vertex_max_capped * overlay_vertex_stride,
+            'overlay: float[2] per vertex (world coords)',
+        ))
+    if overlay_edge_max_capped > 0:
+        overlay_edge_off = OVERLAY_BASE + OVERLAY_TABLE_OFF + overlay_vertex_max_capped * overlay_vertex_stride
+        overlay_fields.append(ScratchField(
+            'overlay_edges', overlay_edge_off,
+            overlay_edge_max_capped * overlay_edge_stride,
+            'overlay: (u16 i, u16 j) per edge; indices into overlay_vertices',
+        ))
+    fields.extend(overlay_fields)
     return ScratchLayout(base_va, scratch_size, fields)

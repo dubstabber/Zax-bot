@@ -297,7 +297,76 @@ SUB_59FF90_VA = 0x59FF90
 # --- Virtual-key codes used by the dispatcher ------------------------------
 VK_ESC = 0x1B
 VK_B   = 0x42
+VK_J   = 0x4A
+VK_N   = 0x4E
 VK_R   = 0x52
+VK_X   = 0x58
+
+# --- CWayPointMap probe (waypoint_diag) ------------------------------------
+# `sub_4ECA80` (CLevel::LoadWayPoints) stores the per-level CWayPointMap* at
+# `level + 0x134` after loading `Levels/<name>.way` or auto-generating from
+# placed CWayPointsPolygon entities. Both `sub_4EBEB0` and `sub_4EC090` call
+# the loader, so every level (SP or MP) has this slot populated — but the
+# generator only runs when polygon entities exist, so the map may be empty
+# on MP maps that were authored without bots in mind. Each CWayPointsPolygon
+# is a 120-byte world entity living in the standard `mgr+0x2BC/0x2C0` array
+# with `[+0] = off_602B2C` as its vtable marker; counting them is the
+# cleanest "does this map have any waypoint authoring?" probe.
+LEVEL_WAYPOINT_MAP_OFF      = 0x134
+CWAYPOINTS_POLY_VTABLE_VA   = 0x602B2C
+
+# --- Overlay rendering -----------------------------------------------------
+# `*(RENDERER_OWNER_VA + 4)` is the CGraphics* renderer (vtable off_5FF360,
+# set up by sub_567990 inside the CGame ctor at sub_4CD780:0x4cd946). Its
+# vtbl[+0xD0] is `sub_568D90` — the raw line drawer that reads the camera
+# origin via vtbl[+0xAC]/[+0xB0] and dispatches to depth-specific Bresenham
+# fills (sub_42C9E0 32-bit, sub_42C0F0 16-bit, sub_42B6E0 8-bit/palettized).
+# All three helpers below take WORLD coords; world->screen is internal.
+#
+# `sub_4B3CB0(this=renderer, &p1, &p2, &color)` — draws a line between two
+#   `float[2]` endpoints. ret 0xC (3 stack args).
+# `sub_4FCCC0(this=renderer, edx=&center, radius, aspect, &color)` —
+#   draws a closed oval / circle (calls sub_4FCD10 with angle 0..2π).
+#   ret 0xC (3 stack args; ECX/EDX passed through to sub_4FCD10).
+# `sub_53F010(this=&color_out, r, g, b, a)` — builds an RGBA CColor struct
+#   and stamps a palette index via sub_433A10 for 8-bit modes. ret 0x10.
+#
+# Surface lock/unlock is automatic — `sub_568D90` self-wraps via the global
+# `dword_713318` lock flag, so the helpers above are safe to call from any
+# frame-aligned hook (page-flip detour, key handler).
+RENDERER_OWNER_VA       = 0x6C02CC
+RENDERER_OFF_IN_OWNER   = 0x04
+SUB_4B3CB0_VA           = 0x4B3CB0
+SUB_4FCCC0_VA           = 0x4FCCC0
+SUB_53F010_VA           = 0x53F010
+
+# `sub_4F5DA0(this=worldmgr, &out_pos, char_idx)` returns the SMOOTHED
+# camera target (`layer + 0xD0` floats) for the given char. The engine's
+# CCameraTrakerAI (sub_5AA520 tick) updates `layer + 200/204` with the
+# instant tracker target, then `sub_4F5DD0` smooths it into `+208/+212`
+# and writes the screen-edge camera `+192/+196 = smoothed - screen/2`.
+# Reading smoothed target and subtracting screen/2 here matches the
+# engine's per-frame camera calculation exactly — important because
+# using the INSTANT host position causes visible parallax wobble when
+# the host moves quickly.
+SUB_4F5DA0_VA           = 0x4F5DA0
+
+# --- sub_5693A0 (per-frame page flip / windowed Blt) ----------------------
+# Called once per frame after all entity rendering, immediately before the
+# DirectDraw surface presentation (Flip in fullscreen, Blt in windowed).
+# The renderer in ECX is `*(RENDERER_OWNER_VA + 4)` — same value cached
+# globally — so a detour here can either reuse ECX or reload from the
+# global. We reload to keep the detour body independent of the saved ECX
+# across pushad/popad.
+#
+# Original prologue is the 5-byte `mov al, byte_6210C0` (the windowed-vs-
+# fullscreen flag read). RelocationPatch overwrites those 5 bytes with a
+# `jmp rel32` into .zaxbot; the detour re-executes the displaced load
+# before tail-jumping to RESUME.
+S5693A0_VA       = 0x5693A0
+S5693A0_PROLOGUE = b'\xA0\xC0\x10\x62\x00'   # mov al, byte_6210C0
+S5693A0_RESUME   = 0x5693A5
+FULLSCREEN_FLAG_VA = 0x6210C0                # byte_6210C0; re-encoded into the detour
 
 # --- KERNEL32 IAT slots ----------------------------------------------------
 IMP_CREATEFILEA = 0x5EA0D4

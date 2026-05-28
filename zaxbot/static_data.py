@@ -7,6 +7,7 @@ PROMPT_DM = b'Bot: 1=spawn  R=snap\x00'
 PROMPT_CTF = b'Bot team: 1=Blue 2=Red\x00'
 PROMPT_SK = b'SK bot: 1=spawn  R=snap\x00'
 
+
 DUMP_TAGS = (
     ('tag_snap_marker', 'snap'),
     ('tag_part', 'part[X]'),
@@ -28,6 +29,10 @@ DUMP_TAGS = (
     ('tag_pc2_wpn_bytes',  'pc2_wpn_b'),
     ('tag_ai_move', 'ai_move'),
     ('tag_hazard',  'hazard'),
+    ('tag_wp_diag', 'wp_diag'),
+    ('tag_wp_lv',   'wp_lv'),
+    ('tag_wp_lay',  'wp_lay'),
+    ('tag_wp_map',  'wp_map'),
 )
 
 
@@ -110,6 +115,15 @@ def write_static_scratch_data(
     hazard_default_radius_sq=90000.0,
     bot_move_speed=3.0,
     hazard_flee_frames=120,
+    overlay_enabled=False,
+    overlay_waypoints=(),
+    overlay_edges=(),
+    overlay_vertex_color=(255, 255, 0, 255),
+    overlay_edge_color=(0, 255, 0, 255),
+    overlay_selected_color=(255, 0, 255, 255),
+    overlay_vertex_radius=8.0,
+    overlay_vertex_aspect=1.0,
+    wp_snap_radius_sq=576.0,
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
     # meaningful — "spawn one bot"); CTF is the only team mode and accepts
@@ -236,6 +250,48 @@ def write_static_scratch_data(
                  struct.pack('<f', bot_move_speed))
     layout.write(section, scratch_off, 'hazard_flee_frames',
                  struct.pack('<I', hazard_flee_frames))
+
+    # --- Waypoint overlay --------------------------------------------------
+    # Pack vertex / edge tables into scratch. Both colors are stored RAW
+    # (RGBA byte values padded with 0s); the runtime detour re-runs
+    # sub_53F010 each frame to compute the palette index, but the byte
+    # layout is convenient for tweaking colors from a hex dump.
+    layout.write(section, scratch_off, 'overlay_enabled',
+                 struct.pack('<I', 1 if overlay_enabled else 0))
+    layout.write(section, scratch_off, 'overlay_vertex_radius',
+                 struct.pack('<f', overlay_vertex_radius))
+    layout.write(section, scratch_off, 'overlay_vertex_aspect',
+                 struct.pack('<f', overlay_vertex_aspect))
+    layout.write(section, scratch_off, 'overlay_vertex_count',
+                 struct.pack('<I', len(overlay_waypoints)))
+    layout.write(section, scratch_off, 'overlay_edge_count',
+                 struct.pack('<I', len(overlay_edges)))
+    # Initial color bytes (B, G, R, A) — sub_568BG order. Runtime
+    # sub_53F010 overwrites this every frame; the values here are just a
+    # seed so a freshly-loaded binary has a sane CColor in case the first
+    # render happens before the detour fires.
+    def _pack_color(rgba):
+        r, g, b, a = rgba
+        return bytes((b & 0xFF, g & 0xFF, r & 0xFF, a & 0xFF)) + b'\x00' * 12
+    layout.write(section, scratch_off, 'overlay_vertex_color',
+                 _pack_color(overlay_vertex_color))
+    layout.write(section, scratch_off, 'overlay_edge_color',
+                 _pack_color(overlay_edge_color))
+    layout.write(section, scratch_off, 'overlay_selected_color',
+                 _pack_color(overlay_selected_color))
+    # wp_selected_idx is "no selection" until the user picks one.
+    layout.write(section, scratch_off, 'wp_selected_idx',
+                 struct.pack('<I', 0xFFFFFFFF))
+    layout.write(section, scratch_off, 'wp_snap_radius_sq',
+                 struct.pack('<f', wp_snap_radius_sq))
+    if overlay_waypoints and layout.has_field('overlay_vertices'):
+        packed_v = b''.join(struct.pack('<ff', float(x), float(y))
+                            for x, y in overlay_waypoints)
+        layout.write(section, scratch_off, 'overlay_vertices', packed_v)
+    if overlay_edges and layout.has_field('overlay_edges'):
+        packed_e = b''.join(struct.pack('<HH', int(i), int(j))
+                            for i, j in overlay_edges)
+        layout.write(section, scratch_off, 'overlay_edges', packed_e)
 
     # The dump header magic is written once; runtime code rewrites tag/src/len.
     layout.write(section, scratch_off, 'thdr', struct.pack('<I', dump_magic))

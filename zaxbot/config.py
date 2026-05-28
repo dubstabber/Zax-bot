@@ -11,10 +11,10 @@ from .build import SectionSpec
 # --- new section parameters (.zaxbot) -------------------------------------
 NEW_SECTION_NAME   = b'.zaxbot\x00'
 NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
-NEW_SECTION_SIZE   = 0x5000        # five pages: code + scratch (bumped for movement helpers)
+NEW_SECTION_SIZE   = 0x7000        # seven pages: code + scratch (overlay arrays bumped from 5)
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
-SCRATCH_OFF        = 0x3000        # writable scratch buffer; 12KB code / 8KB scratch
+SCRATCH_OFF        = 0x3000        # writable scratch buffer; 12KB code / 16KB scratch
 
 ZAXBOT_SECTION = SectionSpec(
     name=NEW_SECTION_NAME,
@@ -357,3 +357,75 @@ def _color_pair(name):
 
 
 BOT_COLORS = [_color_pair(n) for n in BOT_NAMES]  # parallel to BOT_NAMES
+
+
+# --- Waypoint overlay (visualization for waypoint authoring) -------------
+# When True, the page-flip detour at sub_5693A0 draws OVERLAY_WAYPOINTS as
+# circles and OVERLAY_EDGES as line segments on top of the rendered frame.
+# Coordinates are WORLD-space — the engine's renderer applies the camera
+# transform internally (vtbl[+0xAC]/[+0xB0] in CGraphics, off_5FF360), so
+# vertices stay glued to the right map position as the camera scrolls.
+#
+# Gated by mp_gate (mgr -> level -> mpd) so the overlay only fires in MP.
+# Set False to compile out the renderer-call hot path entirely; the detour
+# still installs (cheap pushad/jz/popad) but does no work.
+OVERLAY_ENABLED = True
+OVERLAY_WAYPOINTS = [(100.0, 200.0), (300.0, 200.0), (300.0, 400.0), (100.0, 400.0)]  # type: list[tuple[float, float]]
+OVERLAY_EDGES     = [(0, 1), (1, 2), (2, 3), (3, 0)]  # type: list[tuple[int, int]]
+
+# Capacity ceilings packed into the scratch layout. Bumping them grows
+# the .zaxbot section but doesn't slow rendering — the runtime loops on
+# the live count fields. Each vertex is 8 B (two floats); each edge is
+# 4 B (two u16 indices).
+OVERLAY_VERTEX_MAX = 256
+OVERLAY_EDGE_MAX   = 512
+
+# Vertex / edge styling. RGBA bytes (0..255) get baked into a 16-byte
+# CColor struct via sub_53F010 each frame so the palette index stays
+# valid in 8-bit display modes.
+OVERLAY_VERTEX_COLOR   = (255, 255, 0, 255)   # yellow
+OVERLAY_EDGE_COLOR     = (0, 255, 0, 255)     # green
+OVERLAY_SELECTED_COLOR = (255, 0, 255, 255)   # magenta — currently-selected node
+OVERLAY_VERTEX_RADIUS  = 8.0                  # world-space pixels
+OVERLAY_VERTEX_ASPECT  = 1.0                  # y/x ratio (1.0 = round)
+
+# Waypoint editor: when dropping a new node, snap to an existing node if
+# within this world-pixel distance (squared) — avoids duplicate nodes when
+# re-walking the same corridor. 24 px ≈ collision radius scale.
+WP_SNAP_RADIUS_SQ      = 24.0 * 24.0
+
+
+def resolve_overlay_data():
+    """Validate cfg.OVERLAY_WAYPOINTS and OVERLAY_EDGES; return packed lists.
+
+    Raises ValueError on out-of-range edge indices or capacity overflow.
+    Empty lists are valid — the runtime renders nothing in that case.
+    """
+    waypoints = list(OVERLAY_WAYPOINTS)
+    if len(waypoints) > OVERLAY_VERTEX_MAX:
+        raise ValueError(
+            f'OVERLAY_WAYPOINTS has {len(waypoints)} entries; max '
+            f'{OVERLAY_VERTEX_MAX} (raise OVERLAY_VERTEX_MAX)'
+        )
+    for i, p in enumerate(waypoints):
+        if type(p) is not tuple or len(p) != 2:
+            raise ValueError(f'OVERLAY_WAYPOINTS[{i}] must be (x, y); got {p!r}')
+
+    edges = list(OVERLAY_EDGES)
+    if len(edges) > OVERLAY_EDGE_MAX:
+        raise ValueError(
+            f'OVERLAY_EDGES has {len(edges)} entries; max '
+            f'{OVERLAY_EDGE_MAX} (raise OVERLAY_EDGE_MAX)'
+        )
+    for k, e in enumerate(edges):
+        if type(e) is not tuple or len(e) != 2:
+            raise ValueError(f'OVERLAY_EDGES[{k}] must be (i, j); got {e!r}')
+        i, j = e
+        if not (0 <= i < len(waypoints)) or not (0 <= j < len(waypoints)):
+            raise ValueError(
+                f'OVERLAY_EDGES[{k}]=({i},{j}) out of range for '
+                f'{len(waypoints)} vertices'
+            )
+        if i > 0xFFFF or j > 0xFFFF:
+            raise ValueError(f'OVERLAY_EDGES[{k}] index >0xFFFF not packable as u16')
+    return waypoints, edges
