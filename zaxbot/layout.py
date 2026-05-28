@@ -490,5 +490,40 @@ def build_scratch_layout(
             overlay_edge_max_capped * overlay_edge_stride,
             'overlay: (u16 i, u16 j) per edge; indices into overlay_vertices',
         ))
+
+    # --- Waypoint save/load state (lives after the vertex/edge tables) ----
+    # Filename buffer holds the dynamically-built "waypoints/<map>.zwpt"
+    # path (resolved per save/load from MAP_NAME_CSTRING_VA). The static
+    # prefix / suffix / dir-name strings are initialised from cfg and copied
+    # by the asm into the buffer. wp_file_header is the 16-byte staging
+    # area for the file's magic+version+counts; wp_io_count is the
+    # lpNumberOfBytesTransferred receiver for ReadFile/WriteFile calls.
+    wp_io_off = OVERLAY_BASE + OVERLAY_TABLE_OFF
+    if overlay_vertex_max_capped > 0:
+        wp_io_off += overlay_vertex_max_capped * overlay_vertex_stride
+    if overlay_edge_max_capped > 0:
+        wp_io_off += overlay_edge_max_capped * overlay_edge_stride
+    overlay_fields.extend([
+        ScratchField('wp_filename_buf', wp_io_off + 0x00, 0x100,
+                     'waypoint io: dynamically-built file path'),
+        ScratchField('wp_file_header',  wp_io_off + 0x100, 0x10,
+                     'waypoint io: 16B header staging (magic+version+counts)'),
+        ScratchField('wp_io_count',     wp_io_off + 0x110, 0x04,
+                     'waypoint io: lpNumberOfBytesTransferred for Read/WriteFile'),
+        ScratchField('wp_dir_static',   wp_io_off + 0x120, 0x20,
+                     'waypoint io: static "waypoints" dir name for CreateDirectoryA'),
+        ScratchField('wp_prefix_static', wp_io_off + 0x140, 0x20,
+                     'waypoint io: static "waypoints/" path prefix'),
+        ScratchField('wp_suffix_static', wp_io_off + 0x160, 0x10,
+                     'waypoint io: static ".zwpt" path suffix'),
+        ScratchField('wp_msg_saved',    wp_io_off + 0x170, 0x20,
+                     'waypoint io: on-screen msg shown after save'),
+        ScratchField('wp_msg_loaded',   wp_io_off + 0x190, 0x20,
+                     'waypoint io: on-screen msg shown after auto-load'),
+        ScratchField('wp_msg_nomap',    wp_io_off + 0x1B0, 0x20,
+                     'waypoint io: on-screen msg shown when map name is empty'),
+        ScratchField('wp_msg_failed',   wp_io_off + 0x1D0, 0x20,
+                     'waypoint io: on-screen msg shown on save/load failure'),
+    ])
     fields.extend(overlay_fields)
     return ScratchLayout(base_va, scratch_size, fields)

@@ -41,9 +41,24 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     wp_selected_idx_va      = layout.va('wp_selected_idx')
     wp_scratch_va           = layout.va('wp_scratch')
     wp_snap_radius_sq_va    = layout.va('wp_snap_radius_sq')
+    wp_filename_buf_va      = layout.va('wp_filename_buf')
+    wp_file_header_va       = layout.va('wp_file_header')
+    wp_io_count_va          = layout.va('wp_io_count')
+    wp_dir_static_va        = layout.va('wp_dir_static')
+    wp_prefix_static_va     = layout.va('wp_prefix_static')
+    wp_suffix_static_va     = layout.va('wp_suffix_static')
+    wp_msg_saved_va         = layout.va('wp_msg_saved')
+    wp_msg_loaded_va        = layout.va('wp_msg_loaded')
+    wp_msg_nomap_va         = layout.va('wp_msg_nomap')
+    wp_msg_failed_va        = layout.va('wp_msg_failed')
 
     vertex_max = cfg.OVERLAY_VERTEX_MAX
     edge_max   = cfg.OVERLAY_EDGE_MAX
+
+    # File magic 'ZWPT' as a u32 LE: bytes 'Z'(0x5A), 'W'(0x57), 'P'(0x50),
+    # 'T'(0x54) at offsets 0..3 → u32 = 0x5450575A.
+    ZWPT_MAGIC = 0x5450575A
+    ZWPT_VERSION = 1
 
     # =========================================================================
     # wp_read_host_pos: shared helper. Writes host world pos into wp_scratch.
@@ -299,3 +314,266 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('wp_delete_done')
     a.raw(b'\x61')                                               # popad
     a.raw(b'\xC3')                                               # ret
+
+    # =========================================================================
+    # wp_build_filename: writes "<prefix><sanitized_map_name><suffix>\0" into
+    # wp_filename_buf. Returns EAX = 1 on success, 0 if the map name is null
+    # or empty. Sanitization: '/' (0x2F) and '\\' (0x5C) → '_' (0x5F) so we
+    # never accidentally cross directory boundaries. Clobbers all GP regs.
+    # Hard-caps the filename at 240 chars (safe under the 256-byte buffer).
+    # =========================================================================
+    a.label('wp_build_filename')
+    # Resolve map-name ASCII ptr.
+    a.raw(b'\xA1' + le32(ax.MAP_NAME_CSTRING_VA))                # eax = [csheader]
+    a.raw(b'\x85\xC0'); a.jz('wp_bf_fail')
+    a.raw(b'\x83\xC0' + bytes([ax.MAP_NAME_ASCII_OFFSET]))        # add eax, 8 (skip refcount+len)
+    a.raw(b'\x80\x38\x00'); a.jz('wp_bf_fail')                    # cmp byte [eax], 0 -- empty name?
+    a.raw(b'\x89\xC6')                                           # mov esi, eax (src = name)
+
+    a.raw(b'\xBF' + le32(wp_filename_buf_va))                    # edi = dest = filename_buf
+    a.raw(b'\xBA\xF0\x00\x00\x00')                               # edx = 240 (remaining cap)
+
+    # --- Copy prefix --------------------------------------------------------
+    a.raw(b'\xB9' + le32(wp_prefix_static_va))                   # ecx = src = prefix
+    a.label('wp_bf_pfx_loop')
+    a.raw(b'\x85\xD2'); a.jz('wp_bf_fail')                       # cap exhausted?
+    a.raw(b'\x8A\x01')                                           # mov al, [ecx]
+    a.raw(b'\x84\xC0'); a.jz('wp_bf_after_pfx')                  # NUL? done with prefix
+    a.raw(b'\x88\x07')                                           # mov [edi], al
+    a.raw(b'\x41\x47\x4A')                                       # inc ecx, inc edi, dec edx
+    a.jmp('wp_bf_pfx_loop')
+
+    # --- Copy sanitized map name --------------------------------------------
+    a.label('wp_bf_after_pfx')
+    a.label('wp_bf_name_loop')
+    a.raw(b'\x85\xD2'); a.jz('wp_bf_fail')                       # cap exhausted?
+    a.raw(b'\x8A\x06')                                           # mov al, [esi]
+    a.raw(b'\x84\xC0'); a.jz('wp_bf_after_name')                 # NUL? done with name
+    # Sanitize: '/' or '\\' -> '_'
+    a.raw(b'\x3C\x2F'); a.jnz('wp_bf_chk_bslash')                # cmp al, '/'
+    a.raw(b'\xB0\x5F'); a.jmp('wp_bf_write_name')                # mov al, '_'
+    a.label('wp_bf_chk_bslash')
+    a.raw(b'\x3C\x5C'); a.jnz('wp_bf_write_name')                # cmp al, '\\'
+    a.raw(b'\xB0\x5F')                                           # mov al, '_'
+    a.label('wp_bf_write_name')
+    a.raw(b'\x88\x07')                                           # mov [edi], al
+    a.raw(b'\x46\x47\x4A')                                       # inc esi, inc edi, dec edx
+    a.jmp('wp_bf_name_loop')
+
+    # --- Copy suffix --------------------------------------------------------
+    a.label('wp_bf_after_name')
+    a.raw(b'\xB9' + le32(wp_suffix_static_va))                   # ecx = src = suffix
+    a.label('wp_bf_sfx_loop')
+    a.raw(b'\x85\xD2'); a.jz('wp_bf_fail')
+    a.raw(b'\x8A\x01')                                           # mov al, [ecx]
+    a.raw(b'\x84\xC0'); a.jz('wp_bf_done')                       # NUL? done
+    a.raw(b'\x88\x07')                                           # mov [edi], al
+    a.raw(b'\x41\x47\x4A')                                       # inc ecx, inc edi, dec edx
+    a.jmp('wp_bf_sfx_loop')
+
+    a.label('wp_bf_done')
+    a.raw(b'\xC6\x07\x00')                                       # mov byte [edi], 0 (NUL term)
+    a.raw(b'\xB8\x01\x00\x00\x00')                               # mov eax, 1
+    a.raw(b'\xC3')
+    a.label('wp_bf_fail')
+    a.raw(b'\x31\xC0\xC3')                                       # xor eax,eax; ret
+
+    # =========================================================================
+    # wp_save (S key): persist current overlay_vertices/edges to
+    # waypoints/<sanitized_map_name>.zwpt. File format:
+    #   +0   u32  magic 'ZWPT' (0x5450575A)
+    #   +4   u32  version (1)
+    #   +8   u32  vertex_count
+    #   +12  u32  edge_count
+    #   +16  ..   vertices (float[2] × vertex_count)
+    #   +..  ..   edges    (u16[2]   × edge_count)
+    # =========================================================================
+    a.label('wp_save')
+    a.raw(b'\x60')                                               # pushad
+    a.call_lbl('wp_build_filename')
+    a.raw(b'\x85\xC0'); a.jz('wp_save_nomap')
+
+    # CreateDirectoryA(wp_dir_static, NULL) — best effort; ignore result.
+    a.raw(b'\x6A\x00')
+    a.raw(b'\x68' + le32(wp_dir_static_va))
+    a.raw(b'\xFF\x15' + le32(ax.IMP_CREATEDIRECTORYA))
+
+    # CreateFileA(filename, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
+    a.raw(b'\x6A\x00')                                           # hTemplateFile
+    a.raw(b'\x68\x80\x00\x00\x00')                               # FILE_ATTRIBUTE_NORMAL
+    a.raw(b'\x6A\x02')                                           # CREATE_ALWAYS
+    a.raw(b'\x6A\x00')                                           # lpSecurityAttributes
+    a.raw(b'\x6A\x00')                                           # dwShareMode = 0 (exclusive)
+    a.raw(b'\x68\x00\x00\x00\x40')                               # GENERIC_WRITE
+    a.raw(b'\x68' + le32(wp_filename_buf_va))                    # lpFileName
+    a.raw(b'\xFF\x15' + le32(ax.IMP_CREATEFILEA))
+    a.raw(b'\x83\xF8\xFF'); a.jz('wp_save_fail')                 # cmp eax, -1
+    a.raw(b'\x85\xC0'); a.jz('wp_save_fail')
+    a.raw(b'\x89\xC3')                                           # mov ebx, eax (hFile)
+
+    # Build header in wp_file_header.
+    a.raw(b'\xC7\x05' + le32(wp_file_header_va + 0)  + le32(ZWPT_MAGIC))
+    a.raw(b'\xC7\x05' + le32(wp_file_header_va + 4)  + le32(ZWPT_VERSION))
+    a.raw(b'\xA1' + le32(overlay_vertex_count_va))               # eax = vert_count
+    a.raw(b'\xA3' + le32(wp_file_header_va + 8))
+    a.raw(b'\xA1' + le32(overlay_edge_count_va))                 # eax = edge_count
+    a.raw(b'\xA3' + le32(wp_file_header_va + 12))
+
+    # WriteFile(hFile, &header, 16, &wp_io_count, NULL)
+    a.raw(b'\x6A\x00')                                           # lpOverlapped
+    a.raw(b'\x68' + le32(wp_io_count_va))                        # lpNumberOfBytesWritten
+    a.raw(b'\x6A\x10')                                           # nNumberOfBytesToWrite = 16
+    a.raw(b'\x68' + le32(wp_file_header_va))                     # lpBuffer
+    a.raw(b'\x53')                                               # hFile
+    a.raw(b'\xFF\x15' + le32(ax.IMP_WRITEFILE))
+
+    # WriteFile vertices if any.
+    a.raw(b'\xA1' + le32(overlay_vertex_count_va))               # eax = vert count
+    a.raw(b'\xC1\xE0\x03')                                       # shl eax, 3 (* 8 bytes per vert)
+    a.raw(b'\x85\xC0'); a.jz('wp_save_skip_verts')
+    a.raw(b'\x6A\x00')
+    a.raw(b'\x68' + le32(wp_io_count_va))
+    a.raw(b'\x50')                                               # push eax (count)
+    a.raw(b'\x68' + le32(overlay_vertices_va))
+    a.raw(b'\x53')
+    a.raw(b'\xFF\x15' + le32(ax.IMP_WRITEFILE))
+    a.label('wp_save_skip_verts')
+
+    # WriteFile edges if any.
+    a.raw(b'\xA1' + le32(overlay_edge_count_va))                 # eax = edge count
+    a.raw(b'\xC1\xE0\x02')                                       # shl eax, 2 (* 4 bytes per edge)
+    a.raw(b'\x85\xC0'); a.jz('wp_save_skip_edges')
+    a.raw(b'\x6A\x00')
+    a.raw(b'\x68' + le32(wp_io_count_va))
+    a.raw(b'\x50')                                               # push eax (count)
+    a.raw(b'\x68' + le32(overlay_edges_va))
+    a.raw(b'\x53')
+    a.raw(b'\xFF\x15' + le32(ax.IMP_WRITEFILE))
+    a.label('wp_save_skip_edges')
+
+    # CloseHandle(hFile)
+    a.raw(b'\x53')
+    a.raw(b'\xFF\x15' + le32(ax.IMP_CLOSEHANDLE))
+
+    # On-screen confirmation.
+    a.raw(b'\x6A\xFF')
+    a.raw(b'\x68' + le32(wp_msg_saved_va))
+    a.call_va(ax.SHOWMSG_VA)
+
+    a.raw(b'\x61\xC3')                                           # popad; ret
+
+    a.label('wp_save_nomap')
+    a.raw(b'\x6A\xFF')
+    a.raw(b'\x68' + le32(wp_msg_nomap_va))
+    a.call_va(ax.SHOWMSG_VA)
+    a.raw(b'\x61\xC3')
+
+    a.label('wp_save_fail')
+    a.raw(b'\x6A\xFF')
+    a.raw(b'\x68' + le32(wp_msg_failed_va))
+    a.call_va(ax.SHOWMSG_VA)
+    a.raw(b'\x61\xC3')
+
+    # =========================================================================
+    # wp_load: read waypoints/<map>.zwpt and populate overlay_vertices/edges
+    # in-place. Missing file is NOT an error — counts are zeroed (fresh map =
+    # empty graph). Called by S key? No — called from detour_df90 on match
+    # change. (Also wired to L key if added later.) Resets wp_selected_idx.
+    # =========================================================================
+    a.label('wp_load')
+    a.raw(b'\x60')                                               # pushad
+    # Zero counts up-front: if anything below fails, we leave a clean slate
+    # rather than mixed stale state.
+    a.raw(b'\xC7\x05' + le32(overlay_vertex_count_va) + le32(0))
+    a.raw(b'\xC7\x05' + le32(overlay_edge_count_va) + le32(0))
+    a.raw(b'\xC7\x05' + le32(wp_selected_idx_va) + b'\xFF\xFF\xFF\xFF')
+
+    a.call_lbl('wp_build_filename')
+    a.raw(b'\x85\xC0'); a.jz('wp_load_done')                     # no map name -> nothing to load
+
+    # CreateFileA(filename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL)
+    a.raw(b'\x6A\x00')                                           # hTemplateFile
+    a.raw(b'\x68\x80\x00\x00\x00')                               # FILE_ATTRIBUTE_NORMAL
+    a.raw(b'\x6A\x03')                                           # OPEN_EXISTING
+    a.raw(b'\x6A\x00')                                           # lpSecurityAttributes
+    a.raw(b'\x6A\x01')                                           # FILE_SHARE_READ
+    a.raw(b'\x68\x00\x00\x00\x80')                               # GENERIC_READ
+    a.raw(b'\x68' + le32(wp_filename_buf_va))                    # lpFileName
+    a.raw(b'\xFF\x15' + le32(ax.IMP_CREATEFILEA))
+    a.raw(b'\x83\xF8\xFF'); a.jz('wp_load_done')                 # INVALID_HANDLE_VALUE → silent miss
+    a.raw(b'\x85\xC0'); a.jz('wp_load_done')
+    a.raw(b'\x89\xC3')                                           # mov ebx, eax (hFile)
+
+    # ReadFile(hFile, &header, 16, &wp_io_count, NULL)
+    a.raw(b'\x6A\x00')
+    a.raw(b'\x68' + le32(wp_io_count_va))
+    a.raw(b'\x6A\x10')                                           # 16 bytes
+    a.raw(b'\x68' + le32(wp_file_header_va))
+    a.raw(b'\x53')
+    a.raw(b'\xFF\x15' + le32(ax.IMP_READFILE))
+    a.raw(b'\x85\xC0'); a.jz('wp_load_close_fail')
+    a.raw(b'\x83\x3D' + le32(wp_io_count_va) + b'\x10')          # cmp [io_count], 16
+    a.jnz('wp_load_close_fail')
+
+    # Validate magic + version.
+    a.raw(b'\x81\x3D' + le32(wp_file_header_va + 0) + le32(ZWPT_MAGIC))
+    a.jnz('wp_load_close_fail')
+    a.raw(b'\x83\x3D' + le32(wp_file_header_va + 4) + b'\x01')
+    a.jnz('wp_load_close_fail')
+
+    # Bounds-check vertex_count <= vertex_max
+    a.raw(b'\xA1' + le32(wp_file_header_va + 8))                 # eax = vert count
+    a.raw(b'\x3D' + le32(vertex_max))                            # cmp eax, vertex_max
+    a.ja('wp_load_close_fail')
+    # Bounds-check edge_count <= edge_max
+    a.raw(b'\x8B\x0D' + le32(wp_file_header_va + 12))            # ecx = edge count
+    a.raw(b'\x81\xF9' + le32(edge_max))                          # cmp ecx, edge_max
+    a.ja('wp_load_close_fail')
+
+    # Read vertex array if non-empty.
+    a.raw(b'\x85\xC0'); a.jz('wp_load_no_verts')                 # zero verts -> skip
+    a.raw(b'\xC1\xE0\x03')                                       # shl eax, 3 (bytes)
+    a.raw(b'\x6A\x00')
+    a.raw(b'\x68' + le32(wp_io_count_va))
+    a.raw(b'\x50')                                               # push eax (count bytes)
+    a.raw(b'\x68' + le32(overlay_vertices_va))
+    a.raw(b'\x53')
+    a.raw(b'\xFF\x15' + le32(ax.IMP_READFILE))
+    a.raw(b'\x85\xC0'); a.jz('wp_load_close_fail')
+    a.label('wp_load_no_verts')
+
+    # Read edge array if non-empty.
+    a.raw(b'\x8B\x0D' + le32(wp_file_header_va + 12))            # ecx = edge count (reload)
+    a.raw(b'\x85\xC9'); a.jz('wp_load_commit')
+    a.raw(b'\xC1\xE1\x02')                                       # shl ecx, 2 (bytes)
+    a.raw(b'\x6A\x00')
+    a.raw(b'\x68' + le32(wp_io_count_va))
+    a.raw(b'\x51')                                               # push ecx
+    a.raw(b'\x68' + le32(overlay_edges_va))
+    a.raw(b'\x53')
+    a.raw(b'\xFF\x15' + le32(ax.IMP_READFILE))
+    a.raw(b'\x85\xC0'); a.jz('wp_load_close_fail')
+
+    a.label('wp_load_commit')
+    # Commit counts.
+    a.raw(b'\xA1' + le32(wp_file_header_va + 8))                 # eax = vert_count
+    a.raw(b'\xA3' + le32(overlay_vertex_count_va))
+    a.raw(b'\xA1' + le32(wp_file_header_va + 12))                # eax = edge_count
+    a.raw(b'\xA3' + le32(overlay_edge_count_va))
+
+    # Close + notify.
+    a.raw(b'\x53')
+    a.raw(b'\xFF\x15' + le32(ax.IMP_CLOSEHANDLE))
+    a.raw(b'\x6A\xFF')
+    a.raw(b'\x68' + le32(wp_msg_loaded_va))
+    a.call_va(ax.SHOWMSG_VA)
+    a.raw(b'\x61\xC3')
+
+    a.label('wp_load_close_fail')
+    # Reset counts (already 0 from entry; redundant but explicit).
+    a.raw(b'\xC7\x05' + le32(overlay_vertex_count_va) + le32(0))
+    a.raw(b'\xC7\x05' + le32(overlay_edge_count_va) + le32(0))
+    a.raw(b'\x53')
+    a.raw(b'\xFF\x15' + le32(ax.IMP_CLOSEHANDLE))
+    a.label('wp_load_done')
+    a.raw(b'\x61\xC3')

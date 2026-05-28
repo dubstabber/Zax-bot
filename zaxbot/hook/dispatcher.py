@@ -31,11 +31,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # --- IDLE state: B opens menu; R takes a diagnostic snapshot
     # (R's snapshot includes the waypoint-graph diag chunks now;
     # no separate hotkey since W is bound to "move up" in-game).
-    # N/J/X drive the waypoint editor (drop / select / delete). ---
+    # N/J/X drive the waypoint editor (drop / select / delete);
+    # ',' saves the current graph (load is automatic on match change).
+    # S is bound to "move down" in-game so it can't be used for save. ---
     a.raw(b'\x80\xF9' + bytes([ax.VK_R])); a.jz('handle_R')
     a.raw(b'\x80\xF9' + bytes([ax.VK_N])); a.jz('handle_N')
     a.raw(b'\x80\xF9' + bytes([ax.VK_J])); a.jz('handle_J')
     a.raw(b'\x80\xF9' + bytes([ax.VK_X])); a.jz('handle_X')
+    a.raw(b'\x80\xF9' + bytes([ax.VK_COMMA])); a.jz('handle_save')
     a.raw(b'\x80\xF9' + bytes([ax.VK_B]))                    # cmp cl, VK_B
     a.jnz('passthru')
 
@@ -85,6 +88,13 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x60')
     mp_gate(a, 'pop_passthru')
     a.call_lbl('wp_delete')
+    a.raw(b'\x61')
+    a.jmp_va(ax.ORIG_TARGET_VA)
+
+    a.label('handle_save')
+    a.raw(b'\x60')
+    mp_gate(a, 'pop_passthru')
+    a.call_lbl('wp_save')
     a.raw(b'\x61')
     a.jmp_va(ax.ORIG_TARGET_VA)
 

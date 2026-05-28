@@ -90,6 +90,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # calling it unconditionally on every match change is safe even if
     # the world manager is briefly NULL.
     a.call_lbl('scan_hazards')
+    # Auto-load this map's saved waypoint graph. wp_load is pushad/popad,
+    # no args, no return — silent on missing file (counts left at 0 = empty
+    # graph). Map-name CString (`dword_713C14`) is populated by sub_4F43F0
+    # before any sub_59DF90 call, so it's safe to read here.
+    a.call_lbl('wp_load')
     a.raw(b'\x58\x59\x5F')                        # pop eax; pop ecx; pop edi
     a.label('df90_same_match')
     a.raw(b'\xA3' + le32(cap_a2))                 # mov [cap_a2], eax

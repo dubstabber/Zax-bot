@@ -179,6 +179,8 @@ def build_hook(section_va_abs):
         overlay_vertex_radius=cfg.OVERLAY_VERTEX_RADIUS,
         overlay_vertex_aspect=cfg.OVERLAY_VERTEX_ASPECT,
         wp_snap_radius_sq=cfg.WP_SNAP_RADIUS_SQ,
+        wp_dir_name=cfg.WP_DIR,
+        wp_file_suffix=cfg.WP_FILE_SUFFIX,
     )
 
     info = {

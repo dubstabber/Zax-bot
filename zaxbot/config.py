@@ -11,10 +11,10 @@ from .build import SectionSpec
 # --- new section parameters (.zaxbot) -------------------------------------
 NEW_SECTION_NAME   = b'.zaxbot\x00'
 NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
-NEW_SECTION_SIZE   = 0x7000        # seven pages: code + scratch (overlay arrays bumped from 5)
+NEW_SECTION_SIZE   = 0x8000        # eight pages: 16KB code + 16KB scratch (grew from 7 for save/load)
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
-SCRATCH_OFF        = 0x3000        # writable scratch buffer; 12KB code / 16KB scratch
+SCRATCH_OFF        = 0x4000        # writable scratch buffer; 16KB code / 16KB scratch
 
 ZAXBOT_SECTION = SectionSpec(
     name=NEW_SECTION_NAME,
@@ -393,6 +393,12 @@ OVERLAY_VERTEX_ASPECT  = 1.0                  # y/x ratio (1.0 = round)
 # within this world-pixel distance (squared) — avoids duplicate nodes when
 # re-walking the same corridor. 24 px ≈ collision radius scale.
 WP_SNAP_RADIUS_SQ      = 24.0 * 24.0
+
+# Waypoint persistence: per-map files saved to <WP_DIR>/<map_name>.zwpt
+# (map name read from MAP_NAME_CSTRING_VA at runtime; '/' and '\\' in the
+# name are sanitized to '_'). Directory is auto-created on save.
+WP_DIR                 = b'waypoints'
+WP_FILE_SUFFIX         = b'.zwpt'
 
 
 def resolve_overlay_data():

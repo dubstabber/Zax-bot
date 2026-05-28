@@ -295,12 +295,13 @@ VT_SK_VA  = 0x5FED48  # CSalvageKingGameType vtable
 SUB_59FF90_VA = 0x59FF90
 
 # --- Virtual-key codes used by the dispatcher ------------------------------
-VK_ESC = 0x1B
-VK_B   = 0x42
-VK_J   = 0x4A
-VK_N   = 0x4E
-VK_R   = 0x52
-VK_X   = 0x58
+VK_ESC   = 0x1B
+VK_B     = 0x42
+VK_J     = 0x4A
+VK_N     = 0x4E
+VK_R     = 0x52
+VK_X     = 0x58
+VK_COMMA = 0xBC   # VK_OEM_COMMA — used for wp_save (S is bound to "move down" in-game)
 
 # --- CWayPointMap probe (waypoint_diag) ------------------------------------
 # `sub_4ECA80` (CLevel::LoadWayPoints) stores the per-level CWayPointMap* at
@@ -314,6 +315,22 @@ VK_X   = 0x58
 # cleanest "does this map have any waypoint authoring?" probe.
 LEVEL_WAYPOINT_MAP_OFF      = 0x134
 CWAYPOINTS_POLY_VTABLE_VA   = 0x602B2C
+
+# --- Current-map name CString -----------------------------------------------
+# `sub_4F43F0` ("Loading a map") calls `sub_4E1930(&dword_713C14, mapname)`
+# during every load, copying the map name into this global CString. It is
+# NOT cleared after the load completes (the loader clears the *transient*
+# `dword_6C2904` loader-state pointer but leaves `dword_713C14` populated),
+# so this is the canonical "currently-loaded map" name at runtime.
+#
+# CString convention (per sub_4DEC90 / sub_4E1930):
+#   header  : single dword pointing at a heap buffer
+#   buf[0]  : refcount (u32)
+#   buf[4]  : length   (u32)
+#   buf[8..]: NUL-terminated ASCII
+# So to read the name: `eax = [0x713C14]; if (eax) name = (char*)(eax+8)`.
+MAP_NAME_CSTRING_VA         = 0x713C14
+MAP_NAME_ASCII_OFFSET       = 8
 
 # --- Overlay rendering -----------------------------------------------------
 # `*(RENDERER_OWNER_VA + 4)` is the CGraphics* renderer (vtable off_5FF360,
@@ -369,10 +386,12 @@ S5693A0_RESUME   = 0x5693A5
 FULLSCREEN_FLAG_VA = 0x6210C0                # byte_6210C0; re-encoded into the detour
 
 # --- KERNEL32 IAT slots ----------------------------------------------------
-IMP_CREATEFILEA = 0x5EA0D4
-IMP_WRITEFILE   = 0x5EA0DC
-IMP_CLOSEHANDLE = 0x5EA0D8
-IMP_SETFILEPTR  = 0x5EA054
+IMP_CREATEFILEA      = 0x5EA0D4
+IMP_WRITEFILE        = 0x5EA0DC
+IMP_CLOSEHANDLE      = 0x5EA0D8
+IMP_SETFILEPTR       = 0x5EA054
+IMP_READFILE         = 0x5EA12C
+IMP_CREATEDIRECTORYA = 0x5EA0C0
 IMP_ENTERCS     = 0x5EA098
 IMP_LEAVECS     = 0x5EA094
 

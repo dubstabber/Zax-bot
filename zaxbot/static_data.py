@@ -124,6 +124,8 @@ def write_static_scratch_data(
     overlay_vertex_radius=8.0,
     overlay_vertex_aspect=1.0,
     wp_snap_radius_sq=576.0,
+    wp_dir_name=b'waypoints',
+    wp_file_suffix=b'.zwpt',
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
     # meaningful — "spawn one bot"); CTF is the only team mode and accepts
@@ -284,6 +286,23 @@ def write_static_scratch_data(
                  struct.pack('<I', 0xFFFFFFFF))
     layout.write(section, scratch_off, 'wp_snap_radius_sq',
                  struct.pack('<f', wp_snap_radius_sq))
+    # Static-string scaffolding used by wp_save / wp_load. The dir name is
+    # passed to CreateDirectoryA; prefix + suffix are concatenated with the
+    # sanitized map name at runtime into wp_filename_buf.
+    layout.write(section, scratch_off, 'wp_dir_static',
+                 wp_dir_name + b'\x00')
+    layout.write(section, scratch_off, 'wp_prefix_static',
+                 wp_dir_name + b'/\x00')
+    layout.write(section, scratch_off, 'wp_suffix_static',
+                 wp_file_suffix + b'\x00')
+    layout.write(section, scratch_off, 'wp_msg_saved',
+                 b'[wp] saved\x00')
+    layout.write(section, scratch_off, 'wp_msg_loaded',
+                 b'[wp] loaded\x00')
+    layout.write(section, scratch_off, 'wp_msg_nomap',
+                 b'[wp] no map name\x00')
+    layout.write(section, scratch_off, 'wp_msg_failed',
+                 b'[wp] save/load failed\x00')
     if overlay_waypoints and layout.has_field('overlay_vertices'):
         packed_v = b''.join(struct.pack('<ff', float(x), float(y))
                             for x, y in overlay_waypoints)
