@@ -20,6 +20,21 @@ Flow:
  10. Cache the bot's character pointer in the ``bot_chars`` scratch table.
  11. Apply color1/color2 floats to the appearance child and let the gametype's
      vtable[+0x9C] override color1 (CTF only).
+
+## Module structure
+
+The spawn flow is ONE procedure: the DP-injection core holds ``esi = dpmgr``
+live across the CritSec and branches to shared error handlers, so it is NOT
+split — chopping it would create implicit cross-function register contracts.
+Two genuinely separable concerns ARE lifted into helpers (clean scratch /
+local-register seams, no live-register carry across the boundary):
+
+  - ``_emit_grow_char_array`` — the ``mgr+0x290`` pre-grow ([[garbage-slot-
+    crash]] mitigation); ``ebx``-local, reads ``[mgr]``, one clear purpose.
+  - ``_emit_force_item_and_ammo`` — the optional ``FORCE_BOT_ITEM_NAME``
+    testing feature (~40% of the body), fully scratch-coupled and gated.
+
+Both append in section order; the golden-section test pins byte-identity.
 """
 
 from .. import addresses as ax
@@ -289,39 +304,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x05' + le32(botmode_va) + le32(1))          # botmode = 1
 
     # Pre-grow mgr+0x290 char-array to capacity 16 if still at initial size.
-    a.raw(b'\x8B\x1D' + le32(ax.MANAGER_GLOBAL_VA))          # mov ebx,[mgr]
-    a.raw(b'\x85\xDB'); a.jz('grow_skip')
-    a.raw(b'\x83\xBB\x98\x02\x00\x00\x10')                   # cmp [ebx+0x298], 16
-    a.jae('grow_skip')
-    a.raw(b'\x6A\x40')                                        # push 64
-    a.call_va(ax.OP_NEW_VA)                                   # operator new
-    a.raw(b'\x83\xC4\x04')
-    a.raw(b'\x85\xC0'); a.jz('grow_skip')
-    # Zero the freshly-allocated buffer so any slots not overwritten by the
-    # copy below are NULL. The engine's worldmgr sync (worldmgr->vtbl[+4])
-    # iterates this array and unconditionally derefs non-NULL entries via
-    # sub_4EF900 -> sub_4FC200; uninitialised heap bytes would crash on
-    # `mov ecx, [esi+10h]` (see [[garbage-slot-crash]]).
-    a.raw(b'\x50')                                            # push eax (save buf)
-    a.raw(b'\x89\xC7')                                        # mov edi, eax
-    a.raw(b'\xB9\x10\x00\x00\x00')                            # mov ecx, 16
-    a.raw(b'\x31\xC0')                                        # xor eax, eax
-    a.raw(b'\xFC\xF3\xAB')                                    # cld; rep stosd
-    a.raw(b'\x58')                                            # pop eax (restore buf)
-    a.raw(b'\x8B\xB3\x90\x02\x00\x00')                        # mov esi,[ebx+0x290]
-    a.raw(b'\x8B\x8B\x94\x02\x00\x00')                        # mov ecx,[ebx+0x294]
-    a.raw(b'\x89\xC7')                                        # mov edi, eax
-    a.raw(b'\x50')                                            # push eax (save new buf)
-    a.raw(b'\x85\xF6'); a.jz('grow_no_copy')
-    a.raw(b'\xFC\xF3\xA5')                                    # cld; rep movsd
-    a.label('grow_no_copy')
-    a.raw(b'\xFF\xB3\x90\x02\x00\x00')                        # push [ebx+0x290]
-    a.call_va(ax.OP_DELETE_VA)                                # operator delete
-    a.raw(b'\x83\xC4\x04')
-    a.raw(b'\x58')                                            # pop eax (= new buf)
-    a.raw(b'\x89\x83\x90\x02\x00\x00')                        # mov [ebx+0x290], eax
-    a.raw(b'\xC7\x83\x98\x02\x00\x00\x10\x00\x00\x00')        # mov [ebx+0x298], 16
-    a.label('grow_skip')
+    _emit_grow_char_array(a)
 
     # Compute a2: prefer sub_4F1050(mgr); fall back to cap_a2.
     a.raw(b'\x8B\x0D' + le32(ax.MANAGER_GLOBAL_VA))
@@ -410,11 +393,112 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(prev_wp_va) + b'\xFF\xFF\xFF\xFF')     # prev_wp[slot] = -1
     a.label('spawn_skip_wp_place')
 
-    # --- Optional FORCE_BOT_ITEM_NAME override (testing aid). Bots can't move
-    # and so can't pick up weapons. The engine's item ids are per-inventory
-    # local indexes, so this resolves an inventory item definition by name,
-    # instantiates that item through the same path as the XmasShopping cheat,
-    # adds it to the bot, then switches Primary to the new local item id.
+    # --- Optional FORCE_BOT_ITEM_NAME override (testing aid). Self-contained,
+    # gated, scratch-coupled; lifted into a helper to keep the core spawn path
+    # readable. Reads botchar/force_* from scratch, ends at the shared
+    # spawn_skip_force_weapon label that falls through into spawn_skipai.
+    _emit_force_item_and_ammo(a, layout)
+
+    a.label('spawn_skipai')
+
+    # Capture host's participant ptr once per match (sentinel 0 = unset).
+    # fire/aim reads team live from `*(host_part+0x14)` each frame so a
+    # mid-match team switch (CTF blue→red) takes effect immediately
+    # without re-spawning. Doing this AFTER sub_59DF90 has run for the new
+    # bot keeps the worldmgr's internal char-array sync in a known-good
+    # state — calling sub_5BA820(0) earlier crashes inside the auto-sync
+    # via the [[garbage-slot-crash]] path.
+    a.raw(b'\x83\x3D' + le32(host_part_va) + b'\x00')        # cmp [host_part], 0
+    a.jnz('spawn_skip_host_part')
+    a.raw(b'\x31\xC9')                                        # xor ecx, ecx (host idx = 0)
+    a.call_va(ax.SUB_5BA820)                                  # eax = host participant
+    a.raw(b'\x85\xC0'); a.jz('spawn_skip_host_part')
+    a.raw(b'\xA3' + le32(host_part_va))                       # mov [host_part], eax
+    a.label('spawn_skip_host_part')
+
+    # Confirm with on-screen message.
+    a.raw(b'\xC7\x05' + le32(active_bot_slot_va) + le32(0xFFFFFFFF))
+    a.raw(b'\x6A\xFF'); a.raw(b'\x68' + le32(msg_va)); a.call_va(ax.SHOWMSG_VA)
+    a.raw(b'\xC3')                                            # ret
+
+    a.label('spawn_full')
+    a.raw(b'\x6A\xFF'); a.raw(b'\x68' + le32(msg_full_va)); a.call_va(ax.SHOWMSG_VA)
+    a.raw(b'\xC3')
+
+    a.label('spawn_crit_full')
+    a.raw(b'\xC7\x05' + le32(phase_b_in_flight_va) + le32(0))
+    a.raw(b'\xC7\x05' + le32(active_bot_slot_va) + le32(0xFFFFFFFF))
+    leave_cs(a)
+    a.jmp('spawn_full')
+
+    a.label('spawn_crit_fail')
+    a.raw(b'\xC7\x05' + le32(phase_b_in_flight_va) + le32(0))
+    a.raw(b'\xC7\x05' + le32(active_bot_slot_va) + le32(0xFFFFFFFF))
+    a.raw(b'\x8B\x3D' + le32(my_queue_slot_va))
+    a.raw(b'\x85\xFF'); a.jz('spawn_crit_leave')
+    a.raw(b'\xC6\x47\xFF\x00')
+    a.raw(b'\xC6\x07\x00')
+    a.raw(b'\xC7\x47\x03\x00\x00\x00\x00')
+    a.raw(b'\xC7\x47\x07\x00\x00\x00\x00')
+    a.raw(b'\xC7\x05' + le32(my_queue_slot_va) + le32(0))
+    a.label('spawn_crit_leave')
+    leave_cs(a)
+    a.label('spawn_done')
+    a.raw(b'\xC3')                                            # ret
+
+
+def _emit_grow_char_array(a: Asm) -> None:
+    """Pre-grow ``mgr+0x290`` char-array to capacity 16 if still at its initial
+    size. ``ebx``-local (reads ``[mgr]``); ends at the internal ``grow_skip``
+    label. No layout VAs — pure engine-pointer surgery.
+
+    Zeroes the freshly-allocated buffer so any slots not overwritten by the
+    copy are NULL: the engine's worldmgr sync (worldmgr->vtbl[+4]) iterates
+    this array and unconditionally derefs non-NULL entries via sub_4EF900 ->
+    sub_4FC200, so uninitialised heap bytes would crash on `mov ecx, [esi+10h]`
+    (see [[garbage-slot-crash]])."""
+    a.raw(b'\x8B\x1D' + le32(ax.MANAGER_GLOBAL_VA))          # mov ebx,[mgr]
+    a.raw(b'\x85\xDB'); a.jz('grow_skip')
+    a.raw(b'\x83\xBB\x98\x02\x00\x00\x10')                   # cmp [ebx+0x298], 16
+    a.jae('grow_skip')
+    a.raw(b'\x6A\x40')                                        # push 64
+    a.call_va(ax.OP_NEW_VA)                                   # operator new
+    a.raw(b'\x83\xC4\x04')
+    a.raw(b'\x85\xC0'); a.jz('grow_skip')
+    a.raw(b'\x50')                                            # push eax (save buf)
+    a.raw(b'\x89\xC7')                                        # mov edi, eax
+    a.raw(b'\xB9\x10\x00\x00\x00')                            # mov ecx, 16
+    a.raw(b'\x31\xC0')                                        # xor eax, eax
+    a.raw(b'\xFC\xF3\xAB')                                    # cld; rep stosd
+    a.raw(b'\x58')                                            # pop eax (restore buf)
+    a.raw(b'\x8B\xB3\x90\x02\x00\x00')                        # mov esi,[ebx+0x290]
+    a.raw(b'\x8B\x8B\x94\x02\x00\x00')                        # mov ecx,[ebx+0x294]
+    a.raw(b'\x89\xC7')                                        # mov edi, eax
+    a.raw(b'\x50')                                            # push eax (save new buf)
+    a.raw(b'\x85\xF6'); a.jz('grow_no_copy')
+    a.raw(b'\xFC\xF3\xA5')                                    # cld; rep movsd
+    a.label('grow_no_copy')
+    a.raw(b'\xFF\xB3\x90\x02\x00\x00')                        # push [ebx+0x290]
+    a.call_va(ax.OP_DELETE_VA)                                # operator delete
+    a.raw(b'\x83\xC4\x04')
+    a.raw(b'\x58')                                            # pop eax (= new buf)
+    a.raw(b'\x89\x83\x90\x02\x00\x00')                        # mov [ebx+0x290], eax
+    a.raw(b'\xC7\x83\x98\x02\x00\x00\x10\x00\x00\x00')        # mov [ebx+0x298], 16
+    a.label('grow_skip')
+
+
+def _emit_force_item_and_ammo(a: Asm, layout: ScratchLayout) -> None:
+    """Optional FORCE_BOT_ITEM_NAME override (testing aid). Bots can't move and
+    so can't pick up weapons. The engine's item ids are per-inventory local
+    indexes, so this resolves an inventory item definition by name,
+    instantiates that item through the same path as the XmasShopping cheat,
+    adds it to the bot, then switches Primary to the new local item id.
+
+    Reads bot char / force-name from scratch; gated on FORCE_BOT_ITEM_NAME, so
+    a single ``cmp byte`` fast-skips when unset. Ends at the shared
+    ``spawn_skip_force_weapon`` label, which the caller falls through into
+    ``spawn_skipai``."""
+    botchar_va            = layout.va('botchar')
     force_name_va         = layout.va('force_bot_item_name')
     force_item_def_idx_va = layout.va('force_item_def_idx')
     primary_hash_va       = layout.va('primary_hash')
@@ -706,53 +790,6 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x89\x5C\x02\x10')                                # slot[p].current = local item id
     a.raw(b'\xC7\x44\x02\x14\xFF\xFF\xFF\xFF')                # slot[p].pending = -1
     a.raw(b'\xC7\x44\x02\x0C\x00\x00\x00\x00')                # slot[p].switch_timer = 0
-    logc(ord('W'))
+    emit_logc_call(a, layout.va('logbyte'), ord('W'))
 
     a.label('spawn_skip_force_weapon')
-
-    a.label('spawn_skipai')
-
-    # Capture host's participant ptr once per match (sentinel 0 = unset).
-    # fire/aim reads team live from `*(host_part+0x14)` each frame so a
-    # mid-match team switch (CTF blue→red) takes effect immediately
-    # without re-spawning. Doing this AFTER sub_59DF90 has run for the new
-    # bot keeps the worldmgr's internal char-array sync in a known-good
-    # state — calling sub_5BA820(0) earlier crashes inside the auto-sync
-    # via the [[garbage-slot-crash]] path.
-    a.raw(b'\x83\x3D' + le32(host_part_va) + b'\x00')        # cmp [host_part], 0
-    a.jnz('spawn_skip_host_part')
-    a.raw(b'\x31\xC9')                                        # xor ecx, ecx (host idx = 0)
-    a.call_va(ax.SUB_5BA820)                                  # eax = host participant
-    a.raw(b'\x85\xC0'); a.jz('spawn_skip_host_part')
-    a.raw(b'\xA3' + le32(host_part_va))                       # mov [host_part], eax
-    a.label('spawn_skip_host_part')
-
-    # Confirm with on-screen message.
-    a.raw(b'\xC7\x05' + le32(active_bot_slot_va) + le32(0xFFFFFFFF))
-    a.raw(b'\x6A\xFF'); a.raw(b'\x68' + le32(msg_va)); a.call_va(ax.SHOWMSG_VA)
-    a.raw(b'\xC3')                                            # ret
-
-    a.label('spawn_full')
-    a.raw(b'\x6A\xFF'); a.raw(b'\x68' + le32(msg_full_va)); a.call_va(ax.SHOWMSG_VA)
-    a.raw(b'\xC3')
-
-    a.label('spawn_crit_full')
-    a.raw(b'\xC7\x05' + le32(phase_b_in_flight_va) + le32(0))
-    a.raw(b'\xC7\x05' + le32(active_bot_slot_va) + le32(0xFFFFFFFF))
-    leave_cs(a)
-    a.jmp('spawn_full')
-
-    a.label('spawn_crit_fail')
-    a.raw(b'\xC7\x05' + le32(phase_b_in_flight_va) + le32(0))
-    a.raw(b'\xC7\x05' + le32(active_bot_slot_va) + le32(0xFFFFFFFF))
-    a.raw(b'\x8B\x3D' + le32(my_queue_slot_va))
-    a.raw(b'\x85\xFF'); a.jz('spawn_crit_leave')
-    a.raw(b'\xC6\x47\xFF\x00')
-    a.raw(b'\xC6\x07\x00')
-    a.raw(b'\xC7\x47\x03\x00\x00\x00\x00')
-    a.raw(b'\xC7\x47\x07\x00\x00\x00\x00')
-    a.raw(b'\xC7\x05' + le32(my_queue_slot_va) + le32(0))
-    a.label('spawn_crit_leave')
-    leave_cs(a)
-    a.label('spawn_done')
-    a.raw(b'\xC3')                                            # ret

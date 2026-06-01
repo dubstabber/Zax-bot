@@ -1,6 +1,7 @@
-"""``wp_drop`` / ``wp_select`` / ``wp_delete`` — waypoint-editor bodies.
+"""``wp_*`` waypoint-editor + persistence bodies.
 
-Three no-arg, no-return subroutines invoked from the WM_KEYDOWN dispatcher:
+Subroutines invoked from the WM_KEYDOWN dispatcher and the bot-movement /
+match-change detours:
 
   - ``wp_drop``   (N key): read host char position, snap to existing node
                   within ``wp_snap_radius_sq``, otherwise append a new vertex.
@@ -12,15 +13,32 @@ Three no-arg, no-return subroutines invoked from the WM_KEYDOWN dispatcher:
                   ``overlay_vertices``), compact ``overlay_edges`` (drop edges
                   touching the deleted index, remap edges that pointed at the
                   swap-source), and patch ``wp_selected_idx`` accordingly.
+  - ``wp_save``   (',' key): persist the graph to ``waypoints/<map>.zwpt``.
+  - ``wp_load``   (match change): reload the saved graph for the current map.
 
-All three are gated implicitly by the dispatcher's ``mp_gate`` (no point
-editing waypoints outside a match — the host char isn't a valid entity).
-A shared helper ``wp_read_host_pos`` writes the host's world position into
-``wp_scratch`` and returns EAX = 1 on success / 0 on failure (NULL chain).
+Shared helpers used by both the editor and the bot-movement follower:
+
+  - ``wp_read_host_pos``: writes the host's world position into ``wp_scratch``
+    and returns EAX = 1 on success / 0 on failure (NULL chain).
+  - ``wp_find_nearest``: EBX = index of the vertex nearest ``wp_scratch``.
+  - ``wp_advance``: pick the next vertex to walk toward along a real edge.
+
+The editor entry points (drop/select/delete/save) are gated implicitly by the
+dispatcher's ``mp_gate`` (no point editing waypoints outside a match — the host
+char isn't a valid entity).
 
 Capacity bounds are baked at emit time from ``cfg.OVERLAY_VERTEX_MAX`` and
 ``cfg.OVERLAY_EDGE_MAX``; the layout table sizes are sized off the same
 constants.
+
+## Module structure
+
+``emit`` assembles the subroutines back-to-back into one region. The source is
+split into one ``_emit_*`` function per subroutine; each appends to the same
+``Asm`` cursor in section order and the cross-subroutine calls resolve through
+the two-pass linker regardless of which function emitted a given label.
+Splitting keeps the emitted bytes identical to the old flat function (pinned by
+the golden-section test) while letting each subroutine be read in isolation.
 """
 
 from .. import addresses as ax
@@ -32,39 +50,33 @@ from ..layout import ScratchLayout
 # Worldmgr char-array offset (also used in snapshot.py).
 WORLDMGR_CHAR_ARR_OFF = 0x290
 
+# File magic 'ZWPT' as a u32 LE: bytes 'Z'(0x5A), 'W'(0x57), 'P'(0x50),
+# 'T'(0x54) at offsets 0..3 → u32 = 0x5450575A.
+ZWPT_MAGIC = 0x5450575A
+ZWPT_VERSION = 1
+
 
 def emit(a: Asm, layout: ScratchLayout) -> None:
-    overlay_vertices_va     = layout.va('overlay_vertices')
-    overlay_edges_va        = layout.va('overlay_edges')
-    overlay_vertex_count_va = layout.va('overlay_vertex_count')
-    overlay_edge_count_va   = layout.va('overlay_edge_count')
-    wp_selected_idx_va      = layout.va('wp_selected_idx')
-    wp_scratch_va           = layout.va('wp_scratch')
-    wp_snap_radius_sq_va    = layout.va('wp_snap_radius_sq')
-    wp_filename_buf_va      = layout.va('wp_filename_buf')
-    wp_file_header_va       = layout.va('wp_file_header')
-    wp_io_count_va          = layout.va('wp_io_count')
-    wp_dir_static_va        = layout.va('wp_dir_static')
-    wp_prefix_static_va     = layout.va('wp_prefix_static')
-    wp_suffix_static_va     = layout.va('wp_suffix_static')
-    wp_msg_saved_va         = layout.va('wp_msg_saved')
-    wp_msg_loaded_va        = layout.va('wp_msg_loaded')
-    wp_msg_nomap_va         = layout.va('wp_msg_nomap')
-    wp_msg_failed_va        = layout.va('wp_msg_failed')
+    """Assemble the waypoint subroutines in section order. Order is load-bearing
+    (it fixes label positions); do not reorder without re-establishing the
+    byte-identity baseline."""
+    _emit_read_host_pos(a, layout)
+    _emit_find_nearest(a, layout)
+    _emit_advance(a, layout)
+    _emit_drop(a, layout)
+    _emit_select(a, layout)
+    _emit_delete(a, layout)
+    _emit_build_filename(a, layout)
+    _emit_save(a, layout)
+    _emit_load(a, layout)
 
-    vertex_max = cfg.OVERLAY_VERTEX_MAX
-    edge_max   = cfg.OVERLAY_EDGE_MAX
 
-    # File magic 'ZWPT' as a u32 LE: bytes 'Z'(0x5A), 'W'(0x57), 'P'(0x50),
-    # 'T'(0x54) at offsets 0..3 → u32 = 0x5450575A.
-    ZWPT_MAGIC = 0x5450575A
-    ZWPT_VERSION = 1
+def _emit_read_host_pos(a: Asm, layout: ScratchLayout) -> None:
+    """wp_read_host_pos: shared helper. Writes host world pos into wp_scratch.
+    Returns EAX = 1 on success, 0 on failure. Clobbers EAX/ECX/EDX (and
+    whatever sub_4FB0A0 internally clobbers — callers wrap in pushad)."""
+    wp_scratch_va = layout.va('wp_scratch')
 
-    # =========================================================================
-    # wp_read_host_pos: shared helper. Writes host world pos into wp_scratch.
-    # Returns EAX = 1 on success, 0 on failure. Clobbers EAX/ECX/EDX (and
-    # whatever sub_4FB0A0 internally clobbers — callers wrap in pushad).
-    # =========================================================================
     a.label('wp_read_host_pos')
     a.raw(b'\x8B\x0D' + le32(ax.WORLDMGR_GLOBAL))               # mov ecx, [worldmgr]
     a.raw(b'\x85\xC9'); a.jz('wp_rhp_fail')
@@ -79,12 +91,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('wp_rhp_fail')
     a.raw(b'\x31\xC0\xC3')                                       # xor eax,eax; ret
 
-    # =========================================================================
-    # wp_find_nearest: scans overlay_vertices and returns EBX = idx of vertex
-    # nearest to wp_scratch (any distance). Pre: wp_scratch valid. Post:
-    # EBX = best_idx, or 0xFFFFFFFF if vertex_count == 0. Clobbers EAX/EBX/
-    # ECX/ESI/EDI and FPU stack (leaves it balanced).
-    # =========================================================================
+
+def _emit_find_nearest(a: Asm, layout: ScratchLayout) -> None:
+    """wp_find_nearest: scans overlay_vertices and returns EBX = idx of vertex
+    nearest to wp_scratch (any distance). Pre: wp_scratch valid. Post:
+    EBX = best_idx, or 0xFFFFFFFF if vertex_count == 0. Clobbers EAX/EBX/
+    ECX/ESI/EDI and FPU stack (leaves it balanced)."""
+    overlay_vertices_va     = layout.va('overlay_vertices')
+    overlay_vertex_count_va = layout.va('overlay_vertex_count')
+    wp_scratch_va           = layout.va('wp_scratch')
+
     a.label('wp_find_nearest')
     a.raw(b'\xBB\xFF\xFF\xFF\xFF')                               # mov ebx, 0xFFFFFFFF
     a.raw(b'\x8B\x3D' + le32(overlay_vertex_count_va))           # mov edi, [vertex_count]
@@ -131,18 +147,22 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('wp_fn_done')
     a.raw(b'\xC3')                                               # ret
 
-    # =========================================================================
-    # wp_advance: pick the next vertex to walk toward when following the graph.
-    # ABI (called by the bot-movement detour inside its pushad frame, so it may
-    # freely clobber any GPR — popad restores them):
-    #   in : ECX = current vertex idx, EDX = prev vertex idx (-1 if not latched)
-    #   out: EAX = next neighbor idx, or 0xFFFFFFFF if `current` has no edges
-    # Scans overlay_edges for edges touching `current`. With cfg.WP_RANDOM_
-    # NEIGHBOR (default) it picks a RANDOM neighbor that is NOT `prev` so bots
-    # roam the whole graph; otherwise the first non-prev neighbor (deterministic
-    # for reproducible R-dumps). If the only neighbor is `prev` (dead-end /
-    # degree-1 node), returns `prev` so the bot walks back. No FPU.
-    # =========================================================================
+
+def _emit_advance(a: Asm, layout: ScratchLayout) -> None:
+    """wp_advance: pick the next vertex to walk toward when following the graph.
+    ABI (called by the bot-movement detour inside its pushad frame, so it may
+    freely clobber any GPR — popad restores them):
+      in : ECX = current vertex idx, EDX = prev vertex idx (-1 if not latched)
+      out: EAX = next neighbor idx, or 0xFFFFFFFF if `current` has no edges
+    Scans overlay_edges for edges touching `current`. With cfg.WP_RANDOM_
+    NEIGHBOR (default) it picks a RANDOM neighbor that is NOT `prev` so bots
+    roam the whole graph; otherwise the first non-prev neighbor (deterministic
+    for reproducible R-dumps). If the only neighbor is `prev` (dead-end /
+    degree-1 node), returns `prev` so the bot walks back. No FPU."""
+    overlay_edges_va      = layout.va('overlay_edges')
+    overlay_edge_count_va = layout.va('overlay_edge_count')
+    wp_scratch_va         = layout.va('wp_scratch')
+
     a.label('wp_advance')
     if cfg.WP_RANDOM_NEIGHBOR:
         # PASS 1: count forward neighbors (nb != prev) into EDI; remember a
@@ -241,9 +261,21 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x89\xF8')                                      # mov eax, edi
         a.raw(b'\xC3')                                          # ret
 
-    # =========================================================================
-    # wp_drop (N key)
-    # =========================================================================
+
+def _emit_drop(a: Asm, layout: ScratchLayout) -> None:
+    """wp_drop (N key): snap-or-append a vertex at the host position, auto-edge
+    from wp_selected_idx, and select the new/snapped node."""
+    overlay_vertices_va     = layout.va('overlay_vertices')
+    overlay_edges_va        = layout.va('overlay_edges')
+    overlay_vertex_count_va = layout.va('overlay_vertex_count')
+    overlay_edge_count_va   = layout.va('overlay_edge_count')
+    wp_selected_idx_va      = layout.va('wp_selected_idx')
+    wp_scratch_va           = layout.va('wp_scratch')
+    wp_snap_radius_sq_va    = layout.va('wp_snap_radius_sq')
+
+    vertex_max = cfg.OVERLAY_VERTEX_MAX
+    edge_max   = cfg.OVERLAY_EDGE_MAX
+
     a.label('wp_drop')
     a.raw(b'\x60')                                               # pushad
     a.call_lbl('wp_read_host_pos')
@@ -328,9 +360,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x61')                                               # popad
     a.raw(b'\xC3')                                               # ret
 
-    # =========================================================================
-    # wp_select (J key)
-    # =========================================================================
+
+def _emit_select(a: Asm, layout: ScratchLayout) -> None:
+    """wp_select (J key): set wp_selected_idx to the vertex nearest the host."""
+    wp_selected_idx_va = layout.va('wp_selected_idx')
+
     a.label('wp_select')
     a.raw(b'\x60')                                               # pushad
     a.call_lbl('wp_read_host_pos')
@@ -341,9 +375,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x61')                                               # popad
     a.raw(b'\xC3')                                               # ret
 
-    # =========================================================================
-    # wp_delete (X key)
-    # =========================================================================
+
+def _emit_delete(a: Asm, layout: ScratchLayout) -> None:
+    """wp_delete (X key): remove the nearest vertex (swap-with-last), compact
+    overlay_edges, and patch wp_selected_idx."""
+    overlay_vertices_va     = layout.va('overlay_vertices')
+    overlay_edges_va        = layout.va('overlay_edges')
+    overlay_vertex_count_va = layout.va('overlay_vertex_count')
+    overlay_edge_count_va   = layout.va('overlay_edge_count')
+    wp_selected_idx_va      = layout.va('wp_selected_idx')
+
     a.label('wp_delete')
     a.raw(b'\x60')                                               # pushad
     a.call_lbl('wp_read_host_pos')
@@ -425,13 +466,17 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x61')                                               # popad
     a.raw(b'\xC3')                                               # ret
 
-    # =========================================================================
-    # wp_build_filename: writes "<prefix><sanitized_map_name><suffix>\0" into
-    # wp_filename_buf. Returns EAX = 1 on success, 0 if the map name is null
-    # or empty. Sanitization: '/' (0x2F) and '\\' (0x5C) → '_' (0x5F) so we
-    # never accidentally cross directory boundaries. Clobbers all GP regs.
-    # Hard-caps the filename at 240 chars (safe under the 256-byte buffer).
-    # =========================================================================
+
+def _emit_build_filename(a: Asm, layout: ScratchLayout) -> None:
+    """wp_build_filename: writes "<prefix><sanitized_map_name><suffix>\\0" into
+    wp_filename_buf. Returns EAX = 1 on success, 0 if the map name is null
+    or empty. Sanitization: '/' (0x2F) and '\\\\' (0x5C) → '_' (0x5F) so we
+    never accidentally cross directory boundaries. Clobbers all GP regs.
+    Hard-caps the filename at 240 chars (safe under the 256-byte buffer)."""
+    wp_filename_buf_va  = layout.va('wp_filename_buf')
+    wp_prefix_static_va = layout.va('wp_prefix_static')
+    wp_suffix_static_va = layout.va('wp_suffix_static')
+
     a.label('wp_build_filename')
     # Resolve map-name ASCII ptr.
     a.raw(b'\xA1' + le32(ax.MAP_NAME_CSTRING_VA))                # eax = [csheader]
@@ -488,16 +533,28 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('wp_bf_fail')
     a.raw(b'\x31\xC0\xC3')                                       # xor eax,eax; ret
 
-    # =========================================================================
-    # wp_save (S key): persist current overlay_vertices/edges to
-    # waypoints/<sanitized_map_name>.zwpt. File format:
-    #   +0   u32  magic 'ZWPT' (0x5450575A)
-    #   +4   u32  version (1)
-    #   +8   u32  vertex_count
-    #   +12  u32  edge_count
-    #   +16  ..   vertices (float[2] × vertex_count)
-    #   +..  ..   edges    (u16[2]   × edge_count)
-    # =========================================================================
+
+def _emit_save(a: Asm, layout: ScratchLayout) -> None:
+    """wp_save (',' key): persist current overlay_vertices/edges to
+    waypoints/<sanitized_map_name>.zwpt. File format:
+      +0   u32  magic 'ZWPT' (0x5450575A)
+      +4   u32  version (1)
+      +8   u32  vertex_count
+      +12  u32  edge_count
+      +16  ..   vertices (float[2] × vertex_count)
+      +..  ..   edges    (u16[2]   × edge_count)"""
+    overlay_vertices_va     = layout.va('overlay_vertices')
+    overlay_edges_va        = layout.va('overlay_edges')
+    overlay_vertex_count_va = layout.va('overlay_vertex_count')
+    overlay_edge_count_va   = layout.va('overlay_edge_count')
+    wp_filename_buf_va      = layout.va('wp_filename_buf')
+    wp_file_header_va       = layout.va('wp_file_header')
+    wp_io_count_va          = layout.va('wp_io_count')
+    wp_dir_static_va        = layout.va('wp_dir_static')
+    wp_msg_saved_va         = layout.va('wp_msg_saved')
+    wp_msg_nomap_va         = layout.va('wp_msg_nomap')
+    wp_msg_failed_va        = layout.va('wp_msg_failed')
+
     a.label('wp_save')
     a.raw(b'\x60')                                               # pushad
     a.call_lbl('wp_build_filename')
@@ -584,12 +641,25 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.call_va(ax.SHOWMSG_VA)
     a.raw(b'\x61\xC3')
 
-    # =========================================================================
-    # wp_load: read waypoints/<map>.zwpt and populate overlay_vertices/edges
-    # in-place. Missing file is NOT an error — counts are zeroed (fresh map =
-    # empty graph). Called by S key? No — called from detour_df90 on match
-    # change. (Also wired to L key if added later.) Resets wp_selected_idx.
-    # =========================================================================
+
+def _emit_load(a: Asm, layout: ScratchLayout) -> None:
+    """wp_load: read waypoints/<map>.zwpt and populate overlay_vertices/edges
+    in-place. Missing file is NOT an error — counts are zeroed (fresh map =
+    empty graph). Called from detour_df90 on match change. Resets
+    wp_selected_idx."""
+    overlay_vertices_va     = layout.va('overlay_vertices')
+    overlay_edges_va        = layout.va('overlay_edges')
+    overlay_vertex_count_va = layout.va('overlay_vertex_count')
+    overlay_edge_count_va   = layout.va('overlay_edge_count')
+    wp_selected_idx_va      = layout.va('wp_selected_idx')
+    wp_filename_buf_va      = layout.va('wp_filename_buf')
+    wp_file_header_va       = layout.va('wp_file_header')
+    wp_io_count_va          = layout.va('wp_io_count')
+    wp_msg_loaded_va        = layout.va('wp_msg_loaded')
+
+    vertex_max = cfg.OVERLAY_VERTEX_MAX
+    edge_max   = cfg.OVERLAY_EDGE_MAX
+
     a.label('wp_load')
     a.raw(b'\x60')                                               # pushad
     # Zero counts up-front: if anything below fails, we leave a clean slate
