@@ -472,11 +472,71 @@ OVERLAY_EDGE_MAX   = 512
 # Vertex / edge styling. RGBA bytes (0..255) get baked into a 16-byte
 # CColor struct via sub_53F010 each frame so the palette index stays
 # valid in 8-bit display modes.
-OVERLAY_VERTEX_COLOR   = (255, 255, 0, 255)   # yellow
-OVERLAY_EDGE_COLOR     = (0, 255, 0, 255)     # green
-OVERLAY_SELECTED_COLOR = (255, 0, 255, 255)   # magenta — currently-selected node
+# IMPORTANT — overlay colors are effectively BLUE-CHANNEL ONLY in the game's
+# 8-bit palettized display mode (how it runs under Wine). sub_53F010 stamps each
+# CColor's palette index via sub_433A10(BLUE) — derived from the blue byte alone
+# — and the line drawer (sub_568D90) uses that palette index, NOT the RGB. So the
+# rendered color depends only on blue: blue=0 => palette index 0 => BLACK
+# (red/green are ignored); blue=255 => a visible bright color. Confirmed in-game
+# (2026-06-01): vertices (yellow, B=0) and edges (green, B=0) render BLACK; the
+# selected node (magenta, B=255) and pickups (cyan, B=255) render visibly. The
+# black vertices/edges are accepted as-is (distinguished by shape — dots vs lines
+# — and the selected node + pickups are colored). To make ANY overlay element
+# visibly colored, give it a non-zero (ideally 255) BLUE component. The RGBA
+# tuples below are kept as human labels; only blue actually drives the hue here.
+OVERLAY_VERTEX_COLOR   = (255, 255, 0, 255)   # "yellow" but B=0 -> renders BLACK in 8-bit mode
+OVERLAY_EDGE_COLOR     = (0, 255, 0, 255)     # "green" but B=0 -> renders BLACK in 8-bit mode
+OVERLAY_SELECTED_COLOR = (255, 0, 255, 255)   # magenta (B=255) -> visible; currently-selected node
+OVERLAY_PICKUP_COLOR   = (0, 255, 255, 255)   # cyan (B=255) -> visible; detected world pickups
 OVERLAY_VERTEX_RADIUS  = 8.0                  # world-space pixels
 OVERLAY_VERTEX_ASPECT  = 1.0                  # y/x ratio (1.0 = round)
+
+# --- Proximity item pickup (bots grab nearby items) ----------------------
+# Stage 1 (detection): a detour on sub_53DA40 — the per-frame CPickupAI
+# update, which runs once per pickup entity per frame — records each live
+# pickup's world position into pickup_table. The overlay draws those as
+# orange markers so detection can be verified in-game before any bot
+# behavior is wired (stage 2). Pickups are otherwise NOT enumerable: they
+# are CPickupAI grid components, not entries in any flat array (mgr+0x290 is
+# players, mgr+0x2BC is layers), and the engine's spatial query is masked to
+# blocking entities only. See the [[pickup-enumeration]] memory.
+PICKUP_REGISTER_ENABLED = True
+# Max pickups tracked per frame (each slot is 8 bytes: x, y floats). Greed
+# maps scatter many ore / ammo / health / energy items; size generously.
+PICKUP_TABLE_MAX        = 96
+# Only register pickups that are CURRENTLY collectible. Respawning spawners
+# keep ticking sub_53DA40 after the item is taken (item hidden, waiting to
+# respawn), so without this their markers/targets would persist on an empty
+# pad. The engine marks an item present by setting bits 0x40000|0x20000 in the
+# entity flags at +0x1C (sub_53DA40's respawn path sets them; collection clears
+# them); these are general "visible/active" flags, so dropped items on the
+# ground carry them too and still pass (and when collected their entity is
+# destroyed, so they drop out regardless). Register only when
+# (flags & PICKUP_ACTIVE_MASK) == PICKUP_ACTIVE_VALUE. Set MASK = 0 to disable
+# the filter and register every ticking pickup (debug / fallback).
+PICKUP_ACTIVE_MASK      = 0x60000
+PICKUP_ACTIVE_VALUE     = 0x60000
+
+# --- Stage 2: bots occasionally divert to grab a nearby pickup -----------
+# Master switch. When False the movement detour is behaviorally identical to
+# pure waypoint following (the divert block fast-skips on one cmp/jz).
+PICKUP_DIVERT_ENABLED   = True
+# A bot only diverts to a pickup within sqrt(this) of itself (squared px).
+# 250px = "moderate" eagerness — close/on-the-way items, not the whole map.
+PICKUP_DIVERT_RADIUS_SQ = 62500.0
+# The bot "reached" the pickup (ends the divert) when within sqrt(this). Keep
+# near the collision/collect overlap so the engine auto-grants the item as the
+# bot arrives; too large and the bot stops short without collecting.
+PICKUP_REACHED_RADIUS_SQ = 576.0          # 24 px
+# After grabbing (or abandoning) a pickup, the bot follows waypoints for this
+# many frames before it will divert again — gives the "occasionally" cadence
+# and prevents re-diverting onto a spot it just cleared. 180 ≈ 3 s at 60 Hz.
+PICKUP_COOLDOWN_FRAMES  = 180
+# Hard cap on a single divert. If the bot can't reach the latched pickup within
+# this many frames (e.g. it's across a wall — there is no LOS check in v1), it
+# abandons and resumes the graph. A wall-wedge is usually caught much sooner by
+# the shared stuck detector (STUCK_FRAMES_THRESHOLD); this is the backstop.
+PICKUP_DIVERT_TIMEOUT_FRAMES = 150
 
 # Waypoint editor: when dropping a new node, snap to an existing node if
 # within this world-pixel distance (squared) — avoids duplicate nodes when

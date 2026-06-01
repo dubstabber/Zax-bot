@@ -24,6 +24,7 @@ from ..detours import (
     dp_poll,
     name_block,
     overlay,
+    pickup_register,
     spawn_safety,
     walk_controller,
     world_scan,
@@ -49,6 +50,7 @@ _DETOUR_LABEL_KEYS = {
     'detour_name_block_skip':  'detour_name_block_skip_va',
     'detour_4F5204':           'detour_4F5204_va',
     'detour_5693A0':           'detour_5693A0_va',
+    'detour_53DA40':           'detour_53DA40_va',
 }
 
 
@@ -75,6 +77,7 @@ def build_hook(section_va_abs):
         force_bot_ammo_slot_size=cfg.FORCE_BOT_AMMO_SLOT_SIZE,
         overlay_vertex_max=cfg.OVERLAY_VERTEX_MAX,
         overlay_edge_max=cfg.OVERLAY_EDGE_MAX,
+        pickup_table_max=cfg.PICKUP_TABLE_MAX,
     )
 
     a = Asm(section_va_abs + cfg.HOOK_ENTRY_OFF)
@@ -120,6 +123,7 @@ def build_hook(section_va_abs):
     name_block.emit(a, layout)
     char_iter.emit(a, layout)
     overlay.emit(a, layout)
+    pickup_register.emit(a, layout)
 
     code = a.link()
     assert len(code) <= cfg.SCRATCH_OFF, (
@@ -182,8 +186,15 @@ def build_hook(section_va_abs):
         overlay_vertex_color=cfg.OVERLAY_VERTEX_COLOR,
         overlay_edge_color=cfg.OVERLAY_EDGE_COLOR,
         overlay_selected_color=cfg.OVERLAY_SELECTED_COLOR,
+        overlay_pickup_color=cfg.OVERLAY_PICKUP_COLOR,
         overlay_vertex_radius=cfg.OVERLAY_VERTEX_RADIUS,
         overlay_vertex_aspect=cfg.OVERLAY_VERTEX_ASPECT,
+        pickup_register_enabled=cfg.PICKUP_REGISTER_ENABLED,
+        pickup_divert_enabled=cfg.PICKUP_DIVERT_ENABLED,
+        pickup_divert_radius_sq=cfg.PICKUP_DIVERT_RADIUS_SQ,
+        pickup_reached_radius_sq=cfg.PICKUP_REACHED_RADIUS_SQ,
+        pickup_cooldown_frames=cfg.PICKUP_COOLDOWN_FRAMES,
+        pickup_divert_timeout_frames=cfg.PICKUP_DIVERT_TIMEOUT_FRAMES,
         wp_snap_radius_sq=cfg.WP_SNAP_RADIUS_SQ,
         wp_dir_name=cfg.WP_DIR,
         wp_file_suffix=cfg.WP_FILE_SUFFIX,

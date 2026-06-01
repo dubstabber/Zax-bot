@@ -128,8 +128,15 @@ def write_static_scratch_data(
     overlay_vertex_color=(255, 255, 0, 255),
     overlay_edge_color=(0, 255, 0, 255),
     overlay_selected_color=(255, 0, 255, 255),
+    overlay_pickup_color=(255, 128, 0, 255),
     overlay_vertex_radius=8.0,
     overlay_vertex_aspect=1.0,
+    pickup_register_enabled=True,
+    pickup_divert_enabled=True,
+    pickup_divert_radius_sq=62500.0,
+    pickup_reached_radius_sq=576.0,
+    pickup_cooldown_frames=180,
+    pickup_divert_timeout_frames=150,
     wp_snap_radius_sq=576.0,
     wp_dir_name=b'waypoints',
     wp_file_suffix=b'.zwpt',
@@ -301,6 +308,25 @@ def write_static_scratch_data(
                  _pack_color(overlay_edge_color))
     layout.write(section, scratch_off, 'overlay_selected_color',
                  _pack_color(overlay_selected_color))
+    if layout.has_field('overlay_pickup_color'):
+        layout.write(section, scratch_off, 'overlay_pickup_color',
+                     _pack_color(overlay_pickup_color))
+    # Pickup self-registration master switch (per-frame CPickupAI detour).
+    if layout.has_field('pickup_register_enabled'):
+        layout.write(section, scratch_off, 'pickup_register_enabled',
+                     struct.pack('<I', 1 if pickup_register_enabled else 0))
+    # Stage-2 pickup-divert knobs (read by the movement detour's divert block).
+    if layout.has_field('pickup_divert_enabled'):
+        layout.write(section, scratch_off, 'pickup_divert_enabled',
+                     struct.pack('<I', 1 if pickup_divert_enabled else 0))
+        layout.write(section, scratch_off, 'pickup_divert_radius_sq',
+                     struct.pack('<f', pickup_divert_radius_sq))
+        layout.write(section, scratch_off, 'pickup_reached_radius_sq',
+                     struct.pack('<f', pickup_reached_radius_sq))
+        layout.write(section, scratch_off, 'pickup_cooldown_frames',
+                     struct.pack('<I', pickup_cooldown_frames))
+        layout.write(section, scratch_off, 'pickup_divert_timeout',
+                     struct.pack('<I', pickup_divert_timeout_frames))
     # wp_selected_idx is "no selection" until the user picks one.
     layout.write(section, scratch_off, 'wp_selected_idx',
                  struct.pack('<I', 0xFFFFFFFF))

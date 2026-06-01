@@ -116,6 +116,7 @@ def build_scratch_layout(
     force_bot_ammo_slot_size=0,
     overlay_vertex_max=0,
     overlay_edge_max=0,
+    pickup_table_max=0,
 ):
     BOT_STATE_BASE = 0x180
     MAX_BOT_SLOTS = 16
@@ -560,6 +561,66 @@ def build_scratch_layout(
                      'waypoint io: on-screen msg shown when map name is empty'),
         ScratchField('wp_msg_failed',   wp_io_off + 0x1D0, 0x20,
                      'waypoint io: on-screen msg shown on save/load failure'),
+    ])
+    # --- Proximity-pickup tracking (item-grab feature, stage 1) ------------
+    # Placed after the dynamic overlay/IO region so growing OVERLAY_VERTEX_MAX
+    # / EDGE_MAX never collides (and ScratchLayout.validate() would catch it
+    # if it ever did). pickup_table is a flat (x:float, y:float) array rebuilt
+    # every frame by detour_53DA40 (the per-pickup CPickupAI update). world_frame
+    # is bumped once per frame by the page-flip detour; pickup_register does a
+    # lazy reset of the table on the first registration after world_frame
+    # changes, so any reader (overlay now, bot AI later) always sees a complete
+    # frame's worth. overlay_pickup_color is a CColor rebuilt each frame by
+    # sub_53F010 (orange markers).
+    pickup_base = wp_io_off + 0x200
+    pickup_table_max_capped = max(0, pickup_table_max)
+    overlay_fields.extend([
+        ScratchField('pickup_register_enabled', pickup_base + 0x00, 0x04,
+                     'pickup: master enable for pickup self-registration'),
+        ScratchField('world_frame',             pickup_base + 0x04, 0x04,
+                     'pickup: per-frame counter (bumped by page-flip detour)'),
+        ScratchField('pickup_last_frame',       pickup_base + 0x08, 0x04,
+                     'pickup: world_frame value at the last table reset'),
+        ScratchField('pickup_count',            pickup_base + 0x0C, 0x04,
+                     'pickup: live entries in pickup_table this frame'),
+        ScratchField('pickup_reg_tmp',          pickup_base + 0x10, 0x08,
+                     'pickup: float[2] scratch for sub_4FB0A0 entity-pos reads'),
+        ScratchField('overlay_pickup_color',    pickup_base + 0x18, overlay_color_size,
+                     'overlay: detected-pickup CColor (rebuilt per-frame)'),
+    ])
+    if pickup_table_max_capped > 0:
+        overlay_fields.append(ScratchField(
+            'pickup_table', pickup_base + 0x28,
+            pickup_table_max_capped * 8,
+            'pickup: float[2] per detected pickup (world coords)',
+        ))
+    # --- Stage-2 pickup-divert state (after the table so it follows it) ----
+    # Five static knobs (packed by static_data) + five per-bot u32 arrays
+    # (indexed by slot like the other AI per-bot fields). Placed outside the
+    # constrained 15-field AI block; cleared on respawn by detour_542360.
+    div_base = pickup_base + 0x28 + pickup_table_max_capped * 8
+    div_stride = MAX_BOT_SLOTS * 4
+    overlay_fields.extend([
+        ScratchField('pickup_divert_enabled',    div_base + 0x00, 0x04,
+                     'pickup divert: master enable flag'),
+        ScratchField('pickup_divert_radius_sq',  div_base + 0x04, 0x04,
+                     'pickup divert: trigger radius² (float)'),
+        ScratchField('pickup_reached_radius_sq', div_base + 0x08, 0x04,
+                     'pickup divert: arrival radius² (float)'),
+        ScratchField('pickup_cooldown_frames',   div_base + 0x0C, 0x04,
+                     'pickup divert: post-grab cooldown (frames)'),
+        ScratchField('pickup_divert_timeout',    div_base + 0x10, 0x04,
+                     'pickup divert: max frames per divert (backstop)'),
+        ScratchField('pickup_cd',         div_base + 0x14 + 0 * div_stride, div_stride,
+                     'pickup divert: per-bot cooldown counter'),
+        ScratchField('pickup_div_active', div_base + 0x14 + 1 * div_stride, div_stride,
+                     'pickup divert: per-bot diverting flag (0/1)'),
+        ScratchField('pickup_div_x',      div_base + 0x14 + 2 * div_stride, div_stride,
+                     'pickup divert: per-bot latched target x (float)'),
+        ScratchField('pickup_div_y',      div_base + 0x14 + 3 * div_stride, div_stride,
+                     'pickup divert: per-bot latched target y (float)'),
+        ScratchField('pickup_div_try',    div_base + 0x14 + 4 * div_stride, div_stride,
+                     'pickup divert: per-bot divert-frame counter'),
     ])
     fields.extend(overlay_fields)
     return ScratchLayout(base_va, scratch_size, fields)

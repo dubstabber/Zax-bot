@@ -59,6 +59,15 @@ def build_enabled_patches():
             'sub_5693A0 waypoint overlay', 'jmp', ax.S5693A0_VA,
             ax.S5693A0_PROLOGUE, 'detour_5693A0_va', 5,
         ),
+        # Per-pickup self-registration: detours the CPickupAI per-frame update
+        # so each live pickup records its world position into pickup_table.
+        # The detour re-runs the displaced 8-byte prologue (EBX = entity) then
+        # appends the position; the body fast-skips when
+        # cfg.PICKUP_REGISTER_ENABLED is False. See detours/pickup_register.py.
+        RelocationPatch(
+            'sub_53DA40 pickup registration', 'jmp', ax.S53DA40_VA,
+            ax.S53DA40_PROLOGUE, 'detour_53DA40_va', 8,
+        ),
         # Inline NULL-guard for sub_4FC8A0 (the positional-sound dispatch
         # wrapper). The function does `mov ecx, [ecx+0x48]; call sub_4EA880`
         # — when called on a synthetic-DP bot whose audio emitter at +0x48

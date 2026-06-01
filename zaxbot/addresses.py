@@ -349,6 +349,12 @@ MAP_NAME_ASCII_OFFSET       = 8
 #   ret 0xC (3 stack args; ECX/EDX passed through to sub_4FCD10).
 # `sub_53F010(this=&color_out, r, g, b, a)` — builds an RGBA CColor struct
 #   and stamps a palette index via sub_433A10 for 8-bit modes. ret 0x10.
+#   QUIRK: the palette index is `sub_433A10(b)` — computed from the BLUE byte
+#   ALONE (red/green ignored). In the game's 8-bit palettized display mode (how
+#   it runs under Wine) the line drawer uses that palette index, so the rendered
+#   overlay color is driven only by blue: blue=0 -> index 0 -> BLACK; blue=255 ->
+#   a visible color. This is why overlay elements need a non-zero blue component
+#   to show up at all (see cfg.OVERLAY_*_COLOR). Confirmed in-game 2026-06-01.
 #
 # Surface lock/unlock is automatic — `sub_568D90` self-wraps via the global
 # `dword_713318` lock flag, so the helpers above are safe to call from any
@@ -386,6 +392,19 @@ S5693A0_VA       = 0x5693A0
 S5693A0_PROLOGUE = b'\xA0\xC0\x10\x62\x00'   # mov al, byte_6210C0
 S5693A0_RESUME   = 0x5693A5
 FULLSCREEN_FLAG_VA = 0x6210C0                # byte_6210C0; re-encoded into the detour
+
+# --- sub_53DA40 (CPickupAI per-frame update) -------------------------------
+# The per-pickup, per-frame update (a CPickupAI vtable slot holding the
+# respawn-timer logic, keyed off game-time `dword_6C02CC` deltas). It runs
+# once per pickup ENTITY every frame; the pickup entity is the value the
+# engine loads into EBX via `mov ebx, [esp+0x30]` right after the 8-byte
+# prologue (it then does `sub_4FB0A0(ebx, ...)` and reads `ebx[7]` state
+# flags). detour_53DA40 re-executes this prologue first so EBX = the entity
+# exactly as the engine computes it (no stack-offset guessing), then
+# self-registers the pickup's world position into pickup_table.
+S53DA40_VA       = 0x53DA40
+S53DA40_RESUME   = 0x53DA48   # after the 8-byte prologue, at `test ebx, ebx`
+S53DA40_PROLOGUE = b'\x83\xEC\x24\x53\x8B\x5C\x24\x2C'  # sub esp,24h; push ebx; mov ebx,[esp+0x2C]
 
 # --- KERNEL32 IAT slots ----------------------------------------------------
 IMP_CREATEFILEA      = 0x5EA0D4

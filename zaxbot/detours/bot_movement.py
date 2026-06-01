@@ -130,7 +130,24 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     frame_counter_va         = layout.va('frame_counter')
     movement_enabled_va      = layout.va('movement_enabled')
     stuck_delta_sq_va        = layout.va('stuck_delta_sq')
+    stuck_frames_threshold_va = layout.va('stuck_frames_threshold')
     bot_move_speed_va        = layout.va('bot_move_speed')
+
+    # Stage-2 pickup-divert state + knobs (see config.py / detours/world_scan
+    # is unrelated). The pickup table is filled by detour_53DA40; here the bot
+    # occasionally steers to the nearest collectible pickup instead of its node.
+    pickup_table_va             = layout.va('pickup_table')
+    pickup_count_va             = layout.va('pickup_count')
+    pickup_divert_enabled_va    = layout.va('pickup_divert_enabled')
+    pickup_divert_radius_sq_va  = layout.va('pickup_divert_radius_sq')
+    pickup_reached_radius_sq_va = layout.va('pickup_reached_radius_sq')
+    pickup_cooldown_frames_va   = layout.va('pickup_cooldown_frames')
+    pickup_divert_timeout_va    = layout.va('pickup_divert_timeout')
+    pickup_cd_va                = layout.va('pickup_cd')
+    pickup_div_active_va        = layout.va('pickup_div_active')
+    pickup_div_x_va             = layout.va('pickup_div_x')
+    pickup_div_y_va             = layout.va('pickup_div_y')
+    pickup_div_try_va           = layout.va('pickup_div_try')
 
     # Borrowed accumulators for (dx, dy) — these are fire/aim per-call scratch,
     # mutually exclusive with this detour. curr_dist_sq doubles as the int->
@@ -180,6 +197,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))    # best_dsq   = FLT_MAX
     a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))                  # wp_try     = 0
     a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))             # slide_turn = 0
+    a.raw(b'\xC7\x04\x8D' + le32(pickup_div_active_va) + le32(0))      # drop any pickup divert
+    a.raw(b'\xC7\x04\x8D' + le32(pickup_cd_va) + le32(0))             # clear divert cooldown
     a.raw(b'\x89\x14\x8D' + le32(bot_last_char_va))       # bot_last_char[slot] = edx
     a.label('s542360_char_same')
 
@@ -211,6 +230,127 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x89\x04\x8D' + le32(last_x_va))
     a.raw(b'\xA1' + le32(bot_pos_va + 4))
     a.raw(b'\x89\x04\x8D' + le32(last_y_va))
+
+    # === Pickup divert (Stage 2) ========================================
+    # Self-contained prefix to waypoint following: when a collectible pickup is
+    # near, steer to it instead of the current node, then resume the graph after
+    # a cooldown. Disabled -> a single cmp/jz falls straight through, leaving the
+    # waypoint follower byte-for-byte unchanged. bot_pos is already read above.
+    a.raw(b'\x83\x3D' + le32(pickup_divert_enabled_va) + b'\x00')      # cmp [divert_enabled], 0
+    a.jz('s542360_pd_skip')
+    a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
+
+    # Tick the post-grab cooldown down (every frame).
+    a.raw(b'\x8B\x04\x8D' + le32(pickup_cd_va))           # eax = pickup_cd[slot]
+    a.raw(b'\x85\xC0'); a.jz('s542360_pd_cd0')
+    a.raw(b'\x48')                                        # dec eax
+    a.raw(b'\x89\x04\x8D' + le32(pickup_cd_va))           # pickup_cd[slot] = eax
+    a.label('s542360_pd_cd0')
+
+    # Already diverting? -> maintain it.
+    a.raw(b'\x8B\x04\x8D' + le32(pickup_div_active_va))   # eax = div_active[slot]
+    a.raw(b'\x85\xC0'); a.jnz('s542360_pd_diverting')
+
+    # Not diverting: only look for a pickup once the cooldown has expired.
+    a.raw(b'\x8B\x04\x8D' + le32(pickup_cd_va))           # eax = pickup_cd[slot]
+    a.raw(b'\x85\xC0'); a.jnz('s542360_pd_skip')
+
+    # --- Scan pickup_table for the nearest within PICKUP_DIVERT_RADIUS_SQ.
+    # ebx = best idx (-1 = none); best dsq seeded with the radius and kept on the
+    # FPU (ST0) across the loop. esi = index, edi = count, eax = fnstsw scratch.
+    a.raw(b'\xBB\xFF\xFF\xFF\xFF')                        # mov ebx, -1
+    a.raw(b'\x8B\x3D' + le32(pickup_count_va))            # mov edi, [pickup_count]
+    a.raw(b'\x85\xFF'); a.jz('s542360_pd_no_find')        # 0 pickups (FPU still empty)
+    a.raw(b'\xD9\x05' + le32(pickup_divert_radius_sq_va)) # fld radius (best = ST0)
+    a.raw(b'\x31\xF6')                                    # xor esi, esi
+    a.label('s542360_pd_scan')
+    a.raw(b'\x39\xFE'); a.jae('s542360_pd_scan_pop')      # esi >= count -> done (pop best)
+    a.raw(b'\xD9\x04\xF5' + le32(pickup_table_va))        # fld [table + esi*8]    (ST0=x, ST1=best)
+    a.raw(b'\xD8\x25' + le32(bot_pos_va))                 # fsub bot.x
+    a.raw(b'\xD8\xC8')                                    # fmul st,st -> dx²
+    a.raw(b'\xD9\x04\xF5' + le32(pickup_table_va + 4))    # fld [table + esi*8 + 4]
+    a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))             # fsub bot.y
+    a.raw(b'\xD8\xC8')                                    # fmul st,st -> dy²
+    a.raw(b'\xDE\xC1')                                    # faddp -> ST0=dsq, ST1=best
+    a.raw(b'\xD8\xD1')                                    # fcom st(1)
+    a.raw(b'\xDF\xE0'); a.raw(b'\x9E')                    # fnstsw ax; sahf
+    a.jae('s542360_pd_scan_skip')                         # dsq >= best -> keep best
+    a.raw(b'\xD9\xC9')                                    # fxch st(1)   (ST0=best, ST1=dsq)
+    a.raw(b'\xDD\xD8')                                    # fstp st(0)   (pop best; ST0=dsq=new best)
+    a.raw(b'\x89\xF3')                                    # mov ebx, esi
+    a.jmp('s542360_pd_scan_next')
+    a.label('s542360_pd_scan_skip')
+    a.raw(b'\xDD\xD8')                                    # fstp st(0)   (pop dsq; keep best)
+    a.label('s542360_pd_scan_next')
+    a.raw(b'\x46')                                        # inc esi
+    a.jmp('s542360_pd_scan')
+    a.label('s542360_pd_scan_pop')
+    a.raw(b'\xDD\xD8')                                    # fstp st(0)   (pop best; FPU empty)
+    a.label('s542360_pd_no_find')
+    a.raw(b'\x83\xFB\xFF')                                # cmp ebx, -1
+    a.jz('s542360_pd_skip')                               # nothing in range -> waypoints
+
+    # Latch the winner as the divert target (ecx = slot).
+    a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
+    a.raw(b'\x8B\x04\xDD' + le32(pickup_table_va))        # eax = table[ebx*8].x
+    a.raw(b'\x89\x04\x8D' + le32(pickup_div_x_va))        # div_x[slot] = eax
+    a.raw(b'\x8B\x04\xDD' + le32(pickup_table_va + 4))    # eax = table[ebx*8].y
+    a.raw(b'\x89\x04\x8D' + le32(pickup_div_y_va))        # div_y[slot] = eax
+    a.raw(b'\xC7\x04\x8D' + le32(pickup_div_active_va) + le32(1))  # div_active = 1
+    a.raw(b'\xC7\x04\x8D' + le32(pickup_div_try_va) + le32(0))     # div_try = 0
+    # fall into diverting
+
+    a.label('s542360_pd_diverting')
+    a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
+    # desired = latched pickup - bot.
+    a.raw(b'\xD9\x04\x8D' + le32(pickup_div_x_va))        # fld div_x[slot]
+    a.raw(b'\xD8\x25' + le32(bot_pos_va))                 # fsub bot.x
+    a.raw(b'\xD9\x1D' + le32(dx_accum_va))                # fstp dx_accum
+    a.raw(b'\xD9\x04\x8D' + le32(pickup_div_y_va))        # fld div_y[slot]
+    a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))             # fsub bot.y
+    a.raw(b'\xD9\x1D' + le32(dy_accum_va))                # fstp dy_accum
+    # Arrival: dsq < reached? -> the engine has (or is about to) auto-grant the
+    # item on overlap; end the divert and start the cooldown.
+    a.raw(b'\xD9\x05' + le32(dx_accum_va))                # fld dx
+    a.raw(b'\xD8\xC8')                                    # fmul st,st
+    a.raw(b'\xD9\x05' + le32(dy_accum_va))                # fld dy
+    a.raw(b'\xD8\xC8')                                    # fmul st,st
+    a.raw(b'\xDE\xC1')                                    # faddp -> ST0 = dsq
+    a.raw(b'\xD8\x1D' + le32(pickup_reached_radius_sq_va))# fcomp reached (pops dsq)
+    a.raw(b'\xDF\xE0'); a.raw(b'\x9E')                    # fnstsw ax; sahf
+    a.jae('s542360_pd_not_arrived')                       # dsq >= reached -> keep going
+    a.jmp('s542360_pd_end')                               # arrived -> end + cooldown
+
+    a.label('s542360_pd_not_arrived')
+    # Fast wall-wedge abandon: the shared stuck counter (set above) climbs when
+    # sub_4303F0 refuses to move the bot toward an unreachable (walled) pickup —
+    # there is no LOS check in v1, so this is how we bail out quickly.
+    a.raw(b'\x8B\x04\x8D' + le32(stuck_count_va))         # eax = stuck_count[slot]
+    a.raw(b'\x3B\x05' + le32(stuck_frames_threshold_va))  # cmp eax, [stuck_threshold]
+    a.jae('s542360_pd_end')                               # wedged -> abandon
+    # Timeout backstop: ++div_try; abandon at PICKUP_DIVERT_TIMEOUT.
+    a.raw(b'\x8B\x04\x8D' + le32(pickup_div_try_va))      # eax = div_try[slot]
+    a.raw(b'\x40')                                        # inc eax
+    a.raw(b'\x89\x04\x8D' + le32(pickup_div_try_va))      # div_try[slot] = eax
+    a.raw(b'\x3B\x05' + le32(pickup_divert_timeout_va))   # cmp eax, [timeout]
+    a.jb('s542360_pd_emit')                               # under budget -> steer at pickup
+    # fall into end (timed out)
+
+    a.label('s542360_pd_end')
+    # End the divert and start the post-grab cooldown (ecx = slot).
+    a.raw(b'\xC7\x04\x8D' + le32(pickup_div_active_va) + le32(0))  # div_active = 0
+    a.raw(b'\xA1' + le32(pickup_cooldown_frames_va))      # eax = cooldown
+    a.raw(b'\x89\x04\x8D' + le32(pickup_cd_va))           # pickup_cd[slot] = cooldown
+    # fall into emit (one last frame toward the target; ~0 vector on arrival).
+
+    a.label('s542360_pd_emit')
+    # Keep the waypoint wall-slide quiet during a divert: a stale-high wp_try
+    # would otherwise deflect the clean divert angle in s542360_wall_slide.
+    a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
+    a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))    # wp_try[slot] = 0
+    a.jmp('s542360_emit')
+
+    a.label('s542360_pd_skip')
 
     # === Waypoint following =============================================
     a.raw(b'\x83\x3D' + le32(wp_follow_enabled_va) + b'\x00')

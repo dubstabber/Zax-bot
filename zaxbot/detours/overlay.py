@@ -27,6 +27,14 @@ each draw loop subtract those from world coords to produce screen coords
 before passing the pointers to ``sub_4FCCC0`` / ``sub_4B3CB0``. The
 renderer's cam stays at 0, so the engine's clip frame matches.
 
+**Color quirk (8-bit palette).** ``sub_53F010`` stamps each CColor's palette
+index via ``sub_433A10(blue)`` — from the BLUE byte alone — and in the game's
+8-bit palettized display mode the line drawer uses that index, not the RGB. So
+the rendered color is driven only by blue: ``blue=0`` renders BLACK (vertices,
+edges), ``blue=255`` renders a visible color (selected node, pickups). The
+black vertices/edges are intentional/accepted; give an element non-zero blue to
+make it visibly colored. See ``cfg.OVERLAY_*_COLOR`` and ``ax.SUB_53F010_VA``.
+
 For each enabled overlay, the detour:
 
 1. Skips fast if ``overlay_enabled`` is 0.
@@ -69,12 +77,21 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     overlay_vertices_va       = layout.va('overlay_vertices') if layout.has_field('overlay_vertices') else 0
     overlay_edges_va          = layout.va('overlay_edges')    if layout.has_field('overlay_edges')    else 0
     wp_selected_idx_va        = layout.va('wp_selected_idx')
+    overlay_pickup_color_va   = layout.va('overlay_pickup_color')
+    world_frame_va            = layout.va('world_frame')
+    pickup_count_va           = layout.va('pickup_count')
+    pickup_table_va           = layout.va('pickup_table') if layout.has_field('pickup_table') else 0
 
     vr, vg, vb, va_ = _split_rgba_static('vertex')
     er, eg, eb, ea  = _split_rgba_static('edge')
     sr, sg, sb, sa  = _split_rgba_static('selected')
+    pr, pg, pb, pa  = _split_rgba_static('pickup')
 
     a.label('detour_5693A0')
+    # Per-frame tick — bumped here (the one reliable once-per-frame site, the
+    # page flip) BEFORE the overlay_enabled gate so the pickup table's lazy
+    # reset keeps working even when the overlay itself is disabled.
+    a.raw(b'\xFF\x05' + le32(world_frame_va))                 # ++world_frame
     a.raw(b'\x83\x3D' + le32(overlay_enabled_va) + b'\x00')   # cmp [overlay_enabled], 0
     a.jz('ov_resume')
 
@@ -152,6 +169,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xB9' + le32(overlay_selected_color_va))
     a.call_va(ax.SUB_53F010_VA)
 
+    # --- Build pickup-marker color (consumed by the pickup pass) ----------
+    a.raw(b'\x6A' + bytes([pa]))
+    a.raw(b'\x6A' + bytes([pb]))
+    a.raw(b'\x6A' + bytes([pg]))
+    a.raw(b'\x6A' + bytes([pr]))
+    a.raw(b'\xB9' + le32(overlay_pickup_color_va))
+    a.call_va(ax.SUB_53F010_VA)
+
     # --- Draw vertices ----------------------------------------------------
     if overlay_vertices_va:
         a.raw(b'\x31\xF6')                                    # xor esi, esi
@@ -207,6 +232,33 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x89\xF9')                                    # mov ecx, edi (renderer)
         a.call_va(ax.SUB_4FCCC0_VA)
         a.label('ov_after_selected')
+
+    # --- Draw detected pickups (item-grab feature, stage-1 verification) --
+    # Same world->screen (subtract cam) + oval-draw path as vertices, over the
+    # live pickup_table populated by detour_53DA40. Ungated by overlay_vertices
+    # so pickups render on maps without an authored waypoint graph too.
+    if pickup_table_va:
+        a.raw(b'\x31\xF6')                                   # xor esi, esi
+        a.raw(b'\x8B\x1D' + le32(pickup_count_va))           # mov ebx, [pickup_count]
+        a.raw(b'\x85\xDB'); a.jz('ov_after_pickups')
+
+        a.label('ov_pickup_loop')
+        a.raw(b'\x39\xDE'); a.jae('ov_after_pickups')
+        a.raw(b'\xD9\x04\xF5' + le32(pickup_table_va))       # fld dword [table + esi*8]
+        a.raw(b'\xD8\x25' + le32(overlay_cam_x_va))          # fsub dword [cam_x]
+        a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va))         # fstp dword [tmp_p1]
+        a.raw(b'\xD9\x04\xF5' + le32(pickup_table_va + 4))   # fld dword [table + esi*8 + 4]
+        a.raw(b'\xD8\x25' + le32(overlay_cam_y_va))          # fsub dword [cam_y]
+        a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va + 4))     # fstp dword [tmp_p1 + 4]
+        a.raw(b'\xBA' + le32(overlay_tmp_p1_va))             # mov edx, &tmp_p1 (oval center)
+        a.raw(b'\x68' + le32(overlay_pickup_color_va))       # push &pickup_color
+        a.raw(b'\xFF\x35' + le32(overlay_vertex_aspect_va))  # push aspect
+        a.raw(b'\xFF\x35' + le32(overlay_vertex_radius_va))  # push radius
+        a.raw(b'\x89\xF9')                                   # mov ecx, edi (renderer)
+        a.call_va(ax.SUB_4FCCC0_VA)
+        a.raw(b'\x46')                                       # inc esi
+        a.jmp('ov_pickup_loop')
+        a.label('ov_after_pickups')
 
     # --- Draw edges -------------------------------------------------------
     if overlay_edges_va and overlay_vertices_va:
@@ -268,6 +320,8 @@ def _split_rgba_static(role):
         src = cfg.OVERLAY_EDGE_COLOR
     elif role == 'selected':
         src = cfg.OVERLAY_SELECTED_COLOR
+    elif role == 'pickup':
+        src = cfg.OVERLAY_PICKUP_COLOR
     else:
         raise ValueError(f'unknown overlay color role: {role!r}')
     return tuple(int(v) & 0xFF for v in src)
