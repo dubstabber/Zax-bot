@@ -195,6 +195,7 @@ def build_hook(section_va_abs):
         pickup_reached_radius_sq=cfg.PICKUP_REACHED_RADIUS_SQ,
         pickup_cooldown_frames=cfg.PICKUP_COOLDOWN_FRAMES,
         pickup_divert_timeout_frames=cfg.PICKUP_DIVERT_TIMEOUT_FRAMES,
+        pickup_divert_avoid_damage=cfg.PICKUP_DIVERT_AVOID_DAMAGE,
         wp_snap_radius_sq=cfg.WP_SNAP_RADIUS_SQ,
         wp_dir_name=cfg.WP_DIR,
         wp_file_suffix=cfg.WP_FILE_SUFFIX,

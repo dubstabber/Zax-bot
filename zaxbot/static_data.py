@@ -137,6 +137,7 @@ def write_static_scratch_data(
     pickup_reached_radius_sq=576.0,
     pickup_cooldown_frames=180,
     pickup_divert_timeout_frames=150,
+    pickup_divert_avoid_damage=True,
     wp_snap_radius_sq=576.0,
     wp_dir_name=b'waypoints',
     wp_file_suffix=b'.zwpt',
@@ -327,6 +328,8 @@ def write_static_scratch_data(
                      struct.pack('<I', pickup_cooldown_frames))
         layout.write(section, scratch_off, 'pickup_divert_timeout',
                      struct.pack('<I', pickup_divert_timeout_frames))
+        layout.write(section, scratch_off, 'pickup_divert_avoid_damage',
+                     struct.pack('<I', 1 if pickup_divert_avoid_damage else 0))
     # wp_selected_idx is "no selection" until the user picks one.
     layout.write(section, scratch_off, 'wp_selected_idx',
                  struct.pack('<I', 0xFFFFFFFF))

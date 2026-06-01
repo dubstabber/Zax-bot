@@ -143,11 +143,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     pickup_reached_radius_sq_va = layout.va('pickup_reached_radius_sq')
     pickup_cooldown_frames_va   = layout.va('pickup_cooldown_frames')
     pickup_divert_timeout_va    = layout.va('pickup_divert_timeout')
+    pickup_divert_avoid_damage_va = layout.va('pickup_divert_avoid_damage')
     pickup_cd_va                = layout.va('pickup_cd')
     pickup_div_active_va        = layout.va('pickup_div_active')
     pickup_div_x_va             = layout.va('pickup_div_x')
     pickup_div_y_va             = layout.va('pickup_div_y')
     pickup_div_try_va           = layout.va('pickup_div_try')
+    # Reactive hazard avoidance reuses the dormant per-bot cur_damage tracker.
+    bot_last_damage_va          = layout.va('bot_last_damage')
 
     # Borrowed accumulators for (dx, dy) — these are fire/aim per-call scratch,
     # mutually exclusive with this detour. curr_dist_sq doubles as the int->
@@ -199,6 +202,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))             # slide_turn = 0
     a.raw(b'\xC7\x04\x8D' + le32(pickup_div_active_va) + le32(0))      # drop any pickup divert
     a.raw(b'\xC7\x04\x8D' + le32(pickup_cd_va) + le32(0))             # clear divert cooldown
+    a.raw(b'\xC7\x04\x8D' + le32(bot_last_damage_va) + le32(0))        # reset cur_damage tracker
     a.raw(b'\x89\x14\x8D' + le32(bot_last_char_va))       # bot_last_char[slot] = edx
     a.label('s542360_char_same')
 
@@ -246,6 +250,28 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x48')                                        # dec eax
     a.raw(b'\x89\x04\x8D' + le32(pickup_cd_va))           # pickup_cd[slot] = eax
     a.label('s542360_pd_cd0')
+
+    # --- Reactive lava/hazard avoidance. If the bot's accumulated damage
+    # (char+0x7C, "Cur Damage") rose since last frame, it just stepped on
+    # something harmful (lava/fire/weapon). Abandon any divert, take the
+    # cooldown, and fall through to waypoint following — whose nodes sit on
+    # authored safe ground — to walk back off the hazard. cur_damage is a
+    # non-negative float, so its raw bits compare correctly as unsigned ints
+    # (no FPU). Reuses the dormant bot_last_damage tracker; ecx = slot.
+    a.raw(b'\x83\x3D' + le32(pickup_divert_avoid_damage_va) + b'\x00')  # cmp [avoid_damage], 0
+    a.jz('s542360_pd_dmg_done')
+    a.raw(b'\xA1' + le32(bot_char_tmp_va))                # eax = bot char ptr
+    a.raw(b'\x8B\x40' + bytes([ax.CHAR_CUR_DAMAGE_OFF]))  # eax = [char+0x7C] cur_damage bits
+    a.raw(b'\x8B\x14\x8D' + le32(bot_last_damage_va))     # edx = bot_last_damage[slot] (prev)
+    a.raw(b'\x89\x04\x8D' + le32(bot_last_damage_va))     # bot_last_damage[slot] = cur
+    a.raw(b'\x39\xD0')                                    # cmp eax, edx
+    a.jbe('s542360_pd_dmg_done')                          # cur <= prev -> no new damage
+    # Took damage this frame: drop any divert + arm the cooldown, then waypoints.
+    a.raw(b'\xC7\x04\x8D' + le32(pickup_div_active_va) + le32(0))  # div_active = 0
+    a.raw(b'\xA1' + le32(pickup_cooldown_frames_va))      # eax = cooldown
+    a.raw(b'\x89\x04\x8D' + le32(pickup_cd_va))           # pickup_cd[slot] = cooldown
+    a.jmp('s542360_pd_skip')                              # follow the graph off the hazard
+    a.label('s542360_pd_dmg_done')
 
     # Already diverting? -> maintain it.
     a.raw(b'\x8B\x04\x8D' + le32(pickup_div_active_va))   # eax = div_active[slot]

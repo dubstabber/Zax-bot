@@ -537,6 +537,17 @@ PICKUP_COOLDOWN_FRAMES  = 180
 # abandons and resumes the graph. A wall-wedge is usually caught much sooner by
 # the shared stuck detector (STUCK_FRAMES_THRESHOLD); this is the backstop.
 PICKUP_DIVERT_TIMEOUT_FRAMES = 150
+# Reactive hazard (lava) avoidance. There is no cheap geometric "is this point
+# lava?" query (lava is a terrain material applying continuous-fire damage, not
+# an entity), so the bot watches its own accumulated damage (char+0x7C): if it
+# rises while diverting — or just before starting one — the bot just stepped on
+# something harmful (lava/fire/weapon fire), so it abandons the divert, takes
+# the cooldown, and follows the waypoint graph (authored on safe ground) back
+# off the hazard. Death-dropped items that land on lava sit off-graph, so the
+# bot touches the lava edge at most, then bails instead of crossing to die for
+# the item. Set False to let bots grab items regardless of damage (e.g. if
+# aborting on incoming weapon fire feels too cautious).
+PICKUP_DIVERT_AVOID_DAMAGE = True
 
 # Waypoint editor: when dropping a new node, snap to an existing node if
 # within this world-pixel distance (squared) — avoids duplicate nodes when
