@@ -26,6 +26,54 @@ BOT_STATE_FIELDS = (
 )
 
 
+# Per-bot AI nav/movement state: one parallel u32 array per entry, indexed by
+# bot slot ([0, MAX_BOT_SLOTS)). Unlike BOT_STATE_FIELDS these are NOT appended
+# to that block (the per-call fire/aim region uses `bot_state_end + N` offsets
+# while `host_part` is anchored at absolute 0x2F0); they live in their own
+# contiguous region (AI_BASE+) so a single rep-stosd in detour_df90 can clear
+# them on match change and a single snapshot chunk can dump them.
+#
+# Two consumers DERIVE their sizes from AI_PERBOT_FIELD_COUNT rather than a
+# hardcoded literal, so appending a field here stays consistent automatically:
+#   - detours/df90_match_change.py clears AI_PERBOT_FIELD_COUNT * MAX_BOT_SLOTS
+#     dwords on match change.
+#   - hook/snapshot.py dumps AI_PERBOT_FIELD_COUNT * MAX_BOT_SLOTS * 4 bytes in
+#     its `ai_move` chunk.
+#
+# INVARIANT (enforced by tests/test_patcher.py): the last three entries MUST
+# stay bot_current_wp / bot_prev_wp / bot_wp_try in that order — df90 re-stamps
+# the final two index arrays to -1 (a 0 would falsely claim "latched on vertex
+# 0" and skip the cold-acquire), and the follower relies on wp_try being last.
+#
+# Several earlier fields are DORMANT relics of the removed random-wander/
+# attractor/flee pipeline, repurposed IN PLACE by bot_movement.py (rather than
+# renamed/removed) to keep these offsets stable. The repurposing map:
+#   bot_wander_x/y     -> block-vector diagnostic mirror (ai_move idx0/idx1)
+#   bot_pickup_x_cache -> bot_last_char (respawn detection)
+#   bot_pickup_y_cache -> wp_best_dsq (min dsq-to-node)
+#   bot_flee_ticks     -> slide_turn (wall-slide deflection ramp)
+AI_PERBOT_FIELDS = (
+    ('bot_wander_x',        'DORMANT/diag: mirrored controller block.x (float)'),
+    ('bot_wander_y',        'DORMANT/diag: mirrored controller block.y (float)'),
+    ('bot_wander_ticks',    'DORMANT: was wander target timer'),
+    ('bot_last_x',          'stuck: last-tick x (float)'),
+    ('bot_last_y',          'stuck: last-tick y (float)'),
+    ('bot_stuck_count',     'stuck: frames with delta < STUCK_DELTA_SQ'),
+    ('bot_last_item_scan',  'DORMANT: was attractor scan stagger'),
+    ('bot_pickup_x_cache',  'follow: bot_last_char (respawn detection)'),
+    ('bot_pickup_y_cache',  'follow: wp_best_dsq (min dsq-to-node)'),
+    ('bot_pickup_valid',    'DORMANT: was attractor cache-valid flag'),
+    ('bot_last_damage',     'follow: reactive cur_damage tracker (pickup-divert hazard avoid)'),
+    ('bot_flee_ticks',      'follow: slide_turn (wall-slide deflection ramp)'),
+    # --- Waypoint-following per-bot nav state. MUST stay the last three
+    # entries (see INVARIANT above). ai_move dump indices 12/13/14.
+    ('bot_current_wp',      'follow: current target vertex idx, -1 = none (idx12)'),
+    ('bot_prev_wp',         'follow: previous vertex idx, -1 = not latched (idx13)'),
+    ('bot_wp_try',          'follow: frames since last node arrival; escape past WP_TRY (idx14)'),
+)
+AI_PERBOT_FIELD_COUNT = len(AI_PERBOT_FIELDS)
+
+
 @dataclass(frozen=True)
 class ScratchField:
     name: str
@@ -332,38 +380,10 @@ def build_scratch_layout(
     # per match by detour_df90 -> scan_hazards.
     AI_BASE       = 0x1A60
     AI_STRIDE     = MAX_BOT_SLOTS * 4                # 0x40 per per-bot field
-    # NOTE: this block is exactly 15 fields and that count is hardcoded in
-    # detours/df90_match_change.py (the 15-field clear + the trailing -1 stamp)
-    # and hook/snapshot.py (the 0x3C0-byte ai_move dump). The last three fields
-    # MUST stay current_wp / prev_wp / wp_try in that order. Several earlier
-    # fields are now DORMANT (the random-wander/attractor/flee pipeline was
-    # replaced by the node-to-node + wall-slide follower) and are repurposed in
-    # place by bot_movement.py rather than removed, to preserve those offsets:
-    #   bot_wander_x/y   -> block-vector diagnostic mirror (ai_move idx0/idx1)
-    #   bot_pickup_x_cache -> bot_last_char (respawn detection)
-    #   bot_pickup_y_cache -> wp_best_dsq (min dsq-to-node)
-    #   bot_flee_ticks   -> slide_turn (wall-slide deflection ramp)
-    AI_PERBOT_FIELDS = (
-        ('bot_wander_x',        'DORMANT/diag: mirrored controller block.x (float)'),
-        ('bot_wander_y',        'DORMANT/diag: mirrored controller block.y (float)'),
-        ('bot_wander_ticks',    'DORMANT: was wander target timer'),
-        ('bot_last_x',          'stuck: last-tick x (float)'),
-        ('bot_last_y',          'stuck: last-tick y (float)'),
-        ('bot_stuck_count',     'stuck: frames with delta < STUCK_DELTA_SQ'),
-        ('bot_last_item_scan',  'DORMANT: was attractor scan stagger'),
-        ('bot_pickup_x_cache',  'follow: bot_last_char (respawn detection)'),
-        ('bot_pickup_y_cache',  'follow: wp_best_dsq (min dsq-to-node)'),
-        ('bot_pickup_valid',    'DORMANT: was attractor cache-valid flag'),
-        ('bot_last_damage',     'DORMANT: was reactive cur_damage tracker'),
-        ('bot_flee_ticks',      'follow: slide_turn (wall-slide deflection ramp)'),
-        # --- Waypoint-following per-bot nav state. MUST stay the last two
-        # entries so detour_df90's single rep-stosd clear covers them and the
-        # `-1` init of these two contiguous arrays lands correctly. Their
-        # ai_move dump indices are 12 (current_wp) and 13 (prev_wp).
-        ('bot_current_wp',      'follow: current target vertex idx, -1 = none (idx12)'),
-        ('bot_prev_wp',         'follow: previous vertex idx, -1 = not latched (idx13)'),
-        ('bot_wp_try',          'follow: frames since last node arrival; escape past WP_TRY (idx14)'),
-    )
+    # The field list, the "last three are the nav indices" invariant, and the
+    # df90/snapshot count-coupling are documented on the module-level
+    # AI_PERBOT_FIELDS / AI_PERBOT_FIELD_COUNT so the two consumers derive their
+    # sizes from the constant instead of hardcoding 15.
     ai_off = AI_BASE
     for ai_name, ai_note in AI_PERBOT_FIELDS:
         fields.append(ScratchField(ai_name, ai_off, AI_STRIDE, ai_note))

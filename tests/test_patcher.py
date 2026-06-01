@@ -1,3 +1,4 @@
+import hashlib
 import os
 import struct
 import unittest
@@ -283,6 +284,73 @@ class PatcherTests(unittest.TestCase):
         self.assertEqual(set(applied), {patch.name for patch in zax_patch.ENABLED_PATCHES})
         self.assertEqual(applied['WM_KEYDOWN hook'][:1], b'\xE8')
         self.assertEqual(applied['DP poll capture'][:1], b'\xE9')
+
+
+class GoldenSectionTests(unittest.TestCase):
+    """Byte-identity tripwire for the emitted .zaxbot section.
+
+    A refactor that is meant to PRESERVE behavior must keep this SHA green.
+    A failure here means the emitted bytes changed — which is exactly what you
+    want to know. If the change is INTENTIONAL, regenerate the pinned values:
+
+        python3 -c "import hashlib, zax_patch; \\
+            s, i = zax_patch.build_hook(zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA); \\
+            print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
+    """
+
+    SECTION_SHA256 = '3b55f9cc1685aa08d078af94f5a78e2e34d2b9b930ada2a4f6de1ed6846f41e5'
+    HOOK_ENTRY_SIZE = 13785
+
+    def test_zaxbot_section_is_byte_identical(self):
+        section, info = zax_patch.build_hook(
+            zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA
+        )
+        self.assertEqual(hashlib.sha256(section).hexdigest(), self.SECTION_SHA256)
+        self.assertEqual(info['hook_entry_size'], self.HOOK_ENTRY_SIZE)
+
+
+class AiPerBotBlockInvariantTests(unittest.TestCase):
+    """Guards the per-bot AI scratch block whose size is consumed by both
+    ``detours/df90_match_change.py`` (the match-change clear) and
+    ``hook/snapshot.py`` (the ``ai_move`` dump). Both derive their counts from
+    ``layout.AI_PERBOT_FIELD_COUNT``; these tests pin the value and the ordering
+    so appending a field there can't silently desync a consumer."""
+
+    def test_field_count_is_pinned(self):
+        from zaxbot.layout import AI_PERBOT_FIELDS, AI_PERBOT_FIELD_COUNT
+        self.assertEqual(AI_PERBOT_FIELD_COUNT, len(AI_PERBOT_FIELDS))
+        # Bump this (and the golden SHA) deliberately when you add an AI field —
+        # the failure is the reminder to re-check df90 + snapshot consumers.
+        self.assertEqual(AI_PERBOT_FIELD_COUNT, 15)
+
+    def test_last_three_fields_are_nav_indices(self):
+        # df90 re-stamps the final two arrays to -1 and the follower relies on
+        # wp_try being the trailing field; this order is load-bearing.
+        from zaxbot.layout import AI_PERBOT_FIELDS
+        self.assertEqual(
+            [name for name, _ in AI_PERBOT_FIELDS[-3:]],
+            ['bot_current_wp', 'bot_prev_wp', 'bot_wp_try'],
+        )
+
+    def test_block_is_contiguous_at_stride(self):
+        # The single rep-stosd clear and the single snapshot chunk both assume
+        # the fields are physically contiguous at MAX_BOT_SLOTS*4 spacing.
+        from zaxbot.layout import AI_PERBOT_FIELDS, build_scratch_layout
+        layout = build_scratch_layout(
+            zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA + zax_patch.SCRATCH_OFF,
+            zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF,
+            zax_patch.NUM_BOT_NAMES,
+            zax_patch.NAME_SLOT_SIZE,
+            zax_patch.NAME_SLOT_ASCII,
+            cfg.WEAPON_SPEEDS_MAX,
+            overlay_vertex_max=cfg.OVERLAY_VERTEX_MAX,
+            overlay_edge_max=cfg.OVERLAY_EDGE_MAX,
+        )
+        names = [name for name, _ in AI_PERBOT_FIELDS]
+        stride = cfg.MAX_BOT_SLOTS * 4
+        first = layout.off(names[0])
+        for i, name in enumerate(names):
+            self.assertEqual(layout.off(name), first + i * stride)
 
 
 if __name__ == '__main__':

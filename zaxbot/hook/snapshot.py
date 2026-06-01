@@ -19,7 +19,7 @@ or +6 of the tag template). Chunk format is documented in ``zaxbot.config``."""
 from .. import addresses as ax
 from .. import config as cfg
 from ..asm import Asm, le32
-from ..layout import ScratchLayout
+from ..layout import AI_PERBOT_FIELD_COUNT, ScratchLayout
 
 
 def emit(a: Asm, layout: ScratchLayout) -> None:
@@ -159,14 +159,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     emit_chunk(tag_ai_pos_va,    b'\xB8' + le32(ai_pos_src_va),         0x100, 'snap_skip_ai_pos')
     emit_chunk(tag_weapon_info_va, b'\xB8' + le32(weapon_info_src_va),    0x14, 'snap_skip_weapon_info')
 
-    # Bot-movement scratch dumps. ai_move covers 15 per-bot fields × 16
-    # slots × 4 bytes = 960 = 0x3C0 (wander state + stuck + item attractor
-    # cache + last_damage + flee_ticks + the waypoint-follow nav fields:
-    # current_wp idx12 (off 0x300), prev_wp idx13 (off 0x340), wp_try idx14
-    # (off 0x380, frames since last node arrival)). prev_wp != 0xFFFFFFFF ⇒ the
-    # bot has latched onto the graph and is following an edge. hazard covers
-    # hazard_count + hazard_table.
-    emit_chunk(tag_ai_move_va,   b'\xB8' + le32(ai_move_src_va),        0x3C0, 'snap_skip_ai_move')
+    # Bot-movement scratch dumps. ai_move covers AI_PERBOT_FIELD_COUNT per-bot
+    # fields × 16 slots × 4 bytes (= 15 × 16 × 4 = 960 = 0x3C0 today): wander
+    # state + stuck + item attractor cache + last_damage + flee_ticks + the
+    # waypoint-follow nav fields: current_wp idx12 (off 0x300), prev_wp idx13
+    # (off 0x340), wp_try idx14 (off 0x380, frames since last node arrival).
+    # prev_wp != 0xFFFFFFFF ⇒ the bot has latched onto the graph and is
+    # following an edge. Size is derived from the layout constant so it tracks
+    # the field list automatically. hazard covers hazard_count + hazard_table.
+    ai_move_dump_bytes = AI_PERBOT_FIELD_COUNT * cfg.MAX_BOT_SLOTS * 4
+    emit_chunk(tag_ai_move_va,   b'\xB8' + le32(ai_move_src_va),  ai_move_dump_bytes, 'snap_skip_ai_move')
     emit_chunk(tag_hazard_va,    b'\xB8' + le32(hazard_src_va),         0x190, 'snap_skip_hazard')
 
     # Waypoint-graph probe. wp_compute populates wp_diag_data[0..7]:

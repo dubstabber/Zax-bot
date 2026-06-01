@@ -13,7 +13,7 @@ movement vector in subsequent matches.)"""
 from .. import addresses as ax
 from .. import config as cfg
 from ..asm import Asm, le32
-from ..layout import ScratchLayout
+from ..layout import AI_PERBOT_FIELD_COUNT, ScratchLayout
 
 
 def emit(a: Asm, layout: ScratchLayout) -> None:
@@ -45,14 +45,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xB9\x10\x00\x00\x00')                # mov ecx, 16  (bot_team[16])
     a.raw(b'\x83\xC8\xFF')                        # or eax, -1
     a.raw(b'\xF3\xAB')                            # rep stosd
-    # Clear all per-bot AI state (15 contiguous parallel u32 arrays starting
-    # at bot_wander_x, each 16 entries × 4 bytes = 64 bytes). This wipes
-    # wander targets, stuck counters, item-scan stagger, pickup caches,
-    # last_damage, flee_ticks AND the waypoint-follow nav fields (current_wp,
-    # prev_wp, wp_try) so a fresh match starts clean. (wp_try counts frames
-    # since last node arrival; 0 is the correct fresh value.)
+    # Clear all per-bot AI state (AI_PERBOT_FIELD_COUNT contiguous parallel u32
+    # arrays starting at bot_wander_x, each 16 entries × 4 bytes = 64 bytes).
+    # This wipes wander targets, stuck counters, item-scan stagger, pickup
+    # caches, last_damage, flee_ticks AND the waypoint-follow nav fields
+    # (current_wp, prev_wp, wp_try) so a fresh match starts clean. (wp_try
+    # counts frames since last node arrival; 0 is the correct fresh value.)
+    # Count is derived from the layout constant so appending an AI field there
+    # extends this clear automatically (tests pin the count + ordering).
     a.raw(b'\xBF' + le32(wander_x_va))            # mov edi, bot_wander_x
-    a.raw(b'\xB9' + le32(15 * cfg.MAX_BOT_SLOTS)) # ecx = 15 fields * 16 slots dwords
+    a.raw(b'\xB9' + le32(AI_PERBOT_FIELD_COUNT * cfg.MAX_BOT_SLOTS))  # ecx = fields * 16 slots dwords
     a.raw(b'\x31\xC0')                            # xor eax, eax
     a.raw(b'\xF3\xAB')                            # rep stosd
     # The two follow-nav index arrays (bot_current_wp, bot_prev_wp — the last

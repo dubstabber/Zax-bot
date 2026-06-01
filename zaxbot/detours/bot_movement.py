@@ -63,6 +63,31 @@ on top of this guaranteed-correct angle sweep.
 ``WP_FOLLOW_ENABLED``/no graph ⇒ bots idle (the random-wander potential field
 was removed). Output convention: ``[esp+4]`` velocity out, ``[esp+8]`` angle
 out, ``ret 0x14``.
+
+## Module structure
+
+``emit`` assembles one contiguous detour body, but the source is split into
+cohesive ``_emit_*`` stages that append to the same ``Asm`` cursor in section
+order. The stages do NOT communicate through Python return values — they
+share state through the ``.zaxbot`` scratch fields and the single ``pushad``
+frame established by ``_emit_identify_and_setup``. Splitting at the labelled
+join points keeps the emitted bytes identical to one flat function (pinned by
+the golden-section test) while letting each concern — pickup-divert, waypoint
+follow, normalize/emit, wall-slide — be read and reviewed in isolation.
+
+### Dormant-field aliases
+
+Several per-bot scratch fields keep their old (random-wander era) NAMES for
+offset stability but are repurposed by this detour. The aliases are resolved
+once per stage via ``layout.va('<old-name>')`` with a ``# <new-meaning>``
+comment; the canonical map also lives on ``layout.AI_PERBOT_FIELDS``:
+
+  - ``bot_pickup_y_cache`` -> ``wp_best_dsq``   (min dsq-to-node seen so far)
+  - ``bot_pickup_x_cache`` -> ``bot_last_char`` (respawn detection)
+  - ``bot_flee_ticks``     -> ``slide_turn``    (wall-slide deflection ramp)
+  - ``bot_wander_x/y``     -> block-vector diagnostic mirror
+  - ``curr_dist_sq``/``cand_tmp`` -> ``dx_accum``/``dy_accum`` (borrowed
+    fire/aim scratch, mutually exclusive with this detour)
 """
 
 from .. import addresses as ax
@@ -93,70 +118,39 @@ WP_SLIDE_SWEEP_MASK = 3
 
 
 def emit(a: Asm, layout: ScratchLayout) -> None:
-    bot_pos_va               = layout.va('bot_pos')
-    bot_slot_tmp_va          = layout.va('bot_slot_tmp')
-    bot_char_tmp_va          = layout.va('bot_char_tmp')
+    """Assemble ``detour_542360`` as one contiguous body.
 
-    last_x_va                = layout.va('bot_last_x')
-    last_y_va                = layout.va('bot_last_y')
-    stuck_count_va           = layout.va('bot_stuck_count')
+    Each ``_emit_*`` stage appends in section order; together they form the
+    single instruction stream the engine jumps into. Order is load-bearing
+    (it fixes label positions / fall-through), so do not reorder without
+    re-establishing the byte-identity baseline."""
+    _emit_identify_and_setup(a, layout)
+    _emit_stuck_detection(a, layout)
+    _emit_pickup_divert(a, layout)
+    _emit_waypoint_follow(a, layout)
+    _emit_normalize_and_emit(a, layout)
+    _emit_wall_slide(a, layout)
+    _emit_dead_and_zero_return(a, layout)
+    _emit_normal_fallthrough(a)
 
-    # Waypoint-following nav state + knobs (see hook/waypoint_edit.py).
-    current_wp_va            = layout.va('bot_current_wp')
-    prev_wp_va               = layout.va('bot_prev_wp')
-    wp_try_va                = layout.va('bot_wp_try')
-    wp_follow_enabled_va     = layout.va('wp_follow_enabled')
-    wp_reached_radius_sq_va  = layout.va('wp_reached_radius_sq')
-    wp_progress_timeout_va   = layout.va('wp_progress_timeout')
-    wp_slide_turn_step_va    = layout.va('wp_slide_turn_step')
 
-    # Dormant per-bot fields reused by the follower:
-    #  - bot_pickup_y_cache backs wp_best_dsq (min dsq-to-node seen so far).
-    #  - bot_pickup_x_cache backs bot_last_char (respawn detection).
-    #  - bot_flee_ticks backs slide_turn (the angle-sweep ramp counter).
-    #  - bot_wander_x/y are repurposed as a block-vector diagnostic mirror.
-    # All are zeroed by detour_df90's 15-field clear, so a fresh match starts
-    # clean; the pickup scan no-ops on MP maps so nothing else touches them.
-    wp_best_dsq_va           = layout.va('bot_pickup_y_cache')
-    bot_last_char_va         = layout.va('bot_pickup_x_cache')
-    slide_turn_va            = layout.va('bot_flee_ticks')
-    diag_block_x_va          = layout.va('bot_wander_x')
-    diag_block_y_va          = layout.va('bot_wander_y')
-
-    overlay_vertex_count_va  = layout.va('overlay_vertex_count')
-    overlay_vertices_va      = layout.va('overlay_vertices')
-    wp_scratch_va            = layout.va('wp_scratch')
-
-    frame_counter_va         = layout.va('frame_counter')
-    movement_enabled_va      = layout.va('movement_enabled')
-    stuck_delta_sq_va        = layout.va('stuck_delta_sq')
-    stuck_frames_threshold_va = layout.va('stuck_frames_threshold')
-    bot_move_speed_va        = layout.va('bot_move_speed')
-
-    # Stage-2 pickup-divert state + knobs (see config.py / detours/world_scan
-    # is unrelated). The pickup table is filled by detour_53DA40; here the bot
-    # occasionally steers to the nearest collectible pickup instead of its node.
-    pickup_table_va             = layout.va('pickup_table')
-    pickup_count_va             = layout.va('pickup_count')
-    pickup_divert_enabled_va    = layout.va('pickup_divert_enabled')
-    pickup_divert_radius_sq_va  = layout.va('pickup_divert_radius_sq')
-    pickup_reached_radius_sq_va = layout.va('pickup_reached_radius_sq')
-    pickup_cooldown_frames_va   = layout.va('pickup_cooldown_frames')
-    pickup_divert_timeout_va    = layout.va('pickup_divert_timeout')
-    pickup_divert_avoid_damage_va = layout.va('pickup_divert_avoid_damage')
-    pickup_cd_va                = layout.va('pickup_cd')
-    pickup_div_active_va        = layout.va('pickup_div_active')
-    pickup_div_x_va             = layout.va('pickup_div_x')
-    pickup_div_y_va             = layout.va('pickup_div_y')
-    pickup_div_try_va           = layout.va('pickup_div_try')
-    # Reactive hazard avoidance reuses the dormant per-bot cur_damage tracker.
-    bot_last_damage_va          = layout.va('bot_last_damage')
-
-    # Borrowed accumulators for (dx, dy) — these are fire/aim per-call scratch,
-    # mutually exclusive with this detour. curr_dist_sq doubles as the int->
-    # float spill for the slide ramp count.
-    dx_accum_va = layout.va('curr_dist_sq')
-    dy_accum_va = layout.va('cand_tmp')
+def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
+    """Entry: classify the controller, set up the pushad frame, fetch the live
+    bot char, reset nav on respawn, and read the bot's world position."""
+    bot_pos_va        = layout.va('bot_pos')
+    bot_slot_tmp_va   = layout.va('bot_slot_tmp')
+    bot_char_tmp_va   = layout.va('bot_char_tmp')
+    current_wp_va     = layout.va('bot_current_wp')
+    prev_wp_va        = layout.va('bot_prev_wp')
+    wp_try_va         = layout.va('bot_wp_try')
+    wp_best_dsq_va    = layout.va('bot_pickup_y_cache')   # min dsq-to-node
+    bot_last_char_va  = layout.va('bot_pickup_x_cache')   # respawn detection
+    slide_turn_va     = layout.va('bot_flee_ticks')       # wall-slide ramp
+    pickup_div_active_va = layout.va('pickup_div_active')
+    pickup_cd_va         = layout.va('pickup_cd')
+    bot_last_damage_va   = layout.va('bot_last_damage')
+    frame_counter_va     = layout.va('frame_counter')
+    movement_enabled_va  = layout.va('movement_enabled')
 
     a.label('detour_542360')
     emit_is_bot_controller(a, layout,
@@ -211,8 +205,18 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x8B\x0D' + le32(bot_char_tmp_va))            # ecx = bot char
     a.call_va(ax.SUB_4FB0A0_VA)                           # __thiscall, ret 4
 
-    # --- Stuck detection: d² between current and last position. Drives the
-    # wall-slide ramp (a wedged bot makes no progress so this climbs).
+
+def _emit_stuck_detection(a: Asm, layout: ScratchLayout) -> None:
+    """d² between current and last position. Drives the wall-slide ramp (a
+    wedged bot makes no progress so this climbs) and the pickup-divert
+    wall-wedge abandon."""
+    bot_pos_va       = layout.va('bot_pos')
+    bot_slot_tmp_va  = layout.va('bot_slot_tmp')
+    last_x_va        = layout.va('bot_last_x')
+    last_y_va        = layout.va('bot_last_y')
+    stuck_count_va   = layout.va('bot_stuck_count')
+    stuck_delta_sq_va = layout.va('stuck_delta_sq')
+
     a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
     a.raw(b'\xD9\x05' + le32(bot_pos_va))                 # fld pos.x
     a.raw(b'\xD8\x24\x8D' + le32(last_x_va))              # fsub last_x[slot]
@@ -235,11 +239,41 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xA1' + le32(bot_pos_va + 4))
     a.raw(b'\x89\x04\x8D' + le32(last_y_va))
 
+
+def _emit_pickup_divert(a: Asm, layout: ScratchLayout) -> None:
+    """Stage-2 pickup divert: a self-contained prefix to waypoint following.
+    When a collectible pickup is near, steer to it instead of the current node,
+    then resume the graph after a cooldown. Disabled -> a single cmp/jz falls
+    straight through to ``s542360_pd_skip``, leaving the waypoint follower
+    byte-for-byte unchanged. bot_pos is already read by the stuck stage."""
+    bot_pos_va        = layout.va('bot_pos')
+    bot_slot_tmp_va   = layout.va('bot_slot_tmp')
+    bot_char_tmp_va   = layout.va('bot_char_tmp')
+    wp_try_va         = layout.va('bot_wp_try')
+    stuck_count_va    = layout.va('bot_stuck_count')
+    stuck_frames_threshold_va = layout.va('stuck_frames_threshold')
+    bot_last_damage_va = layout.va('bot_last_damage')
+
+    pickup_table_va             = layout.va('pickup_table')
+    pickup_count_va             = layout.va('pickup_count')
+    pickup_divert_enabled_va    = layout.va('pickup_divert_enabled')
+    pickup_divert_radius_sq_va  = layout.va('pickup_divert_radius_sq')
+    pickup_reached_radius_sq_va = layout.va('pickup_reached_radius_sq')
+    pickup_cooldown_frames_va   = layout.va('pickup_cooldown_frames')
+    pickup_divert_timeout_va    = layout.va('pickup_divert_timeout')
+    pickup_divert_avoid_damage_va = layout.va('pickup_divert_avoid_damage')
+    pickup_cd_va                = layout.va('pickup_cd')
+    pickup_div_active_va        = layout.va('pickup_div_active')
+    pickup_div_x_va             = layout.va('pickup_div_x')
+    pickup_div_y_va             = layout.va('pickup_div_y')
+    pickup_div_try_va           = layout.va('pickup_div_try')
+
+    # Borrowed accumulators for (dx, dy) — fire/aim per-call scratch, mutually
+    # exclusive with this detour. curr_dist_sq doubles as the int->float spill.
+    dx_accum_va = layout.va('curr_dist_sq')
+    dy_accum_va = layout.va('cand_tmp')
+
     # === Pickup divert (Stage 2) ========================================
-    # Self-contained prefix to waypoint following: when a collectible pickup is
-    # near, steer to it instead of the current node, then resume the graph after
-    # a cooldown. Disabled -> a single cmp/jz falls straight through, leaving the
-    # waypoint follower byte-for-byte unchanged. bot_pos is already read above.
     a.raw(b'\x83\x3D' + le32(pickup_divert_enabled_va) + b'\x00')      # cmp [divert_enabled], 0
     a.jz('s542360_pd_skip')
     a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
@@ -377,6 +411,29 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.jmp('s542360_emit')
 
     a.label('s542360_pd_skip')
+
+
+def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
+    """Pure node-to-node follow: acquire the nearest node, test arrival, run
+    the off-graph progress watchdog (retreat/re-acquire), advance along a real
+    edge on arrival, and stage ``desired = node - bot`` into dx/dy for the
+    normalize stage. No graph / follow disabled -> zero (idle)."""
+    bot_pos_va        = layout.va('bot_pos')
+    bot_slot_tmp_va   = layout.va('bot_slot_tmp')
+    current_wp_va     = layout.va('bot_current_wp')
+    prev_wp_va        = layout.va('bot_prev_wp')
+    wp_try_va         = layout.va('bot_wp_try')
+    wp_best_dsq_va    = layout.va('bot_pickup_y_cache')   # min dsq-to-node
+    slide_turn_va     = layout.va('bot_flee_ticks')       # wall-slide ramp
+    wp_follow_enabled_va    = layout.va('wp_follow_enabled')
+    wp_reached_radius_sq_va = layout.va('wp_reached_radius_sq')
+    wp_progress_timeout_va  = layout.va('wp_progress_timeout')
+    overlay_vertex_count_va = layout.va('overlay_vertex_count')
+    overlay_vertices_va     = layout.va('overlay_vertices')
+    wp_scratch_va           = layout.va('wp_scratch')
+
+    dx_accum_va = layout.va('curr_dist_sq')
+    dy_accum_va = layout.va('cand_tmp')
 
     # === Waypoint following =============================================
     a.raw(b'\x83\x3D' + le32(wp_follow_enabled_va) + b'\x00')
@@ -528,6 +585,15 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x05' + le32(dy_accum_va) + le32(0))
     # fall through to emit
 
+
+def _emit_normalize_and_emit(a: Asm, layout: ScratchLayout) -> None:
+    """Normalize (dx, dy) to BOT_MOVE_SPEED, write the velocity vector to
+    ``[esp+0x24]``, and the heading ``atan2(dy, dx)`` to ``[esp+0x28]``. A
+    degenerate (zero) vector routes to the zero-return path."""
+    bot_move_speed_va = layout.va('bot_move_speed')
+    dx_accum_va = layout.va('curr_dist_sq')
+    dy_accum_va = layout.va('cand_tmp')
+
     # --- Normalize to BOT_MOVE_SPEED and emit velocity + angle --------------
     a.label('s542360_emit')
     a.raw(b'\xD9\x05' + le32(dx_accum_va))                # fld dx
@@ -583,6 +649,21 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('s542360_emit_zero_pop')
     a.raw(b'\xDD\xD8')                                    # fstp st(0)  (drop len²)
     a.jmp('s542360_zero')
+
+
+def _emit_wall_slide(a: Asm, layout: ScratchLayout) -> None:
+    """Deflect the emitted ANGLE while wedged — no freeze. The engine moves the
+    bot purely by the angle; a magnitude already sits in the velocity vector.
+    Mirrors the controller block vector into the dormant wander fields for
+    diagnostics, then ramps a per-bot deflection driven by wp_try."""
+    bot_slot_tmp_va  = layout.va('bot_slot_tmp')
+    wp_try_va        = layout.va('bot_wp_try')
+    slide_turn_va    = layout.va('bot_flee_ticks')        # wall-slide ramp
+    diag_block_x_va  = layout.va('bot_wander_x')          # block-vec diag mirror
+    diag_block_y_va  = layout.va('bot_wander_y')
+    frame_counter_va = layout.va('frame_counter')
+    wp_slide_turn_step_va = layout.va('wp_slide_turn_step')
+    dx_accum_va = layout.va('curr_dist_sq')
 
     # --- Wall-slide: deflect the ANGLE while wedged, no freeze --------------
     # The engine moves the bot purely by the angle; a magnitude already sits in
@@ -648,6 +729,18 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xD9\x1A')                                    # fstp dword [edx]  (store angle)
     a.jmp('s542360_ret')
 
+
+def _emit_dead_and_zero_return(a: Asm, layout: ScratchLayout) -> None:
+    """Bot-dead nav reset (char slot NULL) and the shared zero-vector return
+    (panic / NULL char / degenerate normalize). ``s542360_ret`` pops the frame
+    and returns ``0x14``."""
+    bot_slot_tmp_va = layout.va('bot_slot_tmp')
+    current_wp_va   = layout.va('bot_current_wp')
+    prev_wp_va      = layout.va('bot_prev_wp')
+    wp_try_va       = layout.va('bot_wp_try')
+    wp_best_dsq_va  = layout.va('bot_pickup_y_cache')     # min dsq-to-node
+    slide_turn_va   = layout.va('bot_flee_ticks')         # wall-slide ramp
+
     # --- Bot dead this frame (char slot NULL). Reset nav so it cold-acquires
     # on respawn, then emit zero (no live char this frame).
     a.label('s542360_wp_mark_dead')
@@ -674,6 +767,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x61')                                        # popad
     a.raw(b'\xC2\x14\x00')                                # ret 0x14
 
+
+def _emit_normal_fallthrough(a: Asm) -> None:
+    """Non-bot controllers: re-run the displaced prologue and resume the
+    original ``sub_542360``."""
     a.label('s542360_normal')
     a.raw(ax.S542360_PROLOGUE)
     a.jmp_va(ax.S542360_RESUME)
