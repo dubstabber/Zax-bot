@@ -88,72 +88,115 @@ keeps the controller and captures it:
 - `detour_5AA4E0` skips the camera tracker while `botmode == 1`.
 - `detour_542550` captures the bot's `CPlayerWalkingControlAI` by active slot
   during spawn and by player index after natural respawn.
-- `detour_542360` synthesizes a movement vector for captured bot controllers
-  (wander + hazard repulse + item attractor — see "Bot movement" below).
-  Falls back to a zero vector when `MOVEMENT_ENABLED == 0`.
+- `detour_542360` synthesizes a movement vector for captured bot controllers:
+  pure node-to-node waypoint following plus a reactive wall-slide (see "Bot
+  movement" below). Falls back to a zero vector (idle) when
+  `MOVEMENT_ENABLED == 0`, `WP_FOLLOW_ENABLED == 0`, or no graph is loaded.
 - `detour_5436F0` synthesizes aim/fire for captured bot controllers when the
   host is within `FIRE_RANGE_SQ` and `sub_491380` reports line of sight.
 
-Net result (DM): bots wander the map, drift toward visible pickups within
-range, steer away from cached damage zones, and shoot at the host when in
-sight. CTF/SK bots still wander but don't pursue objectives.
+Net result: bots follow the saved waypoint graph node-to-node, roaming the
+whole graph by picking random connected neighbours, and slide along walls
+instead of freezing. With no graph they idle. CTF/SK bots use the same
+follower but don't pursue objectives yet.
 
-## Bot movement (DM)
+## Bot movement (waypoint follower + wall-slide)
 
-The movement detour at `0x542360` synthesizes a 2D velocity by accumulating
-three contributions and writing the normalized direction (scaled by
-`cfg.BOT_MOVE_SPEED`) along with `atan2(dy, dx)` via `sub_509100` to the
-engine's per-call output pointers.
+### Why the angle is everything
 
-1. **Random-target wander.** Each bot tracks a `(wander_x, wander_y)` and a
-   tick counter (`bot_wander_ticks[slot]`). When the counter expires or
-   stuck-detection trips, the detour rolls a new target via
-   `sub_55C4E0(RNG, -R, +R)` on each axis (same RNG the lead coin-flip uses),
-   added to the bot's current position. `cfg.WANDER_TARGET_RADIUS` sets R.
-2. **Hazard repulse.** `scan_hazards` (in `zaxbot/detours/world_scan.py`)
-   walks the world entity array at `mgr+0x2BC..0x2C0` once per match (called
-   from `detour_df90` after the state wipe) and caches every entity of
-   class `CDamageExpandingRadiusAI` (descriptor at `dword_6BD74C`, lazy-init
-   via accessor `sub_4764A0`) into `hazard_table`. Per tick, each cached
-   hazard within `cfg.HAZARD_REPULSION_RADIUS_SQ` contributes
-   `weight / sqrt(d²) * (bot - hazard)` to the accumulator.
-3. **Item attractor.** `pick_pickup` does the same walk but for class
-   `CPickupAI` (descriptor `dword_6D0B9C`, accessor `sub_53D190`),
-   tracking the closest entity within `cfg.ITEM_ATTRACTOR_RADIUS_SQ` and
-   LOS-testing the winner via `sub_491380`. The result is cached per bot
-   for `cfg.ITEM_SCAN_INTERVAL_FRAMES` frames; when valid, the cached
-   target contributes `weight * (pickup - bot)` to the accumulator. Engine
-   collision (`sub_4303F0`, downstream) triggers the pickup itself when
-   the bot walks over it.
+Decompiling the caller `sub_543B60` (it calls `0x542360` at `0x543ced`) pins
+down how the engine uses our two outputs:
 
-Stuck detection compares the bot's current position against
-`bot_last_x/y[slot]` (refreshed every tick); if `d² < STUCK_DELTA_SQ` for
-`STUCK_FRAMES_THRESHOLD` consecutive frames, the wander target is
-re-rolled immediately. This catches bots wedged against walls or
-unreachable random targets.
+- The character's movement DIRECTION is `cur_pos + 100*(cos(angle),
+  sin(angle))` passed to `sub_4303F0`. **Only the emitted angle `[esp+8]`
+  steers.**
+- The velocity vector `[esp+4]` matters only through its MAGNITUDE, which the
+  engine compares against the model's walk/run schema thresholds to pick the
+  animation tier and step. Its direction is ignored.
+- `sub_4303F0` is ALL-OR-NOTHING: if the angle points into geometry the
+  collision sweep fails and the character does **not move at all**. There is no
+  engine wall-slide.
 
-A `MOVEMENT_ENABLED = False` panic switch reverts to the original
-zero-vector behavior with a one-byte scratch flip; no rebuild needed if
-the scratch is patched at runtime, otherwise rebuild.
+The old detour synthesized the angle from a potential field (random wander +
+hazard repulse + pickup attractor) and an edge look-ahead, then MIRRORED
+`sub_542360`'s own wall-block post-process (zero the vector + face away when
+`dot(block, out) < 0`). For a human that freeze is fine — the player steers
+parallel by hand to slide. A bot has nobody to steer it, so it froze against
+the wall until a 150-frame timeout. That, plus the field/look-ahead constantly
+aiming the angle INTO walls, is why bots stuck on walls. The fix was a full
+rewrite, not a tuning pass.
+
+### The follower
+
+The detour writes `velocity = normalize(node - bot) * cfg.BOT_MOVE_SPEED`
+(magnitude only — keeps the engine out of Idle) and `angle = atan2(desired)`
+via `sub_509100`. When `cfg.WP_FOLLOW_ENABLED` and `overlay_vertex_count > 0`:
+
+- **Steer straight at the current node** (no look-ahead; the look-ahead was
+  what cut corners into walls).
+- **Arrival + edges.** When `dsq(bot, node) < cfg.WP_REACHED_RADIUS_SQ`
+  (`(64px)²`) it advances via `wp_advance` to a RANDOM connected neighbour
+  (gated by `cfg.WP_RANDOM_NEIGHBOR`; prefers `!= prev`, falls back to `prev`
+  at a dead end), so bots roam the whole graph while respecting connections.
+- **Respawn / death.** A (re)spawned bot drops its latch and cold-acquires the
+  NEAREST node; edges constrain only after that first pick. Detected by the
+  live char pointer changing.
+- **Progress watchdog.** If the bot fails to strictly reduce `dsq` to the
+  current node for `cfg.WP_PROGRESS_TIMEOUT_FRAMES`, it re-acquires the nearest
+  node (a coarse safety net; the wall-slide normally keeps it progressing).
+
+With no graph / follow disabled, the detour emits a zero vector (idle). The
+random-wander/hazard-repulse/pickup-attractor pipeline was REMOVED.
+
+### Wall-slide (replaces the freeze)
+
+The detour does NOT re-emit the engine's freeze. The trigger is LACK OF
+PROGRESS, not stillness: a bot grinding ALONG a wall keeps moving
+(`bot_stuck_count == 0`) yet never approaches its node, so a position-delta
+metric misses it. The progress watchdog's `bot_wp_try[slot]` climbs whenever the
+bot fails to get strictly closer to its node. Once `wp_try >=
+WP_SLIDE_TRIGGER_FRAMES` (≈8) the follower cycles a per-bot deflection
+(`bot_flee_ticks[slot]`, repurposed as `slide_turn`, 0..11 wrapping) one step
+every few frames and adds `slide_turn * cfg.WP_SLIDE_TURN_STEP_DEG` to the
+emitted angle, so the bot tries every heading around a full circle until one
+escapes the wall/pocket and makes progress (which resets `wp_try` → straight at
+the node again). The velocity magnitude stays `BOT_MOVE_SPEED` throughout, so
+the engine keeps walking the bot. No angle wrap is needed: the movement angle is
+range-agnostic (the engine uses cos/sin) and is overwritten by the fire/aim path
+before any facing use.
+
+IMPORTANT — this reactive sweep only escapes wall *grazes* between nodes; it
+cannot reliably climb out of a deep spawn pocket whose nearest node is hundreds
+of px away across a wall. Reliable following REQUIRES a graph dense enough that
+consecutive connected nodes have a walkable straight segment between them
+(≈60–80px spacing through corridors and around corners), AND a node at/near each
+spawn point. On Molten Ice the bottom-left spawn pocket (~290,1110) currently has
+no node within 195px — bots spawned there have nothing to follow. Author a node
+where bots spawn plus a chain tracing the walkable route out.
+
+DIAGNOSTIC: the controller block vector `+0x14/+0x18` is mirrored into the
+dormant `bot_wander_x/y[slot]` so an `ai_move` R-dump shows whether the engine
+populates it near walls — the input needed to later add a smoother geometric
+slide (project the heading onto the wall tangent) on top of the angle sweep.
+
+A `MOVEMENT_ENABLED = False` panic switch reverts to the zero-vector behavior.
 
 ### Movement calibration recipe
 
-The engine multiplies the velocity output by ~100 inside `sub_543CED`
-before `sub_4303F0`, so `cfg.BOT_MOVE_SPEED` is in small units. Default
-3.0 ≈ human walk pace empirically.
+The engine multiplies the velocity output by ~100 inside `sub_543CED` before
+`sub_4303F0`, so `cfg.BOT_MOVE_SPEED` is in small units; keep it above the
+model walk threshold (default `1.0`).
 
-1. Spawn one bot (B → 1 in DM). Watch its walk speed compared to a
-   strafing host.
-2. If the bot crawls, raise `BOT_MOVE_SPEED` (try 5.0, 8.0). If it
-   teleports / clips through walls, lower (try 1.5, 1.0).
-3. Press R, decode the `ai_move` snapshot chunk via `tools/diffdump.py`
-   — verify `bot_wander_x/y` is within `WANDER_TARGET_RADIUS` of the
-   bot's current position and `stuck_count` stays near zero while the
-   bot is moving. `tag_hazard` shows the cached `hazard_table` entries.
-4. If hazard avoidance doesn't kick in for lava on a specific map, the
-   shipped lava entity probably isn't `CDamageExpandingRadiusAI` — the
-   `hazard_table` chunk will be empty. Add candidate descriptor VAs to
-   `cfg.HAZARD_CLASSES` (currently a single-entry tuple).
+1. Spawn one bot (B → 1). Watch its walk speed compared to a strafing host.
+2. If the bot crawls, raise `BOT_MOVE_SPEED`; if it teleports / clips through
+   walls, lower it.
+3. Press R near a wall, decode the `ai_move` chunk via `tools/diffdump.py`:
+   `bot_last_x/y` (and the live char position) should CHANGE between dumps — a
+   sliding bot moves; a frozen one does not — and `bot_wp_try` should stay low
+   rather than climbing to `WP_PROGRESS_TIMEOUT`. The first two `ai_move`
+   fields (formerly `bot_wander_x/y`) now hold the mirrored block vector.
+4. If wall handling feels jittery, lower `WP_SLIDE_TURN_STEP_DEG` for a finer
+   sweep, or implement the geometric block-vector slide (see Open work).
 
 ## Debug weapon override
 
@@ -292,11 +335,9 @@ ignore this knob (they skip `apply_lead` unconditionally).
 
 ## Still open
 
-- Engine-waypoint navigation. The current DM movement is a random-target
-  wander with hazard repulse and item attractor; bots will bump walls and
-  re-roll instead of routing around them. The shipped `CWayPointMap` /
-  `CWayPointPath` infrastructure should give a proper navigation graph
-  per level — bolts onto the existing `bot_wander_x/y` slot.
+- Engine `CWayPointMap` integration. The active navigation path uses the
+  patch's saved `waypoints/<map>.zwpt` overlay graph, not the shipped engine
+  `CWayPointMap` / `CWayPointPath` data.
 - CTF/SK objective AI. CTF bots now move but don't pursue flags; SK bots
   don't gather at their own collector. Both require team/objective
   awareness on top of the movement primitive.

@@ -101,28 +101,45 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   Unknown vtables drop a one-shot 0x200-byte dump of the game-type object
   and fall back to DM. `zaxbot/config.py` exposes a `FORCE_MODE` knob for
   offline testing.
-- DM bots wander via `detour_542360` synthesizing a movement vector from
-  three contributions: a random wander target (re-rolled on timer or stuck
-  detection) plus a hazard repulse and a pickup attractor. The hazard cache
-  is rebuilt once per match by `scan_hazards` (called from `detour_df90`),
-  walking the world entity array at `mgr+0x2BC..0x2C0` and filtering by
-  `CDamageExpandingRadiusAI`. The attractor uses the same iteration to find
-  the closest `CPickupAI` within range, then LOS-tests via `sub_491380`.
-  Engine `sub_4303F0` handles wall collision and pickup-on-walkover for
-  free. `cfg.MOVEMENT_ENABLED = False` reverts to the original zero-vector
-  behavior. `detour_5436F0` still synthesizes aim/fire when range + LOS
-  allow.
-- Lava and other tile hazards are handled REACTIVELY: when a bot's
-  `[char+0x7C]` (cur_damage) increases between frames, the wander target
-  is biased to the opposite of the bot's recent motion direction and
-  committed for `cfg.HAZARD_FLEE_FRAMES` (default 120). Tile-grid
-  reverse-engineering attempts didn't yield a reliable signal — the
-  `CPlasmaTileMap` plane-0 dwords aren't direct `CGroundTextureFrame*`
-  pointers (they're packed values resolved via a separate texture list).
-  Proper navigation around tile hazards is deferred to the planned
-  waypoint system, which will route bots over the level designer's
-  intended paths. The reactive flee remains the backstop for any hazard
-  the waypoints don't cover.
+- Bots navigate the authored waypoint graph via `detour_542360`. The model is
+  a **pure node-to-node follower with a reactive wall-slide**, grounded in how
+  the engine consumes our two outputs (confirmed by decompiling the caller
+  `sub_543B60`, call site `0x543ced`):
+  - Movement DIRECTION is `cur_pos + 100*(cos(angle), sin(angle))` fed to
+    `sub_4303F0` — **only the emitted angle `[esp+8]` steers**. The velocity
+    vector `[esp+4]` matters only through its MAGNITUDE, which picks the
+    idle/walk/run tier; its direction is ignored.
+  - `sub_4303F0` is ALL-OR-NOTHING: if the angle points into geometry its
+    collision sweep fails and the bot does **not move at all**. There is no
+    engine wall-slide for bots.
+  - So the detour steers straight at the current node (`desired = node -
+    bot`; `angle = atan2(desired)`, `|velocity| = BOT_MOVE_SPEED`), advances
+    on arrival (`WP_REACHED_RADIUS_SQ`) to a RANDOM connected neighbour via
+    `wp_advance` (gated by `cfg.WP_RANDOM_NEIGHBOR`; prefers `!= prev`), and
+    re-acquires the nearest node on respawn.
+  - **Wall-slide, NOT freeze.** The detour deliberately does NOT mirror
+    `sub_542360`'s own "wall block" post-process (which zeros the vector and
+    faces away when `dot(block, out) < 0`). That freeze is correct for a human
+    who then steers parallel by hand, but a bot has nobody to steer it, so the
+    old mirrored version pinned bots to walls until a 150-frame timeout. WARNING
+    to future agents: do **not** reinstate that freeze. Instead, when a bot
+    makes NO PROGRESS toward its node for `WP_SLIDE_TRIGGER_FRAMES` (the `wp_try`
+    counter — NOT `stuck_count`: a bot grinding ALONG a wall keeps moving, so a
+    position-delta "stuck" metric misses it), the follower cycles the emitted
+    angle through a full circle (`cfg.WP_SLIDE_TURN_STEP_DEG` per step, one step
+    every few frames) until a heading escapes the wall/pocket and the bot makes
+    progress again (which resets `wp_try` → straight at the node). Engine-
+    internal-independent.
+  - DIAGNOSTIC: the controller block vector at `+0x14/+0x18` is mirrored into
+    the dormant `bot_wander_x/y[slot]` so an `ai_move` R-dump reveals whether
+    the engine populates it near walls — the data needed to later add a smoother
+    geometric slide (project the heading onto the wall tangent) on top of this
+    angle sweep.
+  - `cfg.MOVEMENT_ENABLED = False` reverts to zero-vector. `cfg.WP_FOLLOW_
+    ENABLED = False` / no graph ⇒ bots idle (the random-wander/hazard-repulse/
+    pickup-attractor potential field and the edge look-ahead were REMOVED —
+    they constantly aimed the angle into walls). `detour_5436F0` still
+    synthesizes aim/fire when range + LOS allow.
 - Shot prediction is fully wired. `compute_proj_speed` reads the active
   weapon's projectile speed from `[CModel + 0x60]` via
   `sub_48D8F0(dword_6CFDD8, [def + 0x20])`; NULL projectile key or zero
@@ -209,12 +226,21 @@ Older emitted labels or disabled detours are not active unless they appear in
 
 ## Open work
 
-- Replace the random-target wander with engine-waypoint navigation.
-  `CWayPointMap` / `CWayPointPath` are shipped engine constructs that
-  monsters patrol; reading the live waypoint graph would let bots route
-  around walls instead of bumping and re-rolling.
-- CTF/SK objective behavior on top of the DM wander primitive: CTF bots
-  need flag-aware target selection, SK bots need collector-aware return
-  paths.
+- Smoother wall handling: confirm via an `ai_move` R-dump that the controller
+  block vector (`+0x14/+0x18`, now mirrored into `bot_wander_x/y[slot]`) is
+  populated for bots near walls, then add a geometric slide — project the
+  desired heading onto the wall tangent `s = desired - ((desired·B)/|B|²)·B`
+  and steer along `s` — on top of the existing angle sweep so the bot tracks
+  walls without the brief sweep jitter. (The sweep is the guaranteed fallback.)
+- Graph authoring tools / coverage: place nodes at corners and junctions so
+  the straight node-to-node segments stay in walkable space (corner-cutting is
+  what triggers the wall-slide). Consider auto-densifying long edges.
+- CTF/SK objective behavior on top of the node-to-node follower: CTF bots need
+  flag-aware target selection (route to the flag node, then the home node), SK
+  bots need collector-aware return paths. Both can reuse `wp_advance` with a
+  goal-biased neighbour choice instead of a uniform random pick.
+- Reintroduce hazard/pickup awareness as GRAPH-AWARE routing (route through
+  nodes near pickups, around lava) rather than the removed vector-field
+  perturbation that pushed the heading into walls.
 - Populate or hook DirectPlay player data so PC2 sees chosen bot names
   (and team colors in CTF/SK).

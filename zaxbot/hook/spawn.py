@@ -387,6 +387,29 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # paints the SK collector still lives above, before sub_59DF90).
     a.call_lbl('apply_bot_colors')
 
+    # --- Waypoint follow: force a fresh cold-acquire for the new bot --------
+    # We do NOT place the bot here. Runtime R-dumps proved the engine reclaims
+    # any direct position we set (the bot can only move via its steering
+    # vector), so the bot STEERS from its spawn point onto the graph: the
+    # movement detour cold-acquires the nearest node and walks edges. Reset the
+    # nav state to -1/-1 so this newly-spawned bot re-acquires cleanly (in case
+    # the slot was reused mid-match). Skipped when follow off / no graph / slot
+    # out of range.
+    wp_follow_enabled_va    = layout.va('wp_follow_enabled')
+    overlay_vertex_count_va = layout.va('overlay_vertex_count')
+    current_wp_va           = layout.va('bot_current_wp')
+    prev_wp_va              = layout.va('bot_prev_wp')
+    a.raw(b'\x83\x3D' + le32(wp_follow_enabled_va) + b'\x00')  # cmp [wp_follow_enabled], 0
+    a.jz('spawn_skip_wp_place')
+    a.raw(b'\x83\x3D' + le32(overlay_vertex_count_va) + b'\x00')  # cmp [vertex_count], 0
+    a.jz('spawn_skip_wp_place')                               # no graph
+    a.raw(b'\x8B\x0D' + le32(active_bot_slot_va))             # ecx = slot
+    a.raw(b'\x83\xF9' + bytes([cfg.MAX_BOT_SLOTS]))           # cmp ecx, MAX_BOT_SLOTS
+    a.jae('spawn_skip_wp_place')                              # slot out of range
+    a.raw(b'\xC7\x04\x8D' + le32(current_wp_va) + b'\xFF\xFF\xFF\xFF')  # current_wp[slot] = -1
+    a.raw(b'\xC7\x04\x8D' + le32(prev_wp_va) + b'\xFF\xFF\xFF\xFF')     # prev_wp[slot] = -1
+    a.label('spawn_skip_wp_place')
+
     # --- Optional FORCE_BOT_ITEM_NAME override (testing aid). Bots can't move
     # and so can't pick up weapons. The engine's item ids are per-inventory
     # local indexes, so this resolves an inventory item definition by name,

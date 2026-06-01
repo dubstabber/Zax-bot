@@ -44,9 +44,20 @@ Current limitations:
   to resolve DM, CTF, and Salvage King. CTF (the only team mode) supports
   picking the bot's team via digit `'1'`/`'2'`; DM and SK both spawn one
   free-for-all bot per `'1'` press. None of the bots chase flags or collect
-  salvage yet — no navigation/objective AI.
-- Bots do not navigate. They keep a real walking controller for idle animation,
-  but `detour_542360` zeroes their movement vector.
+  salvage yet — objective AI is still absent.
+- Bots navigate with `detour_542360`: if a saved `waypoints/<map>.zwpt` graph
+  is loaded they steer **straight at the current node**, advance along real
+  edges to a **random connected neighbour** (so they roam the whole graph), and
+  re-acquire the nearest node on respawn. With no graph they idle (the old
+  random-wander/hazard-repulse/pickup-attractor potential field was removed —
+  it kept pushing the heading into walls). Because the engine moves a bot only
+  by the emitted **angle** and refuses to move it at all when that angle points
+  into geometry (no auto-slide), the detour does **not** mirror the stock
+  "freeze + face away" wall handler; instead, when a bot is physically wedged
+  for a few frames it sweeps the emitted angle (`WP_SLIDE_TURN_STEP_DEG`) until
+  a heading clears the wall and slides along it, decaying back to straight once
+  moving. This replaced an architecture that froze bots against walls for a
+  150-frame timeout.
 - Bots can fire/aim at the host within range and line of sight via `detour_5436F0`.
   `zaxbot/config.py` can force newly spawned bots to equip a selected debug
   inventory item name so projectile lead tuning can be tested without bot movement.

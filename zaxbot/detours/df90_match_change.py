@@ -23,6 +23,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     host_part_va        = layout.va('host_part')
     used_names_va       = layout.va('used_names')
     wander_x_va         = layout.va('bot_wander_x')
+    bot_current_wp_va   = layout.va('bot_current_wp')
     bot_pickup_valid_va = layout.va('bot_pickup_valid')
     hazard_count_va     = layout.va('hazard_count')
     frame_counter_va    = layout.va('frame_counter')
@@ -44,13 +45,23 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xB9\x10\x00\x00\x00')                # mov ecx, 16  (bot_team[16])
     a.raw(b'\x83\xC8\xFF')                        # or eax, -1
     a.raw(b'\xF3\xAB')                            # rep stosd
-    # Clear all per-bot AI state (12 contiguous parallel u32 arrays starting
+    # Clear all per-bot AI state (15 contiguous parallel u32 arrays starting
     # at bot_wander_x, each 16 entries × 4 bytes = 64 bytes). This wipes
     # wander targets, stuck counters, item-scan stagger, pickup caches,
-    # last_damage and flee_ticks so a fresh match starts clean.
+    # last_damage, flee_ticks AND the waypoint-follow nav fields (current_wp,
+    # prev_wp, wp_try) so a fresh match starts clean. (wp_try counts frames
+    # since last node arrival; 0 is the correct fresh value.)
     a.raw(b'\xBF' + le32(wander_x_va))            # mov edi, bot_wander_x
-    a.raw(b'\xB9' + le32(12 * cfg.MAX_BOT_SLOTS)) # ecx = 12 fields * 16 slots dwords
+    a.raw(b'\xB9' + le32(15 * cfg.MAX_BOT_SLOTS)) # ecx = 15 fields * 16 slots dwords
     a.raw(b'\x31\xC0')                            # xor eax, eax
+    a.raw(b'\xF3\xAB')                            # rep stosd
+    # The two follow-nav index arrays (bot_current_wp, bot_prev_wp — the last
+    # two fields, contiguous) must start at -1, not 0: a zero prev_wp would
+    # falsely claim "latched on vertex 0" and a zero current_wp would skip the
+    # cold-acquire. Re-stamp them to 0xFFFFFFFF (32 dwords = both arrays).
+    a.raw(b'\xBF' + le32(bot_current_wp_va))      # mov edi, bot_current_wp
+    a.raw(b'\xB9' + le32(2 * cfg.MAX_BOT_SLOTS))  # ecx = current_wp + prev_wp dwords
+    a.raw(b'\x83\xC8\xFF')                        # or eax, -1
     a.raw(b'\xF3\xAB')                            # rep stosd
     # Reset frame counter so per-bot scan-stagger math doesn't see a fake
     # huge delta on the first frame of the new match.

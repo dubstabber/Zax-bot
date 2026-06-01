@@ -58,6 +58,8 @@ class PEImageTests(unittest.TestCase):
 
 class ScratchLayoutTests(unittest.TestCase):
     def test_current_layout_has_expected_anchor_offsets(self):
+        # Build the full production layout (overlay/waypoint tables included)
+        # so the AI-movement and waypoint fields are present to assert.
         layout = build_scratch_layout(
             zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA + zax_patch.SCRATCH_OFF,
             zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF,
@@ -67,6 +69,8 @@ class ScratchLayoutTests(unittest.TestCase):
             cfg.WEAPON_SPEEDS_MAX,
             force_bot_ammo_max=cfg.FORCE_BOT_AMMO_MAX,
             force_bot_ammo_slot_size=cfg.FORCE_BOT_AMMO_SLOT_SIZE,
+            overlay_vertex_max=cfg.OVERLAY_VERTEX_MAX,
+            overlay_edge_max=cfg.OVERLAY_EDGE_MAX,
         )
 
         self.assertEqual(layout.off('msg'), 0x30)
@@ -74,11 +78,26 @@ class ScratchLayoutTests(unittest.TestCase):
         self.assertEqual(layout.off('tmp_idx'), 0x7FC)
         self.assertEqual(layout.off('bot_names'), 0x900)
         self.assertEqual(layout.off('bot_names_ascii'), 0xB80)
-        self.assertEqual(layout.off('force_bot_item_name'), 0x1608)
-        self.assertEqual(layout.off('force_bot_ammo_count'), 0x1648)
-        self.assertEqual(layout.off('force_bot_ammo_names'), 0x164C)
-        expected_end = 0x164C + cfg.FORCE_BOT_AMMO_MAX * cfg.FORCE_BOT_AMMO_SLOT_SIZE
-        self.assertEqual(layout.used_size, expected_end)
+        self.assertEqual(layout.off('force_bot_item_name'), 0x1614)
+        self.assertEqual(layout.off('force_bot_ammo_count'), 0x1654)
+        self.assertEqual(layout.off('force_bot_ammo_names'), 0x1658)
+
+        # Per-bot AI block: the two waypoint-follow nav fields must be the last
+        # two entries and contiguous (detour_df90's clear + the -1 init of
+        # current_wp/prev_wp rely on this), and must not collide with the
+        # overlay region anchored at 0x2000.
+        self.assertEqual(layout.off('bot_current_wp'), 0x1D60)
+        self.assertEqual(layout.off('bot_prev_wp'), 0x1DA0)
+        self.assertEqual(layout.off('bot_wp_try'), 0x1DE0)
+        self.assertEqual(
+            layout.off('bot_prev_wp'),
+            layout.off('bot_current_wp') + 16 * 4,
+        )
+        # Waypoint-follow knobs sit right after hazard_flee_frames.
+        self.assertEqual(layout.off('wp_follow_enabled'), 0x1FDC)
+        self.assertEqual(layout.off('wp_reached_radius_sq'), 0x1FE0)
+        self.assertLessEqual(layout.field('wp_diag_data').end, 0x2080)
+
         self.assertLessEqual(layout.used_size, zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF)
 
     def test_layout_rejects_overlaps_and_overflow(self):

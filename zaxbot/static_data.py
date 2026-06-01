@@ -1,5 +1,6 @@
 """Static data packing for the .zaxbot section."""
 
+import math
 import struct
 
 
@@ -115,6 +116,12 @@ def write_static_scratch_data(
     hazard_default_radius_sq=90000.0,
     bot_move_speed=3.0,
     hazard_flee_frames=120,
+    wp_follow_enabled=True,
+    wp_reached_radius_sq=4096.0,
+    wp_edge_lookahead=0.15,
+    wp_progress_timeout_frames=150,
+    wp_relocate_frames=150,
+    wp_slide_turn_step_deg=30.0,
     overlay_enabled=False,
     overlay_waypoints=(),
     overlay_edges=(),
@@ -252,6 +259,19 @@ def write_static_scratch_data(
                  struct.pack('<f', bot_move_speed))
     layout.write(section, scratch_off, 'hazard_flee_frames',
                  struct.pack('<I', hazard_flee_frames))
+    layout.write(section, scratch_off, 'wp_follow_enabled',
+                 struct.pack('<I', 1 if wp_follow_enabled else 0))
+    layout.write(section, scratch_off, 'wp_reached_radius_sq',
+                 struct.pack('<f', wp_reached_radius_sq))
+    layout.write(section, scratch_off, 'wp_edge_lookahead',
+                 struct.pack('<f', wp_edge_lookahead))
+    layout.write(section, scratch_off, 'wp_progress_timeout',
+                 struct.pack('<I', wp_progress_timeout_frames))
+    layout.write(section, scratch_off, 'wp_relocate_frames',
+                 struct.pack('<I', wp_relocate_frames))
+    # Wall-slide angle step, packed as radians for the movement detour's fadd.
+    layout.write(section, scratch_off, 'wp_slide_turn_step',
+                 struct.pack('<f', math.radians(wp_slide_turn_step_deg)))
 
     # --- Waypoint overlay --------------------------------------------------
     # Pack vertex / edge tables into scratch. Both colors are stored RAW

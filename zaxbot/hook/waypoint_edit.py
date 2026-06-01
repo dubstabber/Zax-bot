@@ -132,6 +132,116 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC3')                                               # ret
 
     # =========================================================================
+    # wp_advance: pick the next vertex to walk toward when following the graph.
+    # ABI (called by the bot-movement detour inside its pushad frame, so it may
+    # freely clobber any GPR — popad restores them):
+    #   in : ECX = current vertex idx, EDX = prev vertex idx (-1 if not latched)
+    #   out: EAX = next neighbor idx, or 0xFFFFFFFF if `current` has no edges
+    # Scans overlay_edges for edges touching `current`. With cfg.WP_RANDOM_
+    # NEIGHBOR (default) it picks a RANDOM neighbor that is NOT `prev` so bots
+    # roam the whole graph; otherwise the first non-prev neighbor (deterministic
+    # for reproducible R-dumps). If the only neighbor is `prev` (dead-end /
+    # degree-1 node), returns `prev` so the bot walks back. No FPU.
+    # =========================================================================
+    a.label('wp_advance')
+    if cfg.WP_RANDOM_NEIGHBOR:
+        # PASS 1: count forward neighbors (nb != prev) into EDI; remember a
+        # prev-neighbor as EBP fallback. ECX=cur, EDX=prev stay live (no calls).
+        a.raw(b'\x31\xF6')                                      # xor esi, esi  (r = 0)
+        a.raw(b'\x31\xFF')                                      # xor edi, edi  (n_fwd = 0)
+        a.raw(b'\xBD\xFF\xFF\xFF\xFF')                          # mov ebp, -1   (fallback)
+        a.label('wp_adv_p1_loop')
+        a.raw(b'\x3B\x35' + le32(overlay_edge_count_va))        # cmp esi, [edge_count]
+        a.jae('wp_adv_p1_done')
+        a.raw(b'\x8B\x04\xB5' + le32(overlay_edges_va))         # mov eax, [edges + esi*4]
+        a.raw(b'\x0F\xB7\xD8')                                  # movzx ebx, ax  (i = low16)
+        a.raw(b'\xC1\xE8\x10')                                  # shr eax, 16    (j = high16)
+        a.raw(b'\x39\xCB'); a.jz('wp_adv_p1_nb_j')              # i == cur -> nb = j (eax)
+        a.raw(b'\x39\xC8'); a.jz('wp_adv_p1_nb_i')              # j == cur -> nb = i (ebx)
+        a.jmp('wp_adv_p1_next')                                 # edge doesn't touch cur
+        a.label('wp_adv_p1_nb_i')
+        a.raw(b'\x89\xD8')                                      # mov eax, ebx  (nb = i)
+        a.label('wp_adv_p1_nb_j')                               # nb in eax
+        a.raw(b'\x39\xD0'); a.jz('wp_adv_p1_fallback')          # nb == prev -> fallback
+        a.raw(b'\x47')                                          # inc edi  (n_fwd++)
+        a.jmp('wp_adv_p1_next')
+        a.label('wp_adv_p1_fallback')
+        a.raw(b'\x89\xC5')                                      # mov ebp, eax
+        a.label('wp_adv_p1_next')
+        a.raw(b'\x46')                                          # inc esi
+        a.jmp('wp_adv_p1_loop')
+        a.label('wp_adv_p1_done')
+        a.raw(b'\x85\xFF'); a.jz('wp_adv_fallback')             # no forward neighbor -> fallback
+        # k = RNG(0, n_fwd-1). Spill cur/prev across the call (RNG clobbers).
+        a.raw(b'\x89\x0D' + le32(wp_scratch_va))                # mov [wp_scratch], ecx (cur)
+        a.raw(b'\x89\x15' + le32(wp_scratch_va + 4))            # mov [wp_scratch+4], edx (prev)
+        a.raw(b'\x8D\x47\xFF')                                  # lea eax, [edi-1]  (high = n_fwd-1)
+        a.raw(b'\x50')                                          # push eax (high)
+        a.raw(b'\x6A\x00')                                      # push 0   (low)
+        a.raw(b'\xB9' + le32(ax.RNG_OBJ_VA))                    # mov ecx, RNG instance
+        a.call_va(ax.RNG_SUB)                                   # eax = k in [0, n_fwd-1], callee pops 8
+        a.raw(b'\x8B\x0D' + le32(wp_scratch_va))                # reload cur -> ecx
+        a.raw(b'\x8B\x15' + le32(wp_scratch_va + 4))            # reload prev -> edx
+        # PASS 2: return the k-th forward neighbor (EAX counts down; no calls).
+        a.raw(b'\x31\xF6')                                      # xor esi, esi
+        a.label('wp_adv_p2_loop')
+        a.raw(b'\x3B\x35' + le32(overlay_edge_count_va))        # cmp esi, [edge_count]
+        a.jae('wp_adv_fallback')                                # safety (unreached)
+        a.raw(b'\x8B\x1C\xB5' + le32(overlay_edges_va))         # mov ebx, [edges + esi*4]
+        a.raw(b'\x0F\xB7\xFB')                                  # movzx edi, bx  (i = low16)
+        a.raw(b'\xC1\xEB\x10')                                  # shr ebx, 16    (j = high16)
+        a.raw(b'\x39\xCF'); a.jz('wp_adv_p2_nb_j')              # i == cur -> nb = j (ebx)
+        a.raw(b'\x39\xCB'); a.jz('wp_adv_p2_nb_i')              # j == cur -> nb = i (edi)
+        a.jmp('wp_adv_p2_next')                                 # edge doesn't touch cur
+        a.label('wp_adv_p2_nb_i')
+        a.raw(b'\x89\xFB')                                      # mov ebx, edi  (nb = i)
+        a.label('wp_adv_p2_nb_j')                               # nb in ebx
+        a.raw(b'\x39\xD3'); a.jz('wp_adv_p2_next')              # nb == prev -> skip
+        a.raw(b'\x85\xC0'); a.jz('wp_adv_p2_take')              # k == 0 -> take this one
+        a.raw(b'\x48')                                          # dec eax  (k--)
+        a.jmp('wp_adv_p2_next')
+        a.label('wp_adv_p2_take')
+        a.raw(b'\x89\xD8')                                      # mov eax, ebx  (return nb)
+        a.raw(b'\xC3')                                          # ret
+        a.label('wp_adv_p2_next')
+        a.raw(b'\x46')                                          # inc esi
+        a.jmp('wp_adv_p2_loop')
+        a.label('wp_adv_fallback')
+        a.raw(b'\x89\xE8')                                      # mov eax, ebp  (fallback / -1)
+        a.raw(b'\xC3')                                          # ret
+    else:
+        a.raw(b'\xBF\xFF\xFF\xFF\xFF')                          # mov edi, -1  (chosen)
+        a.raw(b'\xBD\xFF\xFF\xFF\xFF')                          # mov ebp, -1  (fallback)
+        a.raw(b'\x31\xF6')                                      # xor esi, esi (r = 0)
+        a.label('wp_adv_loop')
+        a.raw(b'\x3B\x35' + le32(overlay_edge_count_va))        # cmp esi, [edge_count]
+        a.jae('wp_adv_done')
+        a.raw(b'\x8B\x04\xB5' + le32(overlay_edges_va))         # mov eax, [edges + esi*4]
+        a.raw(b'\x0F\xB7\xD8')                                  # movzx ebx, ax     (i = low16)
+        a.raw(b'\xC1\xE8\x10')                                  # shr eax, 16       (j = high16)
+        a.raw(b'\x39\xCB'); a.jz('wp_adv_nb_j')                 # if i == current -> nb = j (eax)
+        a.raw(b'\x39\xC8'); a.jz('wp_adv_nb_i')                 # if j == current -> nb = i (ebx)
+        a.jmp('wp_adv_next')                                    # edge doesn't touch current
+        a.label('wp_adv_nb_i')
+        a.raw(b'\x89\xD8')                                      # mov eax, ebx      (nb = i)
+        a.label('wp_adv_nb_j')                                  # nb now in eax
+        a.raw(b'\x39\xD0'); a.jnz('wp_adv_take')                # if nb != prev -> take it
+        a.raw(b'\x89\xC5')                                      # mov ebp, eax      (fallback = prev neighbor)
+        a.jmp('wp_adv_next')
+        a.label('wp_adv_take')
+        a.raw(b'\x89\xC7')                                      # mov edi, eax      (chosen = nb)
+        a.jmp('wp_adv_done')                                    # first non-prev neighbor wins
+        a.label('wp_adv_next')
+        a.raw(b'\x46')                                          # inc esi
+        a.jmp('wp_adv_loop')
+        a.label('wp_adv_done')
+        a.raw(b'\x83\xFF\xFF'); a.jnz('wp_adv_ret')             # chosen != -1 ? return it
+        a.raw(b'\x89\xEF')                                      # mov edi, ebp      (else use fallback)
+        a.label('wp_adv_ret')
+        a.raw(b'\x89\xF8')                                      # mov eax, edi
+        a.raw(b'\xC3')                                          # ret
+
+    # =========================================================================
     # wp_drop (N key)
     # =========================================================================
     a.label('wp_drop')

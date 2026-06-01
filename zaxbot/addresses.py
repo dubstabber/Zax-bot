@@ -87,6 +87,8 @@ S5436F0_PROLOGUE = b'\x53\x56\x8B\xF1\x57\x6A\x18'
 
 # --- atan2-ish helper (used by bot fire/aim) -------------------------------
 SUB_509100    = 0x509100  # __stdcall(dy, dx) -> angle in ST0
+FLT_ZERO_VA   = 0x5EBED0  # engine float 0.0 constant
+FLT_TWO_PI_VA = 0x5EDFFC  # engine float 2*pi constant
 
 # --- Weapon lookup chain (used by bot fire/aim for per-weapon lead speed) --
 # Replicates the lookup sub_543830 itself uses to find the firing weapon:

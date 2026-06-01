@@ -331,19 +331,37 @@ def build_scratch_layout(
     # per match by detour_df90 -> scan_hazards.
     AI_BASE       = 0x1A60
     AI_STRIDE     = MAX_BOT_SLOTS * 4                # 0x40 per per-bot field
+    # NOTE: this block is exactly 15 fields and that count is hardcoded in
+    # detours/df90_match_change.py (the 15-field clear + the trailing -1 stamp)
+    # and hook/snapshot.py (the 0x3C0-byte ai_move dump). The last three fields
+    # MUST stay current_wp / prev_wp / wp_try in that order. Several earlier
+    # fields are now DORMANT (the random-wander/attractor/flee pipeline was
+    # replaced by the node-to-node + wall-slide follower) and are repurposed in
+    # place by bot_movement.py rather than removed, to preserve those offsets:
+    #   bot_wander_x/y   -> block-vector diagnostic mirror (ai_move idx0/idx1)
+    #   bot_pickup_x_cache -> bot_last_char (respawn detection)
+    #   bot_pickup_y_cache -> wp_best_dsq (min dsq-to-node)
+    #   bot_flee_ticks   -> slide_turn (wall-slide deflection ramp)
     AI_PERBOT_FIELDS = (
-        ('bot_wander_x',        'wander: random target x (float)'),
-        ('bot_wander_y',        'wander: random target y (float)'),
-        ('bot_wander_ticks',    'wander: frames left on current target'),
+        ('bot_wander_x',        'DORMANT/diag: mirrored controller block.x (float)'),
+        ('bot_wander_y',        'DORMANT/diag: mirrored controller block.y (float)'),
+        ('bot_wander_ticks',    'DORMANT: was wander target timer'),
         ('bot_last_x',          'stuck: last-tick x (float)'),
         ('bot_last_y',          'stuck: last-tick y (float)'),
         ('bot_stuck_count',     'stuck: frames with delta < STUCK_DELTA_SQ'),
-        ('bot_last_item_scan',  'attractor: frame_counter at last pickup scan'),
-        ('bot_pickup_x_cache',  'attractor: cached pickup target x (float)'),
-        ('bot_pickup_y_cache',  'attractor: cached pickup target y (float)'),
-        ('bot_pickup_valid',    'attractor: 1 if cache has a live target'),
-        ('bot_last_damage',     'reactive: last-tick [char+0x7C] cur_damage float'),
-        ('bot_flee_ticks',      'reactive: frames left committed to flee target'),
+        ('bot_last_item_scan',  'DORMANT: was attractor scan stagger'),
+        ('bot_pickup_x_cache',  'follow: bot_last_char (respawn detection)'),
+        ('bot_pickup_y_cache',  'follow: wp_best_dsq (min dsq-to-node)'),
+        ('bot_pickup_valid',    'DORMANT: was attractor cache-valid flag'),
+        ('bot_last_damage',     'DORMANT: was reactive cur_damage tracker'),
+        ('bot_flee_ticks',      'follow: slide_turn (wall-slide deflection ramp)'),
+        # --- Waypoint-following per-bot nav state. MUST stay the last two
+        # entries so detour_df90's single rep-stosd clear covers them and the
+        # `-1` init of these two contiguous arrays lands correctly. Their
+        # ai_move dump indices are 12 (current_wp) and 13 (prev_wp).
+        ('bot_current_wp',      'follow: current target vertex idx, -1 = none (idx12)'),
+        ('bot_prev_wp',         'follow: previous vertex idx, -1 = not latched (idx13)'),
+        ('bot_wp_try',          'follow: frames since last node arrival; escape past WP_TRY (idx14)'),
     )
     ai_off = AI_BASE
     for ai_name, ai_note in AI_PERBOT_FIELDS:
@@ -387,8 +405,15 @@ def build_scratch_layout(
                      'movement: per-frame velocity magnitude (float)'),
         ScratchField('hazard_flee_frames',        ai_off + 0x38 + AI_HAZARD_CAP * 12,         0x04,
                      'reactive: frames to commit to flee target after damage'),
+        # Waypoint-following knobs (static, packed at build time by static_data).
+        ScratchField('wp_follow_enabled',         ai_off + 0x3C + AI_HAZARD_CAP * 12,         0x04,
+                     'follow: master enable flag (0 = original random wander)'),
+        ScratchField('wp_reached_radius_sq',      ai_off + 0x40 + AI_HAZARD_CAP * 12,         0x04,
+                     'follow: arrival radius² for advancing to the next node (float)'),
+        ScratchField('wp_edge_lookahead',         ai_off + 0x44 + AI_HAZARD_CAP * 12,         0x04,
+                     'follow: edge-steer look-ahead as a fraction of edge length (float, ~0.15)'),
         # Per-tick scratch (used inside the bot_movement detour).
-        ScratchField('move_tmp_pos',              ai_off + 0x3C + AI_HAZARD_CAP * 12,         0x08,
+        ScratchField('move_tmp_pos',              ai_off + 0x48 + AI_HAZARD_CAP * 12,         0x08,
                      'movement: scratch (x, y) for sub_4FB0A0 reads'),
         # Waypoint-diagnostic raw-dword scratch. ``wp_compute`` populates
         # eight contiguous u32 fields:
@@ -411,8 +436,19 @@ def build_scratch_layout(
         # ``wp_lv`` (0x200 bytes from LV) for offline post-mortem of the
         # vtbl[0x184] object, and ``wp_lay`` (0x200 bytes from LAY) to
         # confirm the CLayer hypothesis and locate the CWayPointMap.
-        ScratchField('wp_diag_data',              ai_off + 0x44 + AI_HAZARD_CAP * 12,         0x20,
+        ScratchField('wp_diag_data',              ai_off + 0x50 + AI_HAZARD_CAP * 12,         0x20,
                      'waypoint diag: 8 raw u32 fields populated by wp_compute'),
+        # Off-graph recovery knobs (static, packed at build time). Live in the
+        # gap between wp_diag_data (ends +0x70) and OVERLAY_BASE (0x2080).
+        ScratchField('wp_progress_timeout',       ai_off + 0x70 + AI_HAZARD_CAP * 12,         0x04,
+                     'follow: frames of no-progress-toward-target before recover (int)'),
+        ScratchField('wp_relocate_frames',        ai_off + 0x74 + AI_HAZARD_CAP * 12,         0x04,
+                     'follow: DORMANT — relocate burst (superseded by wall-slide)'),
+        # Wall-slide angle step (radians) added to the emitted movement angle
+        # per deflection ramp step when a bot is wedged against geometry. See
+        # detours/bot_movement.py (the node-to-node follower + wall-slide).
+        ScratchField('wp_slide_turn_step',        ai_off + 0x78 + AI_HAZARD_CAP * 12,         0x04,
+                     'follow: wall-slide angle step per ramp (float radians)'),
     ])
     # --- Waypoint overlay state -------------------------------------------
     # Renderable waypoint set baked from cfg.OVERLAY_WAYPOINTS / EDGES at
@@ -420,7 +456,7 @@ def build_scratch_layout(
     # iterate by the LIVE count fields without growing the section per
     # waypoint set. Anchored at 0x2000 to keep a clear visual gap from the
     # bot-AI scratch (ends near 0x1F4C) and survive future field churn.
-    OVERLAY_BASE = 0x2000
+    OVERLAY_BASE = 0x2080
     overlay_color_size = 16          # CColor struct (BGRA + palette idx + flags)
     overlay_vertex_stride = 8        # float[2] per vertex
     overlay_edge_stride   = 4        # u16[2] per edge

@@ -87,10 +87,13 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     weapon_info_src_va = layout.va('current_weapon_obj')
 
     # Bot-movement scratch dump regions:
-    #   ai_move: bot_wander_x through bot_pickup_valid (10 contiguous parallel
-    #            u32 arrays × 16 bot slots × 4 bytes = 640 bytes). Exposes the
-    #            current wander target, last-position cache, stuck counter,
-    #            item-scan stagger, and pickup cache per slot.
+    #   ai_move: bot_wander_x through bot_prev_wp (14 contiguous parallel
+    #            u32 arrays × 16 bot slots × 4 bytes = 0x380 bytes). Exposes the
+    #            wander target, last-position cache, stuck counter, item-scan
+    #            stagger, pickup cache, last_damage/flee_ticks, and the two
+    #            waypoint-follow nav fields (current_wp idx12, prev_wp idx13)
+    #            per slot. prev_wp != 0xFFFFFFFF ⇒ the bot is latched onto the
+    #            graph and following an edge.
     #   hazard:  hazard_count + hazard_table (4 + 32*12 = 388 bytes). Inspect
     #            after pressing R to verify the proactive scan picked up
     #            damage zones on the current map.
@@ -156,11 +159,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     emit_chunk(tag_ai_pos_va,    b'\xB8' + le32(ai_pos_src_va),         0x100, 'snap_skip_ai_pos')
     emit_chunk(tag_weapon_info_va, b'\xB8' + le32(weapon_info_src_va),    0x14, 'snap_skip_weapon_info')
 
-    # Bot-movement scratch dumps. ai_move covers 12 per-bot fields × 16
-    # slots × 4 bytes = 768 = 0x300 (wander state + stuck + item attractor
-    # cache + last_damage + flee_ticks). hazard covers hazard_count +
-    # hazard_table.
-    emit_chunk(tag_ai_move_va,   b'\xB8' + le32(ai_move_src_va),        0x300, 'snap_skip_ai_move')
+    # Bot-movement scratch dumps. ai_move covers 15 per-bot fields × 16
+    # slots × 4 bytes = 960 = 0x3C0 (wander state + stuck + item attractor
+    # cache + last_damage + flee_ticks + the waypoint-follow nav fields:
+    # current_wp idx12 (off 0x300), prev_wp idx13 (off 0x340), wp_try idx14
+    # (off 0x380, frames since last node arrival)). prev_wp != 0xFFFFFFFF ⇒ the
+    # bot has latched onto the graph and is following an edge. hazard covers
+    # hazard_count + hazard_table.
+    emit_chunk(tag_ai_move_va,   b'\xB8' + le32(ai_move_src_va),        0x3C0, 'snap_skip_ai_move')
     emit_chunk(tag_hazard_va,    b'\xB8' + le32(hazard_src_va),         0x190, 'snap_skip_hazard')
 
     # Waypoint-graph probe. wp_compute populates wp_diag_data[0..7]:
