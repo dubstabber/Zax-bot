@@ -11,10 +11,10 @@ from .build import SectionSpec
 # --- new section parameters (.zaxbot) -------------------------------------
 NEW_SECTION_NAME   = b'.zaxbot\x00'
 NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
-NEW_SECTION_SIZE   = 0x8000        # eight pages: 16KB code + 16KB scratch (grew from 7 for save/load)
+NEW_SECTION_SIZE   = 0xA000        # ten pages: 20KB code + 20KB scratch
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
-SCRATCH_OFF        = 0x4000        # writable scratch buffer; 16KB code / 16KB scratch
+SCRATCH_OFF        = 0x5000        # writable scratch buffer; 20KB code / 20KB scratch
 
 ZAXBOT_SECTION = SectionSpec(
     name=NEW_SECTION_NAME,
@@ -493,6 +493,7 @@ OVERLAY_VERTEX_COLOR   = (255, 255, 255, 255) # white; B=255 -> visible in 8-bit
 OVERLAY_EDGE_COLOR     = (64, 160, 255, 255)  # blue/cyan; B=255 -> visible in 8-bit mode
 OVERLAY_SELECTED_COLOR = (255, 0, 255, 255)   # magenta; B=255 -> visible selected node
 OVERLAY_PICKUP_COLOR   = (0, 255, 255, 255)   # cyan; B=255 -> visible detected pickups
+OVERLAY_PORTAL_COLOR   = (255, 64, 255, 255)  # pink; B=255 -> visible detected teleports
 OVERLAY_VERTEX_RADIUS  = 8.0                  # world-space pixels
 OVERLAY_VERTEX_ASPECT  = 1.0                  # y/x ratio (1.0 = round)
 
@@ -523,6 +524,76 @@ PICKUP_OVERLAY_MARKERS_ENABLED = True
 # Max pickups tracked per frame (each slot is 8 bytes: x, y floats). Greed
 # maps scatter many ore / ammo / health / energy items; size generously.
 PICKUP_TABLE_MAX        = 96
+
+# --- Teleport/portal detection -------------------------------------------
+# Portal source trigger centers are extracted from Data.dat at patch-build time
+# by parsing .zax map text records. Runtime code only compares the active map
+# name against this compact static table and copies the matching points into
+# portal_table on match change, so no heap-wide scanning happens in-game.
+PORTAL_TABLE_MAX        = 32  # live overlay points, float[2] each
+PORTAL_STATIC_MAP_MAX   = 8   # shipped Data.dat currently has 4 portal maps
+PORTAL_STATIC_POINT_MAX = 32  # shipped Data.dat currently has 10 portal points
+PORTAL_MAP_NAME_SLOT    = 96  # fixed ASCII bytes per map path, including NUL
+
+# Runtime portal detection: a detour on the relocate/teleport executor
+# (sub_4C11A0) self-registers the SOURCE pad of every CTeleportAction warp into
+# portal_table the moment any entity teleports — exactly like pickups self-
+# register via the CPickupAI update detour. This catches conditional /
+# script-driven portals that the static Data.dat parse cannot (those only fire
+# once a map condition activates them, e.g. an objective/lock puzzle), so the
+# bot learns every active teleporter on any map. The site fires only on an
+# actual teleport, never per frame, so it is not a hot path. Build-gated: when
+# False the detour code is still emitted (dead) but the patch site is not
+# installed. Filters to genuine CTeleportAction warps (ax.VT_TELEPORT_ACTION_VA)
+# so plain CRelocateAction "$return"/non-warp moves are ignored.
+# --- World entity scanner (detours/entity_scan.py) -----------------------
+# scan_entities walks the layer's spatial grid (mgr -> layer -> cells) and
+# collects entities matching a class descriptor (0 = every entity) into a
+# result table of (ptr, x, y, flags) records. Foundation for object detection
+# (switches, doors, CTF flags, SK collectors, traps) and per-portal active
+# state (entity flags & ax.ENTITY_ACTIVE_BIT). SCAN_ENTITIES_MAX caps the
+# result table (16 bytes/record). A diagnostic pass (scan from detour_df90 on
+# match change, gated below) seeds the table so the scanner can be validated
+# end-to-end via the result count / R-snapshot before any bot behaviour reads
+# it. The walk is bounded (rows*cols cells, 256 entities/cell, both capped) and
+# only runs on match change, so it is not a per-frame hot path.
+# 128 records (2KB table) comfortably covers a DM/CTF map's placed entities so
+# the class=0 diagnostic doesn't truncate before reaching late-cell entities
+# (the table-full guard ends the whole walk). A class-filtered scan needs far
+# fewer; raise only if a dense map's count approaches this.
+SCAN_ENTITIES_MAX     = 128
+SCAN_ENTITIES_ENABLED = True
+
+# --- Per-portal active-state (scan_portal_active) ------------------------
+# A grid-walk consumer of the entity enumerator that, instead of collecting a
+# capped table, matches every entity against portal_table and records the
+# NEAREST entity's Active bit into portal_active[i]. Immune to the
+# SCAN_ENTITIES_MAX cap (the table is never built), so it reaches the
+# teleporter pads wherever they sit in the grid. portal_active[i] is 1 when the
+# entity nearest portal_table[i] (within sqrt(radius)) has flags & ENTITY_ACTIVE_
+# BIT set, else 0 — i.e. "is this pad currently usable?" (e.g. Jungle Ruins'
+# two-lock key puzzle flips it). The pad entity sits ~at the portal centroid, so
+# nearest-within-radius reliably picks it; 128px tolerates the source-vs-centroid
+# offset (runtime pads landed ~38px off) while staying far under inter-portal
+# spacing (~740px), so distinct portals never cross-match.
+PORTAL_ACTIVE_ENABLED        = True
+PORTAL_ACTIVE_MATCH_RADIUS_SQ = 128.0 * 128.0
+# Re-scan cadence (frames) from the page-flip detour so the flag tracks dynamic
+# activation/cooldown. The puzzle is solved mid-match, so a match-change-only
+# scan would miss it. 120 = ~2s at 60Hz; the walk is bounded, but it is the only
+# periodic (not per-frame) cost, so keep it coarse.
+PORTAL_ACTIVE_SCAN_INTERVAL = 120
+PORTAL_REGISTER_ENABLED = True
+# A newly-observed teleport pad within sqrt() of an existing portal_table entry
+# (static or runtime) is treated as the same pad and not re-added. The dedup is
+# on the SOURCE position, which varies by where on the pad a player stands when
+# they trigger it: live testing on Jungle Ruins (DM) showed the same pad
+# registering twice from spots ~57px apart with a 48px radius. 128px comfortably
+# merges same-pad hits (a pad is at most ~1-2 tiles wide) while staying far below
+# typical inter-portal spacing (the two Jungle Ruins pads are ~740px apart), so
+# distinct portals never collapse into one. Raise if a large pad still doubles;
+# lower if two genuinely-separate nearby portals merge.
+PORTAL_DEDUP_RADIUS_SQ  = 128.0 * 128.0
 # Only register pickups that are CURRENTLY collectible. Respawning spawners
 # keep ticking sub_53DA40 after the item is taken (item hidden, waiting to
 # respawn), so without this their markers/targets would persist on an empty

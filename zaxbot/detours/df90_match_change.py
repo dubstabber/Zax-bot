@@ -114,9 +114,24 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # graph). Map-name CString (`dword_713C14`) is populated by sub_4F43F0
     # before any sub_59DF90 call, so it's safe to read here.
     a.call_lbl('wp_load')
+    # Copy this map's build-time parsed teleport destinations into the live
+    # overlay table. This is cheap and bounded: a fixed static map-name table
+    # plus a small float[2] copy, no heap scan.
+    a.call_lbl('load_portals')
     # Capture the active map's CPlasmaTileMap* (lava) for proactive avoidance.
     # pushad/popad, no args/ret; self-clears plasma_map (0 on non-plasma maps).
     a.call_lbl('scan_plasma')
+    # Enumerate the world's entities into scan_table (general spatial-grid walk)
+    # so object detection / portal active-state can read live entities. pushad/
+    # popad, no args/ret. Gated at build time — when disabled the call is simply
+    # not emitted. Once per match (match change), so it is not a hot path.
+    if cfg.SCAN_ENTITIES_ENABLED:
+        a.call_lbl('scan_diag')
+    # Seed the per-portal active-state re-scan countdown so the page-flip detour
+    # runs scan_portal_active shortly after the match starts (and every interval
+    # after). 1 = fire on the next page flip.
+    if cfg.PORTAL_ACTIVE_ENABLED and layout.has_field('portal_scan_count'):
+        a.raw(b'\xC7\x05' + le32(layout.va('portal_scan_count')) + le32(1))
     a.raw(b'\x58\x59\x5F')                        # pop eax; pop ecx; pop edi
     a.label('df90_same_match')
     a.raw(b'\xA3' + le32(cap_a2))                 # mov [cap_a2], eax

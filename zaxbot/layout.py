@@ -165,6 +165,11 @@ def build_scratch_layout(
     overlay_vertex_max=0,
     overlay_edge_max=0,
     pickup_table_max=0,
+    portal_table_max=0,
+    portal_static_map_max=0,
+    portal_static_point_max=0,
+    portal_map_name_slot=0,
+    scan_entities_max=0,
 ):
     BOT_STATE_BASE = 0x180
     MAX_BOT_SLOTS = 16
@@ -736,5 +741,115 @@ def build_scratch_layout(
         ScratchField('overlay_cull_max_y',   plasma_tmp_base + 0x858, 0x04,
                      'overlay: screen-space cull max y (float)'),
     ])
+    # --- Teleport/portal overlay data -------------------------------------
+    # The live portal_table is populated once per match by load_portals from
+    # the compact build-time static table (parsed from Data.dat). Kept after
+    # the existing overlay/lava tail so all older scratch offsets remain
+    # stable. Map entries are fixed-size:
+    #   name[PORTAL_MAP_NAME_SLOT] | count u32 | first_point_index u32
+    portal_table_max_capped = max(0, portal_table_max)
+    portal_static_map_max_capped = max(0, portal_static_map_max)
+    portal_static_point_max_capped = max(0, portal_static_point_max)
+    portal_name_slot_capped = max(0, portal_map_name_slot)
+    portal_map_stride = portal_name_slot_capped + 8
+    portal_base = plasma_tmp_base + 0x860
+    overlay_fields.extend([
+        ScratchField('portal_count', portal_base + 0x00, 0x04,
+                     'portal: live entries in portal_table for active map'),
+        ScratchField('overlay_portal_color', portal_base + 0x04, overlay_color_size,
+                     'overlay: detected-portal CColor (rebuilt per-frame)'),
+    ])
+    portal_static_base = portal_base + 0x14
+    if portal_table_max_capped > 0:
+        overlay_fields.append(ScratchField(
+            'portal_table', portal_static_base,
+            portal_table_max_capped * 8,
+            'portal: float[2] per detected teleport destination (world coords)',
+        ))
+        portal_static_base += portal_table_max_capped * 8
+    overlay_fields.extend([
+        ScratchField('portal_static_map_count', portal_static_base + 0x00, 0x04,
+                     'portal: build-time static map table count'),
+        ScratchField('portal_static_point_count', portal_static_base + 0x04, 0x04,
+                     'portal: build-time static point table count'),
+    ])
+    portal_static_base += 0x08
+    if portal_static_map_max_capped > 0 and portal_map_stride > 8:
+        overlay_fields.append(ScratchField(
+            'portal_static_maps', portal_static_base,
+            portal_static_map_max_capped * portal_map_stride,
+            'portal: static map records (name/count/first point)',
+        ))
+        portal_static_base += portal_static_map_max_capped * portal_map_stride
+    if portal_static_point_max_capped > 0:
+        overlay_fields.append(ScratchField(
+            'portal_static_points', portal_static_base,
+            portal_static_point_max_capped * 8,
+            'portal: static float[2] point table parsed from Data.dat',
+        ))
+        portal_static_base += portal_static_point_max_capped * 8
+    # Per-call scratch (float[2]) for the teleport-portal detour's sub_4FB0A0
+    # source-position read (detours/portal_register.py). Appended at the very
+    # tail of the portal block so no existing portal/overlay offset shifts.
+    if portal_table_max_capped > 0:
+        overlay_fields.append(ScratchField(
+            'portal_reg_tmp', portal_static_base, 0x08,
+            'portal: float[2] scratch for sub_4FB0A0 teleport source-pos read',
+        ))
+        portal_static_base += 0x08
+
+    # --- World entity scanner (detours/entity_scan.py) --------------------
+    # Loop state + result table for scan_entities (the general spatial-grid
+    # walk). All per-call scratch; lives at the very tail so nothing else
+    # shifts. scan_table is `scan_entities_max` records of 16 bytes each:
+    #   (entity_ptr u32, x f32, y f32, flags u32).
+    if scan_entities_max > 0:
+        scan_base = portal_static_base
+        overlay_fields.extend([
+            ScratchField('scan_class_desc', scan_base + 0x00, 0x04,
+                         'scan: class descriptor to match (0 = collect every entity)'),
+            ScratchField('scan_count',      scan_base + 0x04, 0x04,
+                         'scan: live entries written to scan_table'),
+            ScratchField('scan_visit_id',   scan_base + 0x08, 0x04,
+                         'scan: this-scan visit id (mirrors engine dword_622200 dedup)'),
+            ScratchField('scan_ncells',     scan_base + 0x0C, 0x04,
+                         'scan: rows*cols cell count (capped)'),
+            ScratchField('scan_cells',      scan_base + 0x10, 0x04,
+                         'scan: grid cells array base'),
+            ScratchField('scan_cellidx',    scan_base + 0x14, 0x04,
+                         'scan: outer cell-loop index'),
+            ScratchField('scan_list',       scan_base + 0x18, 0x04,
+                         'scan: current cell entity-pointer array'),
+            ScratchField('scan_cnt',        scan_base + 0x1C, 0x04,
+                         'scan: current cell entity count (capped)'),
+            ScratchField('scan_k',          scan_base + 0x20, 0x04,
+                         'scan: inner entity-loop index'),
+            ScratchField('scan_cur_ent',    scan_base + 0x24, 0x04,
+                         'scan: current entity ptr (survives helper calls)'),
+            ScratchField('scan_tmp_pos',    scan_base + 0x28, 0x08,
+                         'scan: float[2] for sub_4FB0A0 entity-pos reads'),
+            ScratchField('scan_table',      scan_base + 0x30, scan_entities_max * 16,
+                         'scan: (ptr, x, y, flags) records collected by scan_entities'),
+        ])
+        # Per-portal active-state (scan_portal_active). portal_active is the
+        # output (1 = nearest pad entity is Active); portal_best_dist is the
+        # per-portal nearest-distance tracker (per-call temp); portal_scan_count
+        # is the page-flip re-scan countdown. Sized to PORTAL_TABLE_MAX.
+        if portal_table_max_capped > 0:
+            pa_base = scan_base + 0x30 + scan_entities_max * 16
+            overlay_fields.extend([
+                ScratchField('portal_active',     pa_base + 0x00, portal_table_max_capped * 4,
+                             'portal: per-pad active flag (1 = nearest entity has the Active bit)'),
+                ScratchField('portal_best_dist',  pa_base + portal_table_max_capped * 4,
+                             portal_table_max_capped * 4,
+                             'portal: per-pad nearest-entity d^2 tracker (scan_portal_active temp)'),
+                ScratchField('portal_scan_count', pa_base + portal_table_max_capped * 8, 0x04,
+                             'portal: page-flip re-scan countdown for scan_portal_active'),
+                ScratchField('scan_d2', pa_base + portal_table_max_capped * 8 + 0x04, 0x04,
+                             'portal: float d^2 temp for the nearest-pad compare'),
+                ScratchField('portal_entity', pa_base + portal_table_max_capped * 8 + 0x08,
+                             portal_table_max_capped * 4,
+                             'portal: the matched (nearest) entity ptr per pad (diag / direct read)'),
+            ])
     fields.extend(overlay_fields)
     return ScratchLayout(base_va, scratch_size, fields)

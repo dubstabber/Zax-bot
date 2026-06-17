@@ -83,20 +83,42 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     overlay_edges_va          = layout.va('overlay_edges')    if layout.has_field('overlay_edges')    else 0
     wp_selected_idx_va        = layout.va('wp_selected_idx')
     overlay_pickup_color_va   = layout.va('overlay_pickup_color')
+    overlay_portal_color_va   = layout.va('overlay_portal_color') if layout.has_field('overlay_portal_color') else 0
     world_frame_va            = layout.va('world_frame')
     pickup_count_va           = layout.va('pickup_count')
     pickup_table_va           = layout.va('pickup_table') if layout.has_field('pickup_table') else 0
+    portal_count_va           = layout.va('portal_count') if layout.has_field('portal_count') else 0
+    portal_table_va           = layout.va('portal_table') if layout.has_field('portal_table') else 0
+    portal_scan_count_va      = layout.va('portal_scan_count') if layout.has_field('portal_scan_count') else 0
 
     vr, vg, vb, va_ = _split_rgba_static('vertex')
     er, eg, eb, ea  = _split_rgba_static('edge')
     sr, sg, sb, sa  = _split_rgba_static('selected')
     pr, pg, pb, pa  = _split_rgba_static('pickup')
+    tr, tg, tb, ta  = _split_rgba_static('portal')
 
     a.label('detour_5693A0')
     # Per-frame tick — bumped here (the one reliable once-per-frame site, the
     # page flip) BEFORE the overlay_enabled gate so the pickup table's lazy
     # reset keeps working even when the overlay itself is disabled.
     a.raw(b'\xFF\x05' + le32(world_frame_va))                 # ++world_frame
+    # Per-portal active-state periodic re-scan (immune to the overlay gate, so it
+    # tracks dynamic activation even with the overlay hidden). Countdown frames;
+    # when it hits 0, reset to the interval and run scan_portal_active (self-
+    # contained pushad/popad; flags are re-set by the cmp below). The countdown
+    # is seeded to 1 on match change by detour_df90, so it fires shortly after a
+    # match starts and every PORTAL_ACTIVE_SCAN_INTERVAL frames after.
+    if cfg.PORTAL_ACTIVE_ENABLED and portal_scan_count_va:
+        # Reset value MUST be >= 1: the dec/jnz fires the scan when the counter
+        # hits exactly 0, so a 0 reset would underflow to a ~4-billion-frame
+        # never-fire state. Clamp defensively (matches the df90 seed of 1).
+        pa_interval = max(1, cfg.PORTAL_ACTIVE_SCAN_INTERVAL)
+        a.raw(b'\xFF\x0D' + le32(portal_scan_count_va))       # dec [portal_scan_count]
+        a.jnz('ov_pa_skip')
+        a.raw(b'\xC7\x05' + le32(portal_scan_count_va)
+              + le32(pa_interval))                            # reset countdown
+        a.call_lbl('scan_portal_active')
+        a.label('ov_pa_skip')
     a.raw(b'\x83\x3D' + le32(overlay_enabled_va) + b'\x00')   # cmp [overlay_enabled], 0
     a.jz('ov_resume')
 
@@ -182,6 +204,15 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xB9' + le32(overlay_pickup_color_va))
     a.call_va(ax.SUB_53F010_VA)
 
+    # --- Build portal-marker color (consumed by the portal pass) ----------
+    if overlay_portal_color_va:
+        a.raw(b'\x6A' + bytes([ta]))
+        a.raw(b'\x6A' + bytes([tb]))
+        a.raw(b'\x6A' + bytes([tg]))
+        a.raw(b'\x6A' + bytes([tr]))
+        a.raw(b'\xB9' + le32(overlay_portal_color_va))
+        a.call_va(ax.SUB_53F010_VA)
+
     # --- Draw vertices ----------------------------------------------------
     if overlay_vertices_va:
         a.raw(b'\x31\xF6')                                    # xor esi, esi
@@ -256,34 +287,20 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # live pickup_table populated by detour_53DA40. Ungated by overlay_vertices
     # so pickups render on maps without an authored waypoint graph too.
     if pickup_table_va:
-        a.raw(b'\x31\xF6')                                   # xor esi, esi
-        a.raw(b'\x8B\x1D' + le32(pickup_count_va))           # mov ebx, [pickup_count]
-        a.raw(b'\x85\xDB'); a.jz('ov_after_pickups')
+        a.raw(b'\xBD' + le32(pickup_table_va))               # ebp = table base
+        a.raw(b'\x8B\x1D' + le32(pickup_count_va))           # ebx = count
+        a.raw(b'\xB9' + le32(overlay_pickup_color_va))       # ecx = color
+        a.call_lbl('ov_draw_point_table')
 
-        a.label('ov_pickup_loop')
-        a.raw(b'\x39\xDE'); a.jae('ov_after_pickups')
-        a.raw(b'\xD9\x04\xF5' + le32(pickup_table_va))       # fld dword [table + esi*8]
-        a.raw(b'\xD8\x25' + le32(overlay_cam_x_va))          # fsub dword [cam_x]
-        a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va))         # fstp dword [tmp_p1]
-        a.raw(b'\xD9\x04\xF5' + le32(pickup_table_va + 4))   # fld dword [table + esi*8 + 4]
-        a.raw(b'\xD8\x25' + le32(overlay_cam_y_va))          # fsub dword [cam_y]
-        a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va + 4))     # fstp dword [tmp_p1 + 4]
-        _emit_point_cull(
-            a, overlay_tmp_p1_va,
-            overlay_cull_min_x_va, overlay_cull_max_x_va,
-            overlay_cull_min_y_va, overlay_cull_max_y_va,
-            'ov_pickup_next',
-        )
-        a.raw(b'\xBA' + le32(overlay_tmp_p1_va))             # mov edx, &tmp_p1 (oval center)
-        a.raw(b'\x68' + le32(overlay_pickup_color_va))       # push &pickup_color
-        a.raw(b'\xFF\x35' + le32(overlay_vertex_aspect_va))  # push aspect
-        a.raw(b'\xFF\x35' + le32(overlay_vertex_radius_va))  # push radius
-        a.raw(b'\x89\xF9')                                   # mov ecx, edi (renderer)
-        a.call_va(ax.SUB_4FCCC0_VA)
-        a.label('ov_pickup_next')
-        a.raw(b'\x46')                                       # inc esi
-        a.jmp('ov_pickup_loop')
-        a.label('ov_after_pickups')
+    # --- Draw detected portals ------------------------------------------
+    # Populated once per match by load_portals from static Data.dat-derived
+    # map data. Same world->screen + oval path as waypoint vertices/pickups,
+    # but with a distinct color so teleport support can be verified in-game.
+    if portal_table_va and overlay_portal_color_va:
+        a.raw(b'\xBD' + le32(portal_table_va))               # ebp = table base
+        a.raw(b'\x8B\x1D' + le32(portal_count_va))           # ebx = count
+        a.raw(b'\xB9' + le32(overlay_portal_color_va))       # ecx = color
+        a.call_lbl('ov_draw_point_table')
 
     # --- Draw edges -------------------------------------------------------
     if overlay_edges_va and overlay_vertices_va:
@@ -344,6 +361,40 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('ov_resume')
     a.raw(b'\xA0' + le32(ax.FULLSCREEN_FLAG_VA))              # mov al, byte_6210C0
     a.jmp_va(ax.S5693A0_RESUME)
+
+    # Shared point-table draw helper used by pickup and portal overlays.
+    # Inputs: EBP=table base (float x/y pairs), EBX=count, ECX=&CColor,
+    # EDI=renderer. Clobbers EAX/EDX/ESI; preserves ECX across draw calls.
+    a.label('ov_draw_point_table')
+    a.raw(b'\x85\xDB'); a.jz('ov_dpt_ret')                    # no points
+    a.raw(b'\x31\xF6')                                        # esi = idx
+    a.label('ov_dpt_loop')
+    a.raw(b'\x39\xDE'); a.jae('ov_dpt_ret')                   # idx >= count
+    a.raw(b'\xD9\x44\xF5\x00')                                # fld [ebp + esi*8]
+    a.raw(b'\xD8\x25' + le32(overlay_cam_x_va))               # fsub [cam_x]
+    a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va))              # fstp [tmp_p1]
+    a.raw(b'\xD9\x44\xF5\x04')                                # fld [ebp + esi*8 + 4]
+    a.raw(b'\xD8\x25' + le32(overlay_cam_y_va))               # fsub [cam_y]
+    a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va + 4))          # fstp [tmp_p1 + 4]
+    _emit_point_cull(
+        a, overlay_tmp_p1_va,
+        overlay_cull_min_x_va, overlay_cull_max_x_va,
+        overlay_cull_min_y_va, overlay_cull_max_y_va,
+        'ov_dpt_next',
+    )
+    a.raw(b'\xBA' + le32(overlay_tmp_p1_va))                  # edx = &tmp_p1
+    a.raw(b'\x51')                                            # save color ptr
+    a.raw(b'\x51')                                            # push &color
+    a.raw(b'\xFF\x35' + le32(overlay_vertex_aspect_va))       # push aspect
+    a.raw(b'\xFF\x35' + le32(overlay_vertex_radius_va))       # push radius
+    a.raw(b'\x89\xF9')                                        # ecx = renderer
+    a.call_va(ax.SUB_4FCCC0_VA)
+    a.raw(b'\x59')                                            # restore color ptr
+    a.label('ov_dpt_next')
+    a.raw(b'\x46')                                            # ++idx
+    a.jmp('ov_dpt_loop')
+    a.label('ov_dpt_ret')
+    a.raw(b'\xC3')
 
 
 def _emit_point_cull(a: Asm,
@@ -440,6 +491,8 @@ def _split_rgba_static(role):
         src = cfg.OVERLAY_SELECTED_COLOR
     elif role == 'pickup':
         src = cfg.OVERLAY_PICKUP_COLOR
+    elif role == 'portal':
+        src = cfg.OVERLAY_PORTAL_COLOR
     else:
         raise ValueError(f'unknown overlay color role: {role!r}')
     return tuple(int(v) & 0xFF for v in src)

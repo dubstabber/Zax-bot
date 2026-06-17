@@ -74,6 +74,69 @@ def write_bot_color_table(section, scratch_off, layout, colors):
     layout.write(section, scratch_off, 'bot_colors', packed)
 
 
+def write_portal_static_table(section, scratch_off, layout, portal_maps, map_name_slot):
+    """Pack build-time portal map records and point coordinates into scratch."""
+    if not layout.has_field('portal_static_map_count'):
+        return
+
+    portal_maps = tuple(portal_maps or ())
+    if not layout.has_field('portal_static_maps') and portal_maps:
+        raise ValueError('portal map data present but layout has no portal_static_maps field')
+    if not layout.has_field('portal_static_points') and any(points for _, points in portal_maps):
+        raise ValueError('portal point data present but layout has no portal_static_points field')
+
+    layout.write(section, scratch_off, 'portal_count', struct.pack('<I', 0))
+    if layout.has_field('portal_table'):
+        layout.write(section, scratch_off, 'portal_table', b'\x00' * layout.field('portal_table').size)
+
+    map_capacity = 0
+    point_capacity = 0
+    if layout.has_field('portal_static_maps'):
+        map_capacity = layout.field('portal_static_maps').size // (map_name_slot + 8)
+    if layout.has_field('portal_static_points'):
+        point_capacity = layout.field('portal_static_points').size // 8
+
+    if len(portal_maps) > map_capacity:
+        raise ValueError(
+            f'portal map table has {len(portal_maps)} rows but scratch holds {map_capacity}'
+        )
+
+    total_points = sum(len(points) for _, points in portal_maps)
+    if total_points > point_capacity:
+        raise ValueError(
+            f'portal point table has {total_points} rows but scratch holds {point_capacity}'
+        )
+
+    map_stride = map_name_slot + 8
+    packed_maps = bytearray(map_capacity * map_stride)
+    packed_points = bytearray(point_capacity * 8)
+    point_index = 0
+    for map_idx, (map_name, points) in enumerate(portal_maps):
+        name_bytes = map_name.encode('latin1')
+        if b'\x00' in name_bytes:
+            raise ValueError(f'portal map name contains NUL: {map_name!r}')
+        if len(name_bytes) + 1 > map_name_slot:
+            raise ValueError(
+                f'portal map name too long for {map_name_slot}-byte slot: {map_name!r}'
+            )
+        rec_off = map_idx * map_stride
+        packed_maps[rec_off:rec_off + len(name_bytes)] = name_bytes
+        count_off = rec_off + map_name_slot
+        packed_maps[count_off:count_off + 8] = struct.pack('<II', len(points), point_index)
+        for x, y in points:
+            struct.pack_into('<ff', packed_points, point_index * 8, float(x), float(y))
+            point_index += 1
+
+    layout.write(section, scratch_off, 'portal_static_map_count',
+                 struct.pack('<I', len(portal_maps)))
+    layout.write(section, scratch_off, 'portal_static_point_count',
+                 struct.pack('<I', total_points))
+    if layout.has_field('portal_static_maps'):
+        layout.write(section, scratch_off, 'portal_static_maps', bytes(packed_maps))
+    if layout.has_field('portal_static_points'):
+        layout.write(section, scratch_off, 'portal_static_points', bytes(packed_points))
+
+
 _FORCE_MODE_TABLE = {None: 0xFFFFFFFF, 'dm': 0, 'ctf': 1, 'sk': 2}
 
 
@@ -132,6 +195,7 @@ def write_static_scratch_data(
     overlay_edge_color=(0, 255, 0, 255),
     overlay_selected_color=(255, 0, 255, 255),
     overlay_pickup_color=(255, 128, 0, 255),
+    overlay_portal_color=(255, 64, 255, 255),
     overlay_vertex_radius=8.0,
     overlay_vertex_aspect=1.0,
     overlay_cull_min_x=-96.0,
@@ -154,6 +218,8 @@ def write_static_scratch_data(
     lava_sweep_step_deg=30.0,
     lava_flee_enabled=True,
     lava_flee_frames=15,
+    portal_maps=(),
+    portal_map_name_slot=0,
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
     # meaningful — "spawn one bot"); CTF is the only team mode and accepts
@@ -349,6 +415,17 @@ def write_static_scratch_data(
     if layout.has_field('overlay_pickup_color'):
         layout.write(section, scratch_off, 'overlay_pickup_color',
                      _pack_color(overlay_pickup_color))
+    if layout.has_field('overlay_portal_color'):
+        layout.write(section, scratch_off, 'overlay_portal_color',
+                     _pack_color(overlay_portal_color))
+    if layout.has_field('portal_static_map_count'):
+        write_portal_static_table(
+            section,
+            scratch_off,
+            layout,
+            portal_maps,
+            portal_map_name_slot,
+        )
     # Pickup self-registration master switch (per-frame CPickupAI detour).
     if layout.has_field('pickup_register_enabled'):
         layout.write(section, scratch_off, 'pickup_register_enabled',

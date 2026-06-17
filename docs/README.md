@@ -78,6 +78,18 @@ Current limitations:
   the overlay culls off-screen vertices/edges before calling the expensive
   engine draw helpers (`OVERLAY_CULL_MARGIN` controls the extra border), and
   turns on pickup self-registration so collectible item markers appear too.
+  Teleport portals populate a live `portal_table` (drawn with their own overlay
+  color) two complementary ways. The build-time `Data.dat` parse
+  (`portal_data.py`) extracts every multiplayer map's warp-teleporter source
+  centers — following nested action wrappers and no longer requiring the
+  destination name to resolve, so it now catches the **conditional /
+  script-driven** teleporters (e.g. Jungle Ruins' "Upper"/"Lower" pair) it used
+  to miss — and `load_portals` copies the active map's points in on match
+  change, marking portals PROACTIVELY at match start. As defence-in-depth, a
+  runtime detour on the relocate/teleport executor (`detour_4C11A0`,
+  `cfg.PORTAL_REGISTER_ENABLED`) also self-registers the source pad of any
+  `CTeleportAction` warp the moment it fires. Both are detection only for now;
+  routing bots into portals is future work.
 - Bots can fire/aim at the host within range and line of sight via `detour_5436F0`.
   `zaxbot/config.py` can force newly spawned bots to equip a selected debug
   inventory item name so projectile lead tuning can be tested without bot movement.

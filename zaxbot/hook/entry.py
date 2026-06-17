@@ -12,6 +12,7 @@ without re-establishing a new byte-identity baseline."""
 from .. import config as cfg
 from ..asm import Asm
 from ..layout import build_scratch_layout
+from ..portal_data import resolve_portal_data
 from ..static_data import write_static_scratch_data
 from . import aim_lead, apply_colors, detect_mode, dispatcher, snapshot, spawn, waypoint_diag, waypoint_edit, weapon_speed
 from .helpers import emit_logc_body, emit_wbuf_body
@@ -22,9 +23,11 @@ from ..detours import (
     char_iter,
     df90_match_change,
     dp_poll,
+    entity_scan,
     name_block,
     overlay,
     pickup_register,
+    portal_register,
     spawn_safety,
     walk_controller,
     world_scan,
@@ -51,6 +54,7 @@ _DETOUR_LABEL_KEYS = {
     'detour_4F5204':           'detour_4F5204_va',
     'detour_5693A0':           'detour_5693A0_va',
     'detour_53DA40':           'detour_53DA40_va',
+    'detour_4C11A0':           'detour_4C11A0_va',
 }
 
 
@@ -78,6 +82,11 @@ def build_hook(section_va_abs):
         overlay_vertex_max=cfg.OVERLAY_VERTEX_MAX,
         overlay_edge_max=cfg.OVERLAY_EDGE_MAX,
         pickup_table_max=cfg.PICKUP_TABLE_MAX,
+        portal_table_max=cfg.PORTAL_TABLE_MAX,
+        portal_static_map_max=cfg.PORTAL_STATIC_MAP_MAX,
+        portal_static_point_max=cfg.PORTAL_STATIC_POINT_MAX,
+        portal_map_name_slot=cfg.PORTAL_MAP_NAME_SLOT,
+        scan_entities_max=cfg.SCAN_ENTITIES_MAX,
     )
 
     a = Asm(section_va_abs + cfg.HOOK_ENTRY_OFF)
@@ -124,6 +133,8 @@ def build_hook(section_va_abs):
     char_iter.emit(a, layout)
     overlay.emit(a, layout)
     pickup_register.emit(a, layout)
+    portal_register.emit(a, layout)
+    entity_scan.emit(a, layout)
 
     code = a.link()
     assert len(code) <= cfg.SCRATCH_OFF, (
@@ -131,6 +142,7 @@ def build_hook(section_va_abs):
     )
 
     overlay_waypoints, overlay_edges = cfg.resolve_overlay_data()
+    portal_maps = resolve_portal_data()
 
     section = bytearray(cfg.NEW_SECTION_SIZE)
     section[cfg.HOOK_ENTRY_OFF:cfg.HOOK_ENTRY_OFF + len(code)] = code
@@ -188,6 +200,7 @@ def build_hook(section_va_abs):
         overlay_edge_color=cfg.OVERLAY_EDGE_COLOR,
         overlay_selected_color=cfg.OVERLAY_SELECTED_COLOR,
         overlay_pickup_color=cfg.OVERLAY_PICKUP_COLOR,
+        overlay_portal_color=cfg.OVERLAY_PORTAL_COLOR,
         overlay_vertex_radius=cfg.OVERLAY_VERTEX_RADIUS,
         overlay_vertex_aspect=cfg.OVERLAY_VERTEX_ASPECT,
         overlay_cull_min_x=cfg.OVERLAY_CULL_MIN_X,
@@ -214,6 +227,8 @@ def build_hook(section_va_abs):
         lava_sweep_step_deg=cfg.LAVA_SWEEP_STEP_DEG,
         lava_flee_enabled=cfg.LAVA_FLEE_ENABLED,
         lava_flee_frames=cfg.LAVA_FLEE_FRAMES,
+        portal_maps=portal_maps,
+        portal_map_name_slot=cfg.PORTAL_MAP_NAME_SLOT,
     )
 
     info = {

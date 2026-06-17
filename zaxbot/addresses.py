@@ -432,6 +432,72 @@ S53DA40_VA       = 0x53DA40
 S53DA40_RESUME   = 0x53DA48   # after the 8-byte prologue, at `test ebx, ebx`
 S53DA40_PROLOGUE = b'\x83\xEC\x24\x53\x8B\x5C\x24\x2C'  # sub esp,24h; push ebx; mov ebx,[esp+0x2C]
 
+# --- sub_4C11A0 (CRelocateAction/CTeleportAction execute) — portal detect ---
+# The single chokepoint every teleport/relocate funnels through. Both
+# CRelocateAction and CTeleportAction override their "execute" vtable slot
+# (slot 27 == vtbl+0x6C) with sub_5A5A60, which runs the warp (vtbl+0x74) then
+# tail-calls sub_4C1060 -> sub_4C11A0. At sub_4C11A0 entry (__thiscall):
+#   ecx     = the action object; [ecx] = its primary vtable (single inheritance,
+#             never this-adjusted): CSwitchMapAction 0x6032C4 /
+#             CRelocateAction 0x603338 / CTeleportAction 0x6033B0.
+#   [esp+4] = a2 = the entity being teleported, still at its SOURCE position
+#             (the relocate itself happens later inside sub_4C11A0 via
+#             sub_4F4AC0). sub_4FB0A0(entity) here therefore yields the portal
+#             pad world coordinates.
+# Detouring here detects teleporters GENERALLY — touch-trigger, script/event-
+# driven, and conditional portals that only fire once a map condition activates
+# them — which the static Data.dat parse (world_scan.py) cannot. The site fires
+# only on an actual teleport (not per frame), so it is not a hot path.
+# Sources: sub_4C11A0 (relocate executor, holds "Relocate can only be used to
+# move animated entities"), sub_4C1060 (thin wrapper), sub_5A5A60 (the
+# relocate/teleport execute override), and the action factory stubs sub_5A56C0
+# / sub_5A5B90 (which `mov [esi], <vtable>`).
+S4C11A0_VA       = 0x4C11A0
+S4C11A0_RESUME   = 0x4C11A7   # after displaced 7 bytes (at 'push esi')
+S4C11A0_PROLOGUE = b'\x8B\x44\x24\x08\x83\xEC\x0C'  # mov eax,[esp+8]; sub esp,0xC
+
+# Action instance vtables (primary), used by the teleport-portal detour to
+# classify the action object at sub_4C11A0 entry. CTeleportAction is the genuine
+# warp teleporter (Warp Behavior + Teleporter.wav); the detour filters to it so
+# plain CRelocateAction "$return"/non-warp moves are not registered as portals.
+VT_SWITCHMAP_ACTION_VA = 0x6032C4
+VT_RELOCATE_ACTION_VA  = 0x603338
+VT_TELEPORT_ACTION_VA  = 0x6033B0
+
+# --- World entity enumeration (the spatial-grid walk) ----------------------
+# The general "find live entities" primitive (zaxbot/detours/entity_scan.py).
+# The old hazard/pickup scans were dormant because they iterated `mgr+0x2BC` as
+# a flat entity list, but that's the LAYER list (count `mgr+0x2C0` == 1 in MP);
+# real entities live one level down, inside each layer's spatial grid. Recipe
+# decompiled from the engine's own by-name finder `sub_57A7E0` and validated
+# live (no-ASLR, runtime VAs == IDB VAs):
+#   mgr            = [MANAGER_GLOBAL_VA]
+#   layer          = [[mgr + MGR_LAYER_ARRAY_OFF]]      (active CLayer, vtbl 0x5F8BAC)
+#   grid           = layer + 0x50 (embedded); fields below are layer-relative:
+#     rows         = [layer + LAYER_GRID_ROWS_OFF]
+#     cols         = [layer + LAYER_GRID_COLS_OFF]
+#     cells        = [layer + LAYER_GRID_CELLS_OFF]     (array of rows*cols 16B cells)
+#   each cell      = [vtbl 0x600A90, list@+4, count@+8, cap@+0xC]
+#   each entity    = list[k]; carries flags@ENTITY_FLAGS_OFF, visit-id@ENTITY_VISIT_OFF
+# Walk all rows*cols cells linearly; an entity that spans multiple cells is
+# de-duplicated via the engine's own visit-id protocol: bump global counter
+# `ENTITY_VISIT_COUNTER_VA`, stamp each entity's `+ENTITY_VISIT_OFF` with it, and
+# skip any entity already stamped >= the current id (exactly what the engine does
+# during name lookups — safe, since the engine always bumps to a fresh higher id
+# before its own next lookup). Classify with `sub_416790(ent, classdesc)`, read
+# position with `sub_4FB0A0(ent, &out)`. See [[world-entity-enumeration]].
+MGR_LAYER_ARRAY_OFF    = 0x2BC      # [mgr + this] -> layer array (element 0 = active CLayer)
+LAYER_GRID_ROWS_OFF    = 0x60       # [layer + this] -> grid rows
+LAYER_GRID_COLS_OFF    = 0x64       # [layer + this] -> grid cols
+LAYER_GRID_CELLS_OFF   = 0x68       # [layer + this] -> grid cells array base
+GRID_CELL_STRIDE       = 0x10       # bytes per cell record
+GRID_CELL_LIST_OFF     = 0x04       # [cell + this] -> entity-pointer array
+GRID_CELL_COUNT_OFF    = 0x08       # [cell + this] -> entity count in this cell
+ENTITY_FLAGS_OFF       = 0x1C       # entity flags dword
+ENTITY_ACTIVE_BIT      = 0x800000   # "Active" bit within the flags dword (set by CActivateAction)
+ENTITY_VISIT_OFF       = 0x2C       # entity per-scan visit-id (dedup)
+ENTITY_VISIT_COUNTER_VA = 0x622200  # dword_622200: engine global visit-id counter
+
 # --- KERNEL32 IAT slots ----------------------------------------------------
 IMP_CREATEFILEA      = 0x5EA0D4
 IMP_WRITEFILE        = 0x5EA0DC

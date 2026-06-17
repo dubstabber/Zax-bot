@@ -187,6 +187,48 @@ class StaticDataTests(unittest.TestCase):
         self.assertEqual(section[force_name_off:force_name_off + 17], b'Missile Launcher\x00')
 
 
+class PortalDataTests(unittest.TestCase):
+    def test_hydro_vengence_portals_are_extracted_from_data_dat(self):
+        from zaxbot.portal_data import resolve_portal_data
+
+        maps = dict(resolve_portal_data())
+        self.assertEqual(
+            maps['Levels/Multiplayer/CTF/Hydro Vengence.zax'],
+            (
+                (280.6666666666667, 1847.3333333333333),
+                (432.6666666666667, 263.3333333333333),
+                (850.6666666666666, 206.0),
+                (922.3333333333334, 1885.0),
+            ),
+        )
+
+    def test_jungle_ruins_script_teleporters_are_extracted(self):
+        # Jungle Ruins authors its teleporters as Exit Action ->
+        # CMultipleActionsAction -> Action=CTeleportAction whose New Location
+        # ("Upper"/"Lower") does NOT resolve to a Level Part name. The old
+        # destination-match gate silently dropped exactly this script/event-
+        # driven shape; pin the two source pads so the relaxed parser keeps
+        # surfacing conditional portals. Confirmed against the live runtime pads
+        # (~(1297,2109) and (1614,1431) registered when teleporting in-game).
+        from zaxbot.portal_data import resolve_portal_data
+
+        maps = dict(resolve_portal_data())
+        self.assertEqual(
+            maps['Levels/Multiplayer/DeathMatch/Jungle Ruins.zax'],
+            ((1259.5, 2105.0), (1610.25, 1445.0)),
+        )
+
+    def test_portal_data_is_multiplayer_scoped(self):
+        # The runtime consumer (load_portals) and the overlay are MP-gated, and
+        # the fixed scratch table only fits the multiplayer maps, so the build-
+        # time parse must stay scoped to them.
+        from zaxbot.portal_data import resolve_portal_data
+
+        maps = dict(resolve_portal_data())
+        self.assertTrue(maps, 'expected at least the shipped MP portal maps')
+        self.assertTrue(all('Multiplayer' in name for name in maps))
+
+
 class PatcherTests(unittest.TestCase):
     def test_patch_manifest_names_and_targets_are_valid(self):
         names = [patch.name for patch in zax_patch.ENABLED_PATCHES]
@@ -300,8 +342,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '2cac0ff6d345f67b49983b126bcff0db325023001337f8919228e84ac4c06b19'
-    HOOK_ENTRY_SIZE = 16323
+    SECTION_SHA256 = 'bc5ef1b23d24a6c406264b31f400cd55ef57bd5280fef6b8bcfa762e5df537c6'
+    HOOK_ENTRY_SIZE = 18003
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

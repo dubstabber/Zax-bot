@@ -87,6 +87,20 @@ def build_enabled_patches():
             )
         )
 
+    if cfg.PORTAL_REGISTER_ENABLED:
+        # Teleport/portal self-registration: detours sub_4C11A0 (the single
+        # relocate/teleport executor) so every CTeleportAction warp records its
+        # source pad into portal_table the moment it fires. Catches conditional
+        # and script-driven portals the static Data.dat parse can't see. The
+        # detour re-runs the displaced 7-byte prologue (mov eax,[esp+8]; sub
+        # esp,0xC) and only does work on an actual teleport, never per frame.
+        patches.append(
+            RelocationPatch(
+                'sub_4C11A0 teleport portal registration', 'jmp', ax.S4C11A0_VA,
+                ax.S4C11A0_PROLOGUE, 'detour_4C11A0_va', 7,
+            )
+        )
+
     patches.extend([
         # Inline NULL-guard for sub_4FC8A0 (the positional-sound dispatch
         # wrapper). The function does `mov ecx, [ecx+0x48]; call sub_4EA880`

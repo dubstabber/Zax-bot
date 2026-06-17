@@ -58,8 +58,8 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 
 - WM_KEYDOWN hook at `0x599A1A` redirects `call sub_599580` to
   `.zaxbot:hook_entry`, then tail-jumps back to `sub_599580`.
-- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x8000`, RWX.
-- Scratch starts at `0x71E000` (`SCRATCH_OFF = 0x4000`).
+- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0xA000`, RWX.
+- Scratch starts at `0x71F000` (`SCRATCH_OFF = 0x5000`).
 - B opens the bot menu via `sub_59B260`; R writes a runtime snapshot.
 - Digit selection calls `do_spawn_with_team`.
 - Spawn injects a synthetic DirectPlay "player added" queue entry at
@@ -166,6 +166,69 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   resolves the engine item definition by name, creates a transient pickup
   item for the new bot, then switches the bot's Primary slot to the
   bot-local item index.
+- Teleport portals populate `portal_table` (drawn by the overlay) two
+  complementary ways — both now catch conditional/script-driven teleporters:
+  - **Static, PROACTIVE** (`portal_data.py` → `world_scan.py:load_portals`,
+    per match): the build-time `Data.dat` parse extracts every Level Part whose
+    action tree contains a `CTeleportAction` (or a warp-carrying
+    `CRelocateAction`) and records its source-trigger center; `load_portals`
+    copies the active map's points in on match change, so portals are marked at
+    match START without anyone using them. The parse follows nested wrappers
+    (`Exit Action=CMultipleActionsAction` → `Action=Array` →
+    `Action=CTeleportAction`) and does **not** require the action's
+    `New Location` to resolve to a Level Part name — that over-strict gate used
+    to drop the "Upper"/"Lower" script teleporters (e.g. Jungle Ruins DM). Scope
+    is MULTIPLAYER maps only (the whole pipeline is MP-gated; SP maps would
+    never load, and all 54 SP+MP portal maps overflow the scratch table — only
+    2 MP maps have portals). Verified in CE: the parsed Jungle Ruins centers
+    (1259.5, 2105.0)/(1610.25, 1445.0) match the live pads.
+  - **Runtime, OBSERVATIONAL** (`portal_register.py`, `detour_4C11A0`, gated by
+    `cfg.PORTAL_REGISTER_ENABLED`): a detour on the relocate/teleport executor
+    self-registers the SOURCE pad of every `CTeleportAction` warp the instant it
+    fires (filters `[action]` == `0x6033B0`, reads the teleported entity at
+    `[esp+4]` via `sub_4FB0A0`, dedups within `PORTAL_DEDUP_RADIUS_SQ` = 128px,
+    appends/accumulates per match). Complements the static table as defence-in-
+    depth: catches any active teleporter the text parse missed and truly dynamic
+    ones, the moment something teleports. Mirrors the pickup self-registration
+    model; confirmed firing in-game (breakpoint at `0x4C11A0`, `ecx` = the two
+    `CTeleportAction`s). NOTE: both paths are DETECTION only (the pad enters
+    `portal_table`); routing bots INTO portals and re-acquiring the nearest
+    waypoint after the teleport jump are still open (the follower's
+    progress-timeout re-acquire partially covers the latter).
+- General world-entity enumeration (`detours/entity_scan.py:scan_entities`,
+  gated by `cfg.SCAN_ENTITIES_ENABLED`). The long-standing blocker for object
+  detection was that there is no flat entity list: `mgr+0x290` is players,
+  `mgr+0x2BC` is the LAYER list (count `mgr+0x2C0` == 1 in MP). Real entities
+  (triggers, switches, doors, flags, collectors, pads, pickups, hazards) live one
+  level down, inside each layer's **spatial grid**. The walk (decompiled from the
+  engine's by-name finder `sub_57A7E0`, live-validated): `mgr` → `[[mgr+0x2BC]]`
+  = active `CLayer` (vtbl `0x5F8BAC`) → grid at `layer+0x50` (rows@+0x60,
+  cols@+0x64, cells@+0x68); each 16-byte cell is `[vtbl 0x600A90, list@+4,
+  count@+8]`; entity = `list[k]`. An entity straddling cells is de-duplicated via
+  the engine's own visit-id protocol (bump `dword_622200`, stamp `entity+0x2C`,
+  skip if already `>=`). `scan_entities` reads `scan_class_desc` (0 = every
+  entity, else a class descriptor matched with `sub_416790`) and writes
+  `(ptr, x, y, flags)` records into `scan_table` (flags = `entity+0x1C`; Active =
+  `ax.ENTITY_ACTIVE_BIT` = `0x800000`, set by `CActivateAction`/cleared by
+  `CDeactivateAction`, e.g. Jungle Ruins' two-lock key puzzle gates the
+  teleports). `scan_diag` runs it once per match from `detour_df90`. This is the
+  foundation for: per-portal active-state (does the bot route to this pad?),
+  switches/doors/CTF flags/SK collectors/trap zones, and un-dormenting the
+  hazard/pickup scans. The walk is bounded (`rows*cols` cells, 256 entities/cell,
+  both capped).
+  - **First consumer — `scan_portal_active`** (gated by `cfg.PORTAL_ACTIVE_ENABLED`):
+    the same grid walk, but instead of a capped collect-table it matches every
+    entity against `portal_table` and keeps the NEAREST one's Active bit in
+    `portal_active[i]` (1 = the pad nearest portal i is currently usable). Immune
+    to `SCAN_ENTITIES_MAX` (no table), so it reaches the teleporter pads wherever
+    they sit in the grid — the class=0 `scan_diag` table fills in the low-Y region
+    and truncates before the high-Y pads, which is why a position-matched consumer
+    (not a collect-table) is the right tool here. The page-flip detour re-runs it
+    every `PORTAL_ACTIVE_SCAN_INTERVAL` frames (countdown seeded to 1 on match
+    change by `detour_df90`) so the flag tracks dynamic activation/cooldown — e.g.
+    Jungle Ruins' two-lock key puzzle flips the pads from inactive to active
+    mid-match. Bots gate portal routing on `portal_active[i]`. This is the only
+    periodic (not per-frame-body) scan cost.
 
 ## Enabled detours
 
@@ -182,6 +245,9 @@ Current patched sites:
 - `0x542550` - walking-controller capture/scrub.
 - `0x5693A0` - toggleable visual waypoint authoring overlay before page flip.
 - `0x53DA40` - gated pickup self-registration for overlay item markers.
+- `0x4C11A0` - teleport-portal self-registration (gated by
+  `cfg.PORTAL_REGISTER_ENABLED`); records each `CTeleportAction` warp's source
+  pad into `portal_table`.
 - `0x480889` - synthetic-id name-block skip in `sub_480800`.
 - `0x4F5204` - character iterator NULL-skip.
 
@@ -224,6 +290,10 @@ Older emitted labels or disabled detours are not active unless they appear in
 | `VT_CTF_VA = 0x5EF544` | Capture-the-Flag game-type vtable |
 | `VT_SK_VA = 0x5FED48` | Salvage King game-type vtable |
 | `stats + 0x14` | team id |
+| `sub_4C11A0` | relocate/teleport executor (`__thiscall`: `ecx`=action, `[esp+4]`=entity at SOURCE pos; reads dest via `sub_4F4AC0` later). The chokepoint every `CRelocate`/`CTeleportAction` funnels through (both override execute vtable slot 27 with `sub_5A5A60` → `sub_4C1060` → here). Detour site for runtime portal detection. |
+| `CTeleportAction vtbl = 0x6033B0` | genuine warp teleporter (parent chain `CSwitchMapAction 0x6032C4` → `CRelocateAction 0x603338` → `CTeleportAction`); the portal detour filters `[action]` to this. |
+| `CTouchingPolygonTriggerAI vtbl = 0x5EDC20` / `CTouchingOvalTriggerAI = 0x5EDB58` | touch-trigger volumes (Enter Action @+0x20, Exit @+0x24, Repeat @+0x28; "Triggered By" filter bytes @+0x10..+0x14). Portals can be a trigger's Enter Action OR a script/event-driven `CTeleportAction` referenced by name — hence runtime execute-hooking instead of per-map structure walking. |
+| `sub_4FB0A0` | `__thiscall(char/entity, &out_pos)` world-position getter, `ret 4` |
 
 ## Constraints
 
@@ -257,5 +327,14 @@ Older emitted labels or disabled detours are not active unless they appear in
 - Reintroduce hazard/pickup awareness as GRAPH-AWARE routing (route through
   nodes near pickups, around lava) rather than the removed vector-field
   perturbation that pushed the heading into walls.
+- Portal behavior on top of detection: `portal_table` now collects active
+  teleport pads (static + runtime `detour_4C11A0`), but bots don't yet ROUTE to
+  them. Add graph-aware portal routing (treat a portal pad as a graph node /
+  edge shortcut: steer to the nearest pad when the destination is "across" a
+  portal) and, after a teleport position-jump, force an immediate nearest-node
+  re-acquire instead of relying on the progress-timeout. Optionally capture the
+  teleport DESTINATION too (read the entity position again just after
+  `sub_4F4AC0`, or `action+0x08/+0x0C`) so a portal becomes a directed edge for
+  routing.
 - Populate or hook DirectPlay player data so PC2 sees chosen bot names
   (and team colors in CTF/SK).
