@@ -305,6 +305,8 @@ def build_scratch_layout(
         ScratchField('tag_wp_lv',          0x8B0, 0x10, 'diag: raw bytes from vtbl[0x184] result'),
         ScratchField('tag_wp_lay',         0x8C0, 0x10, 'diag: raw bytes from active CLayer'),
         ScratchField('tag_wp_map',         0x8D0, 0x10, 'diag: raw bytes from CWayPointMap'),
+        ScratchField('tag_plasma_diag',    0x8E0, 0x10, 'diag: plasma-map pin buffer (scan_plasma output)'),
+        ScratchField('tag_pheat',          0x8F0, 0x10, 'diag: full per-tile heat-grid map'),
         ScratchField('bot_names', 0x900, num_bot_names * name_slot_size),
         ScratchField('bot_names_ascii', 0xB80, num_bot_names * name_slot_ascii),
         # Per-bot, per-char-slot last-seen position cache for the lead-shot
@@ -470,6 +472,31 @@ def build_scratch_layout(
         # detours/bot_movement.py (the node-to-node follower + wall-slide).
         ScratchField('wp_slide_turn_step',        ai_off + 0x78 + AI_HAZARD_CAP * 12,         0x04,
                      'follow: wall-slide angle step per ramp (float radians)'),
+        # --- Lava (plasma) detection globals (NOT per-bot). Captured once per
+        # match by scan_plasma; queried per-frame by is_plasma_at. plasma_map is
+        # the vtable-validated CPlasmaTileMap* (0 on non-plasma maps => no-op).
+        # plasma_qx/qy are is_plasma_at's world-coord inputs; plasma_tx/ty its
+        # idiv temps. plasma_diag is the R-snapshot pin buffer (20 u32 slots):
+        #   [0] LAY  [1] *(LAY+0x7C)  [2] *(LAY+0x40)  [3] chosen(=plasma_map)
+        #   [4] tilepx  [5] tw  [6] th  [7] host_x  [8] host_y
+        #   [9] host_tx [10] host_ty [11] footprint@host  [12] heat@host
+        #   [13] fp_count [14] heat_count [15] fp_max [16] heat_max
+        #   [17] fp_first(tx<<16|ty) [18] heat_first  [19] spare
+        # The census counts (whole-grid nonzero cells) disambiguate which grid
+        # (footprint @+0x08 vs heat/elevation @+0x2C6C) marks damaging lava,
+        # robustly to the fire animation and to the host's exact tile.
+        ScratchField('plasma_map',   ai_off + 0x7C + AI_HAZARD_CAP * 12, 0x04,
+                     'lava: vtable-validated CPlasmaTileMap* (0 if no plasma map)'),
+        ScratchField('plasma_qx',    ai_off + 0x80 + AI_HAZARD_CAP * 12, 0x04,
+                     'lava: is_plasma_at input world x (int)'),
+        ScratchField('plasma_qy',    ai_off + 0x84 + AI_HAZARD_CAP * 12, 0x04,
+                     'lava: is_plasma_at input world y (int)'),
+        ScratchField('plasma_tx',    ai_off + 0x88 + AI_HAZARD_CAP * 12, 0x04,
+                     'lava: is_plasma_at tile-x idiv temp'),
+        ScratchField('plasma_ty',    ai_off + 0x8C + AI_HAZARD_CAP * 12, 0x04,
+                     'lava: is_plasma_at tile-y idiv temp'),
+        ScratchField('plasma_diag',  ai_off + 0x90 + AI_HAZARD_CAP * 12, 0x50,
+                     'lava diag: 20 u32 pin slots (see comment); dumped by the plasma chunk'),
     ])
     # --- Waypoint overlay state -------------------------------------------
     # Renderable waypoint set baked from cfg.OVERLAY_WAYPOINTS / EDGES at
@@ -643,6 +670,63 @@ def build_scratch_layout(
                      'pickup divert: per-bot latched target y (float)'),
         ScratchField('pickup_div_try',    div_base + 0x18 + 4 * div_stride, div_stride,
                      'pickup divert: per-bot divert-frame counter'),
+    ])
+    # --- Lava census/query temps (tail; not dumped) -----------------------
+    # plasma_grid is the grid object ptr that plasma_get / plasma_census
+    # operate on (footprint @plasma+0x08 or heat @plasma+0x2C6C); plasma_cn_*
+    # accumulate the whole-grid nonzero census the snapshot copies into
+    # plasma_diag. Anchored after the last per-bot block so it never collides.
+    plasma_tmp_base = div_base + 0x18 + 5 * div_stride
+    overlay_fields.extend([
+        ScratchField('plasma_grid',     plasma_tmp_base + 0x00, 0x04,
+                     'lava: grid object ptr for plasma_get/plasma_census'),
+        ScratchField('plasma_cn_count', plasma_tmp_base + 0x04, 0x04,
+                     'lava census: nonzero-cell count for the grid in plasma_grid'),
+        ScratchField('plasma_cn_max',   plasma_tmp_base + 0x08, 0x04,
+                     'lava census: max cell value seen'),
+        ScratchField('plasma_cn_first', plasma_tmp_base + 0x0C, 0x04,
+                     'lava census: first nonzero tile (tx<<16 | ty), 0xFFFFFFFF=none'),
+        # Full per-tile heat-grid snapshot (row-major bytes, tw*th <= 0x800),
+        # filled by plasma_dump_heat and dumped via the 'pheat' chunk so the
+        # whole lava layout + value distribution is visible in one R-press.
+        ScratchField('plasma_heatmap',  plasma_tmp_base + 0x10, 0x800,
+                     'lava diag: per-tile heat bytes (row-major, tw wide)'),
+        # --- Proactive lava-avoidance knobs (static, packed by static_data) +
+        # per-call veto temps. Live after the heatmap in the tail.
+        ScratchField('lava_avoid_enabled',  plasma_tmp_base + 0x810, 0x04,
+                     'lava: master enable (0 = no proactive veto)'),
+        ScratchField('lava_heat_threshold', plasma_tmp_base + 0x814, 0x04,
+                     'lava: heat value (0..255) at/above which a tile is lava'),
+        ScratchField('lava_lookahead_px',   plasma_tmp_base + 0x818, 0x04,
+                     'lava: world-px lookahead distance along heading (float)'),
+        ScratchField('lava_sweep_step',     plasma_tmp_base + 0x81C, 0x04,
+                     'lava: heading sweep step (float radians; from LAVA_SWEEP_STEP_DEG)'),
+        ScratchField('lava_veto_angle',     plasma_tmp_base + 0x820, 0x04,
+                     'lava veto: candidate heading (float radians, per-call temp)'),
+        ScratchField('lava_veto_cos',       plasma_tmp_base + 0x824, 0x04,
+                     'lava veto: cos(candidate) (per-call temp)'),
+        ScratchField('lava_veto_sin',       plasma_tmp_base + 0x828, 0x04,
+                     'lava veto: sin(candidate) (per-call temp)'),
+        ScratchField('lava_k',              plasma_tmp_base + 0x82C, 0x04,
+                     'lava veto: sweep iteration counter (per-call temp)'),
+        ScratchField('lava_dbg_heat',       plasma_tmp_base + 0x830, 0x04,
+                     'lava diag: heat value is_plasma_at read (post-warm); dumped as plasma diag[19]'),
+        # Reactive lava flee (health-damage -> reverse heading). Static knobs;
+        # the per-bot flee countdown reuses the dormant bot_wander_ticks field.
+        ScratchField('lava_flee_enabled',   plasma_tmp_base + 0x834, 0x04,
+                     'lava flee: master enable (0 = no reactive flee)'),
+        ScratchField('lava_flee_frames',    plasma_tmp_base + 0x838, 0x04,
+                     'lava flee: frames to reverse heading after health damage'),
+        # Edge-following (hug the prev->current connection line, vital on narrow
+        # lava corridors). Knob + per-call FPU temps for the segment projection.
+        ScratchField('wp_edge_follow_enabled', plasma_tmp_base + 0x83C, 0x04,
+                     'follow: 1 = steer toward a look-ahead point ON the edge line; 0 = straight at node'),
+        ScratchField('wp_seg_x',             plasma_tmp_base + 0x840, 0x04,
+                     'follow: edge segment dx (current.x - prev.x), per-call temp'),
+        ScratchField('wp_seg_y',             plasma_tmp_base + 0x844, 0x04,
+                     'follow: edge segment dy (current.y - prev.y), per-call temp'),
+        ScratchField('wp_tp',                plasma_tmp_base + 0x848, 0x04,
+                     'follow: clamped look-ahead param along the edge, per-call temp'),
     ])
     fields.extend(overlay_fields)
     return ScratchLayout(base_va, scratch_size, fields)

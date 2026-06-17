@@ -9,7 +9,9 @@ def build_enabled_patches():
     into the unmodified Zax.exe to redirect engine code into the .zaxbot
     section. The hook payload module (`zaxbot.hook.entry.build_hook`) supplies
     the matching target VAs by label."""
-    return (
+    from . import config as cfg
+
+    patches = [
         RelocationPatch(
             'WM_KEYDOWN hook', 'call', ax.HOOK_SITE_VA,
             b'\xE8\x61\xFB\xFF\xFF', 'hook_entry_va',
@@ -50,24 +52,37 @@ def build_enabled_patches():
             'sub_4F5150 char iter null-skip', 'jmp', ax.S4F5204_VA,
             ax.S4F5204_ORIG, 'detour_4F5204_va', 6,
         ),
+    ]
+
+    pickup_runtime_enabled = cfg.PICKUP_REGISTER_ENABLED or cfg.PICKUP_DIVERT_ENABLED
+    if cfg.OVERLAY_ENABLED or pickup_runtime_enabled:
         # Page-flip detour: draws OVERLAY_WAYPOINTS / OVERLAY_EDGES via the
-        # engine's renderer just before the back-buffer is presented. The
-        # detour body fast-skips when cfg.OVERLAY_ENABLED is False, so
-        # leaving this patch installed always is cheap (single cmp/jz on
-        # entry) and matches the project's other always-on detours.
-        RelocationPatch(
-            'sub_5693A0 waypoint overlay', 'jmp', ax.S5693A0_VA,
-            ax.S5693A0_PROLOGUE, 'detour_5693A0_va', 5,
-        ),
+        # engine's renderer just before the back-buffer is presented. It also
+        # owns the once-per-frame world_frame counter used by pickup
+        # registration. Keep this out of normal builds: even a fast-skipped
+        # page-flip hook is a global frame hot path, and the full overlay loop
+        # is an authoring diagnostic.
+        patches.append(
+            RelocationPatch(
+                'sub_5693A0 waypoint overlay', 'jmp', ax.S5693A0_VA,
+                ax.S5693A0_PROLOGUE, 'detour_5693A0_va', 5,
+            )
+        )
+
+    if pickup_runtime_enabled:
         # Per-pickup self-registration: detours the CPickupAI per-frame update
         # so each live pickup records its world position into pickup_table.
         # The detour re-runs the displaced 8-byte prologue (EBX = entity) then
-        # appends the position; the body fast-skips when
-        # cfg.PICKUP_REGISTER_ENABLED is False. See detours/pickup_register.py.
-        RelocationPatch(
-            'sub_53DA40 pickup registration', 'jmp', ax.S53DA40_VA,
-            ax.S53DA40_PROLOGUE, 'detour_53DA40_va', 8,
-        ),
+        # appends the position. This function runs once per pickup every frame,
+        # so install it only for pickup-divert/diagnostic builds.
+        patches.append(
+            RelocationPatch(
+                'sub_53DA40 pickup registration', 'jmp', ax.S53DA40_VA,
+                ax.S53DA40_PROLOGUE, 'detour_53DA40_va', 8,
+            )
+        )
+
+    patches.extend([
         # Inline NULL-guard for sub_4FC8A0 (the positional-sound dispatch
         # wrapper). The function does `mov ecx, [ecx+0x48]; call sub_4EA880`
         # — when called on a synthetic-DP bot whose audio emitter at +0x48
@@ -110,7 +125,8 @@ def build_enabled_patches():
                 b'\xC2\x04\x00'          # ret 4
             ),
         ),
-    )
+    ])
+    return tuple(patches)
 
 
 def apply_patches(image, patches, targets):

@@ -234,6 +234,31 @@ CDAMAGE_RADIUS_AI_ACCESSOR_VA = 0x4764A0  # () -> dword_6BD74C (lazy init)
 # wander retarget. Source: sub_48C380 (CEntityDestructable schema init).
 CHAR_CUR_DAMAGE_OFF = 0x7C
 
+# --- Plasma "Plasma Ground" lava system (CPlasmaTileMap) -------------------
+# Lava on molten maps is a CPlasmaTileMap: a 64px tile grid with two embedded
+# 2D grids sharing a bounds-checked element getter at vtable offset +0xD8
+# (index 54), __thiscall(grid, tileX, tileY) -> byte, callee-clean (ret 8).
+# Out-of-range / negative tile coords return 0 (= not plasma), so no clamp is
+# needed. The CPlasmaTileMap object's first dword is its vtable address
+# (off_5FCD98), which scan_plasma uses to VALIDATE a candidate pointer before
+# trusting it (the live-layer field offset is otherwise ambiguous; see below).
+# Sources: sub_53F490 (ctor, *this=&off_5FCD98), sub_540000/sub_5405E0/
+# sub_540640 (tile = world/tilepx, footprint/heat getter), sub_480E90
+# (footprint getter, ret 8 confirmed), sub_4F4AE0/sub_4E69F0/sub_4E8900
+# (layer holds the plasma map at +0x7C live / +0x40 on the render/save object).
+CPLASMA_TILEMAP_VTBL_VA = 0x5FCD98   # off_5FCD98: CPlasmaTileMap vtable; *(plasma+0)==this
+CPLASMA_FOOTPRINT_OFF   = 0x08       # embedded static "is plasma ground" grid (vtable off_5F162C)
+CPLASMA_HEAT_OFF        = 0x2C6C     # embedded dynamic heat/elevation grid (vtable off_5F4814)
+CPLASMA_TILEPX_W_OFF    = 0x2D04     # u32 tile width  px (==64)
+CPLASMA_TILEPX_H_OFF    = 0x2D08     # u32 tile height px (==64)
+CPLASMA_TILECNT_W_OFF   = 0x2D0C     # u32 tiles across
+CPLASMA_TILECNT_H_OFF   = 0x2D10     # u32 tiles down
+CPLASMA_GRID_GETTER_VOFF = 0xD8      # vtable[54]: __thiscall(grid, tx, ty) -> byte (ret 8)
+# Candidate offsets of the plasma-map pointer on the active CLayer (mgr+0x2BC[0]).
+# scan_plasma tries A then B and validates each by the vtable check above.
+LAYER_PLASMA_MAP_OFF_A  = 0x7C       # live CLayer field (sub_4F4AE0 a1[31])
+LAYER_PLASMA_MAP_OFF_B  = 0x40       # render/save-data field (sub_4E69F0/sub_4E8900)
+
 # --- operator new / delete (used by mgr+0x290 pre-grow) --------------------
 OP_NEW_VA     = 0x5D034A   # __cdecl operator new(size_t) -> ptr in eax
 OP_DELETE_VA  = 0x5D0330   # __cdecl operator delete(ptr)

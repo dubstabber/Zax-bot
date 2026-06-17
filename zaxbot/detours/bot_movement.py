@@ -116,6 +116,11 @@ WP_SLIDE_TURN_CAP = 12
 # direction) so each candidate heading is held long enough to actually move.
 WP_SLIDE_SWEEP_MASK = 3
 
+# Proactive lava veto: max candidate headings tried in one frame when the
+# emitted heading would step into lava. The veto rotates by cfg.LAVA_SWEEP_STEP
+# per try until a lava-clear heading is found; 12 * 30deg = a full circle.
+LAVA_SWEEP_COUNT = 12
+
 
 def emit(a: Asm, layout: ScratchLayout) -> None:
     """Assemble ``detour_542360`` as one contiguous body.
@@ -126,10 +131,12 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     re-establishing the byte-identity baseline."""
     _emit_identify_and_setup(a, layout)
     _emit_stuck_detection(a, layout)
+    _emit_reactive_lava_flee(a, layout)
     _emit_pickup_divert(a, layout)
     _emit_waypoint_follow(a, layout)
     _emit_normalize_and_emit(a, layout)
     _emit_wall_slide(a, layout)
+    _emit_plasma_veto(a, layout)
     _emit_dead_and_zero_return(a, layout)
     _emit_normal_fallthrough(a)
 
@@ -197,6 +204,7 @@ def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(pickup_div_active_va) + le32(0))      # drop any pickup divert
     a.raw(b'\xC7\x04\x8D' + le32(pickup_cd_va) + le32(0))             # clear divert cooldown
     a.raw(b'\xC7\x04\x8D' + le32(bot_last_damage_va) + le32(0))        # reset cur_damage tracker
+    a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_wander_ticks')) + le32(0))  # reset lava-flee countdown
     a.raw(b'\x89\x14\x8D' + le32(bot_last_char_va))       # bot_last_char[slot] = edx
     a.label('s542360_char_same')
 
@@ -238,6 +246,105 @@ def _emit_stuck_detection(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x89\x04\x8D' + le32(last_x_va))
     a.raw(b'\xA1' + le32(bot_pos_va + 4))
     a.raw(b'\x89\x04\x8D' + le32(last_y_va))
+
+
+def _emit_reactive_lava_flee(a: Asm, layout: ScratchLayout) -> None:
+    """Reactive hazard response, keyed off HEALTH damage (Cur Damage at
+    char+0x7C rising — shield is bypassed by lava, and is gone by the time a
+    shield-first barrier finally chips health). The response depends on whether
+    the bot is making waypoint progress:
+
+      * NOT progressing (``wp_try >= WP_SLIDE_TRIGGER_FRAMES``) => the bot is
+        wedged against an impassable damaging barrier it can't get past (e.g. the
+        energy-bar gates the bot can't slip between). REROUTE: retreat to the
+        previous (safe) node and let ``wp_advance`` pick a different neighbour,
+        so the bot goes AROUND instead of grinding the barrier to death. (Pure
+        reverse would just oscillate it back into the barrier.)
+      * progressing (open hazard the bot walks across, e.g. lava) => arm a short
+        REVERSE window; ``_emit_normalize_and_emit`` flips the heading so the bot
+        backs off the way it came, then resumes following.
+
+    Either way it abandons any pickup divert + arms its cooldown, and it is the
+    single owner of the per-bot ``bot_last_damage`` tracker. The reverse countdown
+    reuses the dormant ``bot_wander_ticks`` field. ``ecx`` = slot. Falls through
+    to the pickup-divert stage."""
+    bot_slot_tmp_va           = layout.va('bot_slot_tmp')
+    bot_char_tmp_va           = layout.va('bot_char_tmp')
+    bot_last_damage_va        = layout.va('bot_last_damage')
+    flee_counter_va           = layout.va('bot_wander_ticks')   # repurposed: reverse countdown
+    flee_enabled_va           = layout.va('lava_flee_enabled')
+    flee_frames_va            = layout.va('lava_flee_frames')
+    pickup_div_active_va      = layout.va('pickup_div_active')
+    pickup_cd_va              = layout.va('pickup_cd')
+    pickup_cooldown_frames_va = layout.va('pickup_cooldown_frames')
+    wp_try_va                 = layout.va('bot_wp_try')
+    current_wp_va             = layout.va('bot_current_wp')
+    prev_wp_va                = layout.va('bot_prev_wp')
+    wp_best_dsq_va            = layout.va('bot_pickup_y_cache')  # min dsq-to-node
+    slide_turn_va             = layout.va('bot_flee_ticks')      # wall-slide ramp
+
+    a.raw(b'\x83\x3D' + le32(flee_enabled_va) + b'\x00')  # cmp [lava_flee_enabled], 0
+    a.jz('s542360_flee_done')
+    a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
+    # Tick the flee countdown down every frame.
+    a.raw(b'\x8B\x04\x8D' + le32(flee_counter_va))        # eax = flee_counter[slot]
+    a.raw(b'\x85\xC0'); a.jz('s542360_flee_tick0')
+    a.raw(b'\x48')                                        # dec eax
+    a.raw(b'\x89\x04\x8D' + le32(flee_counter_va))        # flee_counter[slot] = eax
+    a.label('s542360_flee_tick0')
+    # While a reverse flee is active, hold wp_try low and best_dsq fresh so the
+    # follower's progress watchdog and wall-slide don't read the intentional
+    # backward motion as "stuck" and reroute the bot back into the lava.
+    a.raw(b'\x8B\x04\x8D' + le32(flee_counter_va))        # eax = flee_counter[slot]
+    a.raw(b'\x85\xC0'); a.jz('s542360_flee_noreset')
+    a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))               # wp_try = 0
+    a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # best_dsq = FLT_MAX
+    a.label('s542360_flee_noreset')
+    # Health damage this frame? cur_damage(+0x7C) is a non-negative float; raw
+    # bits compare as unsigned ints (monotonic for >= 0). ecx still = slot.
+    a.raw(b'\xA1' + le32(bot_char_tmp_va))                # eax = bot char ptr
+    a.raw(b'\x8B\x40' + bytes([ax.CHAR_CUR_DAMAGE_OFF]))  # eax = [char+0x7C] cur_damage bits
+    a.raw(b'\x8B\x14\x8D' + le32(bot_last_damage_va))     # edx = bot_last_damage[slot] (prev)
+    a.raw(b'\x89\x04\x8D' + le32(bot_last_damage_va))     # bot_last_damage[slot] = cur
+    a.raw(b'\x39\xD0')                                    # cmp eax, edx
+    a.jbe('s542360_flee_done')                            # cur <= prev -> no new health damage
+    # Took health damage. Abandon any pickup divert + arm its cooldown first.
+    a.raw(b'\xC7\x04\x8D' + le32(pickup_div_active_va) + le32(0))  # div_active = 0
+    a.raw(b'\xA1' + le32(pickup_cooldown_frames_va))      # eax = cooldown
+    a.raw(b'\x89\x04\x8D' + le32(pickup_cd_va))           # pickup_cd[slot] = cooldown
+    # COMMIT: if a reverse flee is already active (flee_counter > 0, e.g. backing
+    # off lava), STAY in reverse and just re-arm. Don't re-evaluate: the reverse's
+    # own backward motion makes wp_try climb (no progress toward the node), and
+    # re-evaluating would then flip us into a reroute and toggle the bot back into
+    # the lava (observed: cur_damage 100, wp_try 7 about to cross 8). The
+    # reroute-vs-reverse choice is therefore made ONCE per damage episode, at the
+    # start (flee_counter == 0), using the then-uncontaminated wp_try. (A reroute
+    # leaves flee_counter == 0, so a still-blocked barrier re-reroutes each frame.)
+    a.raw(b'\x8B\x04\x8D' + le32(flee_counter_va))        # eax = flee_counter[slot]
+    a.raw(b'\x85\xC0'); a.jnz('s542360_flee_reverse')     # already reversing -> re-arm, stay reverse
+    # Blocked vs open? wp_try high => wedged against an impassable damaging
+    # barrier (energy-bar gate) => REROUTE around it; else => REVERSE (lava).
+    a.raw(b'\x8B\x04\x8D' + le32(wp_try_va))              # eax = wp_try[slot]
+    a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES])) # cmp eax, WP_SLIDE_TRIGGER (8)
+    a.jb('s542360_flee_reverse')                          # progressing -> reverse
+    a.raw(b'\x8B\x04\x8D' + le32(prev_wp_va))             # eax = prev_wp[slot]
+    a.raw(b'\x83\xF8\xFF')                                # cmp eax, -1
+    a.jz('s542360_flee_reverse')                          # not latched -> reverse fallback
+    # Reroute: retreat to the previous (safe) node. Swap current<->prev so
+    # wp_advance excludes the barrier-ward node, reset progress/slide, and cancel
+    # any reverse (we now head FORWARD to prev, away from the barrier).
+    a.raw(b'\x8B\x14\x8D' + le32(current_wp_va))          # edx = current_wp (barrier-ward node)
+    a.raw(b'\x89\x04\x8D' + le32(current_wp_va))          # current_wp = prev (safe)
+    a.raw(b'\x89\x14\x8D' + le32(prev_wp_va))             # prev_wp = old current
+    a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # best_dsq = FLT_MAX
+    a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))    # wp_try = 0
+    a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))  # slide_turn = 0
+    a.raw(b'\xC7\x04\x8D' + le32(flee_counter_va) + le32(0))  # cancel any reverse
+    a.jmp('s542360_flee_done')
+    a.label('s542360_flee_reverse')
+    a.raw(b'\xA1' + le32(flee_frames_va))                 # eax = LAVA_FLEE_FRAMES
+    a.raw(b'\x89\x04\x8D' + le32(flee_counter_va))        # flee_counter[slot] = frames
+    a.label('s542360_flee_done')
 
 
 def _emit_pickup_divert(a: Asm, layout: ScratchLayout) -> None:
@@ -285,27 +392,10 @@ def _emit_pickup_divert(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x89\x04\x8D' + le32(pickup_cd_va))           # pickup_cd[slot] = eax
     a.label('s542360_pd_cd0')
 
-    # --- Reactive lava/hazard avoidance. If the bot's accumulated damage
-    # (char+0x7C, "Cur Damage") rose since last frame, it just stepped on
-    # something harmful (lava/fire/weapon). Abandon any divert, take the
-    # cooldown, and fall through to waypoint following — whose nodes sit on
-    # authored safe ground — to walk back off the hazard. cur_damage is a
-    # non-negative float, so its raw bits compare correctly as unsigned ints
-    # (no FPU). Reuses the dormant bot_last_damage tracker; ecx = slot.
-    a.raw(b'\x83\x3D' + le32(pickup_divert_avoid_damage_va) + b'\x00')  # cmp [avoid_damage], 0
-    a.jz('s542360_pd_dmg_done')
-    a.raw(b'\xA1' + le32(bot_char_tmp_va))                # eax = bot char ptr
-    a.raw(b'\x8B\x40' + bytes([ax.CHAR_CUR_DAMAGE_OFF]))  # eax = [char+0x7C] cur_damage bits
-    a.raw(b'\x8B\x14\x8D' + le32(bot_last_damage_va))     # edx = bot_last_damage[slot] (prev)
-    a.raw(b'\x89\x04\x8D' + le32(bot_last_damage_va))     # bot_last_damage[slot] = cur
-    a.raw(b'\x39\xD0')                                    # cmp eax, edx
-    a.jbe('s542360_pd_dmg_done')                          # cur <= prev -> no new damage
-    # Took damage this frame: drop any divert + arm the cooldown, then waypoints.
-    a.raw(b'\xC7\x04\x8D' + le32(pickup_div_active_va) + le32(0))  # div_active = 0
-    a.raw(b'\xA1' + le32(pickup_cooldown_frames_va))      # eax = cooldown
-    a.raw(b'\x89\x04\x8D' + le32(pickup_cd_va))           # pickup_cd[slot] = cooldown
-    a.jmp('s542360_pd_skip')                              # follow the graph off the hazard
-    a.label('s542360_pd_dmg_done')
+    # (The reactive cur_damage check moved to _emit_reactive_lava_flee, which
+    # runs before this stage, owns the bot_last_damage tracker, drops any active
+    # divert + arms this cooldown on health damage, and is not gated by
+    # pickup_divert_enabled so it works even with diverts off.)
 
     # Already diverting? -> maintain it.
     a.raw(b'\x8B\x04\x8D' + le32(pickup_div_active_va))   # eax = div_active[slot]
@@ -431,6 +521,11 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     overlay_vertex_count_va = layout.va('overlay_vertex_count')
     overlay_vertices_va     = layout.va('overlay_vertices')
     wp_scratch_va           = layout.va('wp_scratch')
+    edge_follow_enabled_va  = layout.va('wp_edge_follow_enabled')
+    edge_lookahead_va       = layout.va('wp_edge_lookahead')
+    wp_seg_x_va             = layout.va('wp_seg_x')
+    wp_seg_y_va             = layout.va('wp_seg_y')
+    wp_tp_va                = layout.va('wp_tp')
 
     dx_accum_va = layout.va('curr_dist_sq')
     dy_accum_va = layout.va('cand_tmp')
@@ -565,8 +660,61 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     # fall through to steer toward the (new) current node
 
     a.label('s542360_wp_steer')
-    # Pure node-to-node: desired = node - bot. The wall-slide post-step deflects
-    # the emitted ANGLE if this heading is wedged against geometry.
+    # Edge-following: when latched + enabled, steer toward a look-ahead point ON
+    # the prev->current segment so the bot hugs the connection line (vital on
+    # narrow lava corridors) instead of cutting diagonally after any drift. Else
+    # (not latched / disabled / degenerate segment) steer straight at the node.
+    # The wall-slide post-step still deflects the ANGLE if wedged against geometry.
+    a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
+    a.raw(b'\x83\x3D' + le32(edge_follow_enabled_va) + b'\x00')  # cmp [edge_follow_enabled], 0
+    a.jz('s542360_wp_steer_node')
+    a.raw(b'\x8B\x04\x8D' + le32(prev_wp_va))             # eax = prev_wp[slot]
+    a.raw(b'\x83\xF8\xFF')                                # cmp eax, -1
+    a.jz('s542360_wp_steer_node')                         # not latched -> node-only
+    a.raw(b'\x8D\x34\xC5' + le32(overlay_vertices_va))    # esi = &verts[prev] (P)
+    a.raw(b'\x8B\x04\x8D' + le32(current_wp_va))          # eax = cur
+    a.raw(b'\x8D\x3C\xC5' + le32(overlay_vertices_va))    # edi = &verts[cur]  (C)
+    # seg = C - P
+    a.raw(b'\xD9\x07'); a.raw(b'\xD8\x26'); a.raw(b'\xD9\x1D' + le32(wp_seg_x_va))           # seg_x = C.x - P.x
+    a.raw(b'\xD9\x47\x04'); a.raw(b'\xD8\x66\x04'); a.raw(b'\xD9\x1D' + le32(wp_seg_y_va))   # seg_y = C.y - P.y
+    # seglen2 = seg_x^2 + seg_y^2
+    a.raw(b'\xD9\x05' + le32(wp_seg_x_va)); a.raw(b'\xD8\xC8')   # fld seg_x; fmul st,st
+    a.raw(b'\xD9\x05' + le32(wp_seg_y_va)); a.raw(b'\xD8\xC8')   # fld seg_y; fmul st,st
+    a.raw(b'\xDE\xC1')                                    # faddp -> ST0 = seglen2
+    a.raw(b'\xD9\xEE')                                    # fldz (ST0=0, ST1=seglen2)
+    a.raw(b'\xDF\xF1')                                    # fcomip st0,st1 (pop 0); CF=1 iff 0<seglen2
+    a.jae('s542360_wp_steer_node_pop')                    # 0>=seglen2 -> degenerate (pop seglen2)
+    # dot = (B-P).seg   (ST0=seglen2 throughout)
+    a.raw(b'\xD9\x05' + le32(bot_pos_va)); a.raw(b'\xD8\x26'); a.raw(b'\xD8\x0D' + le32(wp_seg_x_va))      # (B.x-P.x)*seg_x
+    a.raw(b'\xD9\x05' + le32(bot_pos_va + 4)); a.raw(b'\xD8\x66\x04'); a.raw(b'\xD8\x0D' + le32(wp_seg_y_va))  # (B.y-P.y)*seg_y
+    a.raw(b'\xDE\xC1')                                    # faddp -> ST0=dot, ST1=seglen2
+    a.raw(b'\xDE\xF1')                                    # fdivrp st1,st0 -> ST0 = dot/seglen2 = t
+    a.raw(b'\xD8\x05' + le32(edge_lookahead_va))          # fadd lookahead_frac -> ST0 = tp
+    # clamp tp to [0, 1]: upper
+    a.raw(b'\xD9\xE8')                                    # fld1 (ST0=1, ST1=tp)
+    a.raw(b'\xDF\xF1')                                    # fcomip st0,st1 (pop 1); CF=1 iff 1<tp
+    a.jae('s542360_wp_tp_no_hi')                          # 1>=tp -> no upper clamp
+    a.raw(b'\xDD\xD8'); a.raw(b'\xD9\xE8')                # fstp st0 (drop tp); fld1 (tp=1)
+    a.label('s542360_wp_tp_no_hi')
+    a.raw(b'\xD9\xEE')                                    # fldz (ST0=0, ST1=tp)
+    a.raw(b'\xDF\xF1')                                    # fcomip st0,st1 (pop 0); CF=1 iff 0<tp
+    a.jb('s542360_wp_tp_no_lo')                           # 0<tp -> no lower clamp
+    a.raw(b'\xDD\xD8'); a.raw(b'\xD9\xEE')                # fstp st0 (drop tp); fldz (tp=0)
+    a.label('s542360_wp_tp_no_lo')
+    a.raw(b'\xD9\x1D' + le32(wp_tp_va))                   # fstp tp
+    # desired = (P + tp*seg) - B
+    a.raw(b'\xD9\x05' + le32(wp_tp_va)); a.raw(b'\xD8\x0D' + le32(wp_seg_x_va))    # fld tp; fmul seg_x
+    a.raw(b'\xD8\x06'); a.raw(b'\xD8\x25' + le32(bot_pos_va))                      # fadd [esi] (P.x); fsub bot.x
+    a.raw(b'\xD9\x1D' + le32(dx_accum_va))                # fstp dx_accum
+    a.raw(b'\xD9\x05' + le32(wp_tp_va)); a.raw(b'\xD8\x0D' + le32(wp_seg_y_va))    # fld tp; fmul seg_y
+    a.raw(b'\xD8\x46\x04'); a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))              # fadd [esi+4] (P.y); fsub bot.y
+    a.raw(b'\xD9\x1D' + le32(dy_accum_va))                # fstp dy_accum
+    a.jmp('s542360_emit')
+
+    a.label('s542360_wp_steer_node_pop')
+    a.raw(b'\xDD\xD8')                                    # fstp st0 (pop seglen2)
+    a.label('s542360_wp_steer_node')
+    # Straight-at-node fallback: desired = node - bot.
     a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
     a.raw(b'\x8B\x04\x8D' + le32(current_wp_va))          # eax = cur
     a.raw(b'\x8D\x14\xC5' + le32(overlay_vertices_va))    # lea edx, [eax*8 + verts]
@@ -593,9 +741,23 @@ def _emit_normalize_and_emit(a: Asm, layout: ScratchLayout) -> None:
     bot_move_speed_va = layout.va('bot_move_speed')
     dx_accum_va = layout.va('curr_dist_sq')
     dy_accum_va = layout.va('cand_tmp')
+    bot_slot_tmp_va = layout.va('bot_slot_tmp')
+    flee_counter_va = layout.va('bot_wander_ticks')       # reactive lava-flee countdown
 
     # --- Normalize to BOT_MOVE_SPEED and emit velocity + angle --------------
     a.label('s542360_emit')
+    # Reactive lava flee: while the flee window is armed (health damage taken,
+    # see _emit_reactive_lava_flee), REVERSE the desired vector so the bot heads
+    # back off the lava the way it came. Flipping the float sign bits negates
+    # (dx, dy) without touching the magnitude, so the existing normalize + atan2
+    # below still pick the right speed tier and a 180deg-rotated heading. A zero
+    # vector stays zero (handled by the degenerate path).
+    a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
+    a.raw(b'\x8B\x04\x8D' + le32(flee_counter_va))        # eax = flee_counter[slot]
+    a.raw(b'\x85\xC0'); a.jz('s542360_emit_noflee')
+    a.raw(b'\x81\x35' + le32(dx_accum_va) + le32(0x80000000))  # xor [dx], sign -> negate
+    a.raw(b'\x81\x35' + le32(dy_accum_va) + le32(0x80000000))  # xor [dy], sign -> negate
+    a.label('s542360_emit_noflee')
     a.raw(b'\xD9\x05' + le32(dx_accum_va))                # fld dx
     a.raw(b'\xD8\xC8')                                    # fmul st,st
     a.raw(b'\xD9\x05' + le32(dy_accum_va))                # fld dy
@@ -716,7 +878,7 @@ def _emit_wall_slide(a: Asm, layout: ScratchLayout) -> None:
     a.label('s542360_ws_have_turn')
 
     a.raw(b'\x8B\x04\x8D' + le32(slide_turn_va))          # eax = slide_turn[slot]
-    a.raw(b'\x85\xC0'); a.jz('s542360_ret')               # no deflection
+    a.raw(b'\x85\xC0'); a.jz('s542360_plasma_veto')       # no deflection -> lava veto
     a.raw(b'\x8B\x54\x24\x28')                            # edx = out_angle (esp+0x28)
     a.raw(b'\x85\xD2'); a.jz('s542360_ret')               # no angle slot
     # angle += slide_turn * WP_SLIDE_TURN_STEP (engine uses cos/sin, no wrap
@@ -727,6 +889,80 @@ def _emit_wall_slide(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xD8\x0D' + le32(wp_slide_turn_step_va))      # fmul step -> deflection
     a.raw(b'\xD8\x02')                                    # fadd dword [edx]  (angle)
     a.raw(b'\xD9\x1A')                                    # fstp dword [edx]  (store angle)
+    a.jmp('s542360_plasma_veto')
+
+
+def _emit_plasma_veto(a: Asm, layout: ScratchLayout) -> None:
+    """Proactive lava veto — the "lava is a virtual wall" step. Runs AFTER the
+    wall-slide finalizes the emitted angle. Samples the plasma HEAT grid
+    ``cfg.LAVA_LOOKAHEAD_PX`` ahead along that heading; if it would step into
+    lava (``is_plasma_at``), rotates the emitted angle by ``cfg.LAVA_SWEEP_STEP``
+    per try (up to a full circle) until a lava-clear heading is found and
+    rewrites ``[esp+0x28]``. A no-op when disabled, on non-plasma maps
+    (``plasma_map == 0``), or when there's no angle slot. If every heading is
+    blocked it keeps the base angle and the reactive ``char+0x7C`` flee fallback
+    catches the contact. Registers are popad-restored at ``s542360_ret`` so the
+    eax/ecx/edx clobber from ``is_plasma_at`` is irrelevant; FPU stays balanced.
+
+    Wall-slide vs lava: the wall-slide rotates to escape *geometry* (it can't
+    test geometry in-frame, so it sweeps over frames via wp_try); this veto
+    rotates to escape *lava* (which it CAN test in-frame via the heat grid). A
+    lava-clear heading is almost always also wall-clear (lava isn't geometry),
+    so they rarely fight; the wp_try watchdog resolves the rare conflict."""
+    bot_pos_va            = layout.va('bot_pos')
+    plasma_map_va         = layout.va('plasma_map')
+    plasma_qx_va          = layout.va('plasma_qx')
+    plasma_qy_va          = layout.va('plasma_qy')
+    lava_avoid_enabled_va = layout.va('lava_avoid_enabled')
+    lava_lookahead_px_va  = layout.va('lava_lookahead_px')
+    lava_sweep_step_va    = layout.va('lava_sweep_step')
+    veto_angle_va         = layout.va('lava_veto_angle')
+    veto_cos_va           = layout.va('lava_veto_cos')
+    veto_sin_va           = layout.va('lava_veto_sin')
+    lava_k_va             = layout.va('lava_k')
+
+    a.label('s542360_plasma_veto')
+    a.raw(b'\x83\x3D' + le32(lava_avoid_enabled_va) + b'\x00')  # cmp [lava_avoid_enabled], 0
+    a.jz('s542360_ret')
+    a.raw(b'\x83\x3D' + le32(plasma_map_va) + b'\x00')          # cmp [plasma_map], 0
+    a.jz('s542360_ret')                                         # non-plasma map -> no-op
+    a.raw(b'\x8B\x54\x24\x28')                                  # edx = out_angle ptr (esp+0x28)
+    a.raw(b'\x85\xD2'); a.jz('s542360_ret')                     # no angle slot
+    a.raw(b'\x8B\x02')                                          # eax = [edx] base angle bits
+    a.raw(b'\xA3' + le32(veto_angle_va))                        # veto_angle = base heading
+    a.raw(b'\xC7\x05' + le32(lava_k_va) + le32(0))             # lava_k = 0
+
+    a.label('s542360_pv_loop')
+    # cos/sin of the candidate heading.
+    a.raw(b'\xD9\x05' + le32(veto_angle_va))                    # fld veto_angle
+    a.raw(b'\xD9\xFB')                                          # fsincos -> ST0=cos, ST1=sin
+    a.raw(b'\xD9\x1D' + le32(veto_cos_va))                      # fstp veto_cos (-> ST0=sin)
+    a.raw(b'\xD9\x1D' + le32(veto_sin_va))                      # fstp veto_sin (-> empty)
+    # qx = (int)(bot.x + look*cos)
+    a.raw(b'\xD9\x05' + le32(lava_lookahead_px_va))             # fld look
+    a.raw(b'\xD8\x0D' + le32(veto_cos_va))                      # fmul cos
+    a.raw(b'\xD8\x05' + le32(bot_pos_va))                       # fadd bot.x
+    a.raw(b'\xDB\x1D' + le32(plasma_qx_va))                     # fistp plasma_qx
+    # qy = (int)(bot.y + look*sin)
+    a.raw(b'\xD9\x05' + le32(lava_lookahead_px_va))             # fld look
+    a.raw(b'\xD8\x0D' + le32(veto_sin_va))                      # fmul sin
+    a.raw(b'\xD8\x05' + le32(bot_pos_va + 4))                   # fadd bot.y
+    a.raw(b'\xDB\x1D' + le32(plasma_qy_va))                     # fistp plasma_qy
+    a.call_lbl('is_plasma_at')                                  # eax = 1 if lava ahead
+    a.raw(b'\x85\xC0'); a.jz('s542360_pv_found')                # lava-clear -> use veto_angle
+    # Blocked: rotate by the sweep step and try again, up to a full circle.
+    a.raw(b'\xD9\x05' + le32(veto_angle_va))                    # fld veto_angle
+    a.raw(b'\xD8\x05' + le32(lava_sweep_step_va))               # fadd sweep_step
+    a.raw(b'\xD9\x1D' + le32(veto_angle_va))                    # fstp veto_angle
+    a.raw(b'\xFF\x05' + le32(lava_k_va))                        # ++lava_k
+    a.raw(b'\x83\x3D' + le32(lava_k_va) + bytes([LAVA_SWEEP_COUNT]))  # cmp [lava_k], COUNT
+    a.jb('s542360_pv_loop')
+    a.jmp('s542360_ret')                                        # all blocked -> keep base angle
+
+    a.label('s542360_pv_found')
+    a.raw(b'\x8B\x54\x24\x28')                                  # edx = out_angle ptr
+    a.raw(b'\xA1' + le32(veto_angle_va))                        # eax = chosen angle bits
+    a.raw(b'\x89\x02')                                          # [edx] = chosen heading
     a.jmp('s542360_ret')
 
 

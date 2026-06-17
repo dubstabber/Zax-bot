@@ -177,6 +177,7 @@ def build_hook(section_va_abs):
         wp_follow_enabled=cfg.WP_FOLLOW_ENABLED,
         wp_reached_radius_sq=cfg.WP_REACHED_RADIUS_SQ,
         wp_edge_lookahead=cfg.WP_EDGE_LOOKAHEAD,
+        wp_edge_follow_enabled=cfg.WP_EDGE_FOLLOW_ENABLED,
         wp_progress_timeout_frames=cfg.WP_PROGRESS_TIMEOUT_FRAMES,
         wp_relocate_frames=cfg.WP_RELOCATE_FRAMES,
         wp_slide_turn_step_deg=cfg.WP_SLIDE_TURN_STEP_DEG,
@@ -199,6 +200,12 @@ def build_hook(section_va_abs):
         wp_snap_radius_sq=cfg.WP_SNAP_RADIUS_SQ,
         wp_dir_name=cfg.WP_DIR,
         wp_file_suffix=cfg.WP_FILE_SUFFIX,
+        lava_avoid_enabled=cfg.LAVA_AVOID_ENABLED,
+        lava_heat_threshold=cfg.LAVA_HEAT_THRESHOLD,
+        lava_lookahead_px=cfg.LAVA_LOOKAHEAD_PX,
+        lava_sweep_step_deg=cfg.LAVA_SWEEP_STEP_DEG,
+        lava_flee_enabled=cfg.LAVA_FLEE_ENABLED,
+        lava_flee_frames=cfg.LAVA_FLEE_FRAMES,
     )
 
     info = {

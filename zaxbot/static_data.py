@@ -34,6 +34,8 @@ DUMP_TAGS = (
     ('tag_wp_lv',   'wp_lv'),
     ('tag_wp_lay',  'wp_lay'),
     ('tag_wp_map',  'wp_map'),
+    ('tag_plasma_diag', 'plasma'),
+    ('tag_pheat', 'pheat'),
 )
 
 
@@ -119,6 +121,7 @@ def write_static_scratch_data(
     wp_follow_enabled=True,
     wp_reached_radius_sq=4096.0,
     wp_edge_lookahead=0.15,
+    wp_edge_follow_enabled=True,
     wp_progress_timeout_frames=150,
     wp_relocate_frames=150,
     wp_slide_turn_step_deg=30.0,
@@ -141,6 +144,12 @@ def write_static_scratch_data(
     wp_snap_radius_sq=576.0,
     wp_dir_name=b'waypoints',
     wp_file_suffix=b'.zwpt',
+    lava_avoid_enabled=True,
+    lava_heat_threshold=128,
+    lava_lookahead_px=48.0,
+    lava_sweep_step_deg=30.0,
+    lava_flee_enabled=True,
+    lava_flee_frames=15,
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
     # meaningful — "spawn one bot"); CTF is the only team mode and accepts
@@ -273,6 +282,8 @@ def write_static_scratch_data(
                  struct.pack('<f', wp_reached_radius_sq))
     layout.write(section, scratch_off, 'wp_edge_lookahead',
                  struct.pack('<f', wp_edge_lookahead))
+    layout.write(section, scratch_off, 'wp_edge_follow_enabled',
+                 struct.pack('<I', 1 if wp_edge_follow_enabled else 0))
     layout.write(section, scratch_off, 'wp_progress_timeout',
                  struct.pack('<I', wp_progress_timeout_frames))
     layout.write(section, scratch_off, 'wp_relocate_frames',
@@ -280,6 +291,19 @@ def write_static_scratch_data(
     # Wall-slide angle step, packed as radians for the movement detour's fadd.
     layout.write(section, scratch_off, 'wp_slide_turn_step',
                  struct.pack('<f', math.radians(wp_slide_turn_step_deg)))
+    # Proactive lava-avoidance knobs.
+    layout.write(section, scratch_off, 'lava_avoid_enabled',
+                 struct.pack('<I', 1 if lava_avoid_enabled else 0))
+    layout.write(section, scratch_off, 'lava_heat_threshold',
+                 struct.pack('<I', lava_heat_threshold))
+    layout.write(section, scratch_off, 'lava_lookahead_px',
+                 struct.pack('<f', lava_lookahead_px))
+    layout.write(section, scratch_off, 'lava_sweep_step',
+                 struct.pack('<f', math.radians(lava_sweep_step_deg)))
+    layout.write(section, scratch_off, 'lava_flee_enabled',
+                 struct.pack('<I', 1 if lava_flee_enabled else 0))
+    layout.write(section, scratch_off, 'lava_flee_frames',
+                 struct.pack('<I', lava_flee_frames))
 
     # --- Waypoint overlay --------------------------------------------------
     # Pack vertex / edge tables into scratch. Both colors are stored RAW

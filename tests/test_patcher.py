@@ -191,6 +191,8 @@ class PatcherTests(unittest.TestCase):
     def test_patch_manifest_names_and_targets_are_valid(self):
         names = [patch.name for patch in zax_patch.ENABLED_PATCHES]
         self.assertEqual(len(names), len(set(names)))
+        self.assertNotIn('sub_5693A0 waypoint overlay', names)
+        self.assertNotIn('sub_53DA40 pickup registration', names)
 
         _, info = zax_patch.build_hook(zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA)
         for patch in zax_patch.ENABLED_PATCHES:
@@ -298,8 +300,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '3b55f9cc1685aa08d078af94f5a78e2e34d2b9b930ada2a4f6de1ed6846f41e5'
-    HOOK_ENTRY_SIZE = 13785
+    SECTION_SHA256 = '76366ab9f6a5e2935fe55bad11886c4cf97010803ede3ddaee74fdc1740d6f7c'
+    HOOK_ENTRY_SIZE = 15703
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

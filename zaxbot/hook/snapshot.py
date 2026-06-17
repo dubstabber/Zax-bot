@@ -62,6 +62,21 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     tag_wp_lay_va         = layout.va('tag_wp_lay')
     tag_wp_map_va         = layout.va('tag_wp_map')
     wp_diag_data_va       = layout.va('wp_diag_data')
+    tag_plasma_diag_va    = layout.va('tag_plasma_diag')
+    plasma_map_va         = layout.va('plasma_map')
+    plasma_diag_va        = layout.va('plasma_diag')
+    plasma_qx_va          = layout.va('plasma_qx')
+    plasma_qy_va          = layout.va('plasma_qy')
+    plasma_tx_va          = layout.va('plasma_tx')
+    plasma_ty_va          = layout.va('plasma_ty')
+    plasma_grid_va        = layout.va('plasma_grid')
+    plasma_cn_count_va    = layout.va('plasma_cn_count')
+    plasma_cn_max_va      = layout.va('plasma_cn_max')
+    plasma_cn_first_va    = layout.va('plasma_cn_first')
+    lava_dbg_heat_va      = layout.va('lava_dbg_heat')
+    tag_pheat_va          = layout.va('tag_pheat')
+    plasma_heatmap_va     = layout.va('plasma_heatmap')
+    plasma_bot_pos_va     = layout.va('bot_pos')
     primary_hash_va    = layout.va('primary_hash')
     host_weapon_obj_va = layout.va('host_weapon_obj')
     host_proto_va_va   = layout.va('host_proto_va')
@@ -186,6 +201,73 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # can confirm the vtable matches 0x5FC760 and read the two CList
     # counts to learn whether the map has any polygons/nodes.
     emit_chunk(tag_wp_map_va,  b'\xA1' + le32(wp_diag_data_va + 0x1C),  0x40,  'snap_skip_wp_map')
+
+    # --- Plasma (lava) detection pin. scan_plasma (run per match by detour_df90)
+    # has already filled plasma_diag[0..6] with LAY, both raw candidate pointers,
+    # the vtable-validated plasma map, and tilepx/tw/th. Here we additionally
+    # sample the static footprint at the HOST's position via is_plasma_at — this
+    # exercises the engine grid getter (the M2 hot-path call) in the safe R-key
+    # context and records host_x/y, host_tx/ty and the footprint byte into
+    # plasma_diag[7..11]. Stand the host on lava and press R: diag[11] should be
+    # nonzero on lava and zero on safe ground; diag[3] (chosen) tells which layer
+    # field (diag[1]=+0x7C vs diag[2]=+0x40) held the real CPlasmaTileMap.
+    # ebx (= hFile) is preserved: is_plasma_at clobbers only eax/ecx/edx and the
+    # engine getters preserve ebx.
+    a.raw(b'\x83\x3D' + le32(plasma_map_va) + b'\x00')        # cmp [plasma_map], 0
+    a.jz('snap_plasma_emit')
+    a.raw(b'\xA1' + le32(ax.WORLDMGR_GLOBAL))                 # eax = worldmgr
+    a.raw(b'\x85\xC0'); a.jz('snap_plasma_emit')
+    a.raw(b'\x8B\x80\x90\x02\x00\x00')                        # eax = [eax+0x290] charArray
+    a.raw(b'\x85\xC0'); a.jz('snap_plasma_emit')
+    a.raw(b'\x8B\x08')                                        # ecx = charArray[0] (host)
+    a.raw(b'\x85\xC9'); a.jz('snap_plasma_emit')
+    a.raw(b'\x81\xF9\x00\x00\x10\x00')                        # cmp ecx, 0x100000 (heap)
+    a.jb('snap_plasma_emit')
+    a.raw(b'\x68' + le32(plasma_bot_pos_va))                  # push &bot_pos
+    a.call_va(ax.SUB_4FB0A0_VA)                               # __thiscall, ret 4 (writes float x,y)
+    # float pos -> int world coords (round-to-nearest is fine for the pin).
+    a.raw(b'\xD9\x05' + le32(plasma_bot_pos_va))              # fld  [bot_pos.x]
+    a.raw(b'\xDB\x1D' + le32(plasma_qx_va))                   # fistp [plasma_qx]
+    a.raw(b'\xD9\x05' + le32(plasma_bot_pos_va + 4))          # fld  [bot_pos.y]
+    a.raw(b'\xDB\x1D' + le32(plasma_qy_va))                   # fistp [plasma_qy]
+    a.raw(b'\xA1' + le32(plasma_qx_va))                       # diag[7] = host_x
+    a.raw(b'\xA3' + le32(plasma_diag_va + 0x1C))
+    a.raw(b'\xA1' + le32(plasma_qy_va))                       # diag[8] = host_y
+    a.raw(b'\xA3' + le32(plasma_diag_va + 0x20))
+    a.call_lbl('is_plasma_at')                                # eax = 0/1; sets plasma_tx/ty
+    a.raw(b'\xA3' + le32(plasma_diag_va + 0x2C))              # diag[11] = is_plasma_at@host
+    a.raw(b'\xA1' + le32(lava_dbg_heat_va))                  # diag[19] = heat is_plasma_at read (post-warm)
+    a.raw(b'\xA3' + le32(plasma_diag_va + 0x4C))
+    a.raw(b'\xA1' + le32(plasma_tx_va))                       # diag[9] = host_tx
+    a.raw(b'\xA3' + le32(plasma_diag_va + 0x24))
+    a.raw(b'\xA1' + le32(plasma_ty_va))                       # diag[10] = host_ty
+    a.raw(b'\xA3' + le32(plasma_diag_va + 0x28))
+    # heat@host: same host tile (plasma_tx/ty still set by is_plasma_at), heat grid.
+    a.raw(b'\xA1' + le32(plasma_map_va))                      # eax = plasma_map
+    a.raw(b'\x05' + le32(ax.CPLASMA_HEAT_OFF))                # add eax, 0x2C6C (heat grid)
+    a.raw(b'\xA3' + le32(plasma_grid_va))
+    a.call_lbl('plasma_get')                                  # eax = heat@host tile
+    a.raw(b'\xA3' + le32(plasma_diag_va + 0x30))              # diag[12] = heat@host
+    # Whole-grid census of the FOOTPRINT grid (plasma+0x08).
+    a.raw(b'\xA1' + le32(plasma_map_va))
+    a.raw(b'\x83\xC0' + bytes([ax.CPLASMA_FOOTPRINT_OFF]))    # add eax, 8
+    a.raw(b'\xA3' + le32(plasma_grid_va))
+    a.call_lbl('plasma_census')
+    a.raw(b'\xA1' + le32(plasma_cn_count_va)); a.raw(b'\xA3' + le32(plasma_diag_va + 0x34))  # [13] fp_count
+    a.raw(b'\xA1' + le32(plasma_cn_max_va));   a.raw(b'\xA3' + le32(plasma_diag_va + 0x3C))  # [15] fp_max
+    a.raw(b'\xA1' + le32(plasma_cn_first_va)); a.raw(b'\xA3' + le32(plasma_diag_va + 0x44))  # [17] fp_first
+    # Whole-grid census of the HEAT/Elevation grid (plasma+0x2C6C).
+    a.raw(b'\xA1' + le32(plasma_map_va))
+    a.raw(b'\x05' + le32(ax.CPLASMA_HEAT_OFF))               # add eax, 0x2C6C
+    a.raw(b'\xA3' + le32(plasma_grid_va))
+    a.call_lbl('plasma_census')
+    a.raw(b'\xA1' + le32(plasma_cn_count_va)); a.raw(b'\xA3' + le32(plasma_diag_va + 0x38))  # [14] heat_count
+    a.raw(b'\xA1' + le32(plasma_cn_max_va));   a.raw(b'\xA3' + le32(plasma_diag_va + 0x40))  # [16] heat_max
+    a.raw(b'\xA1' + le32(plasma_cn_first_va)); a.raw(b'\xA3' + le32(plasma_diag_va + 0x48))  # [18] heat_first
+    a.call_lbl('plasma_dump_heat')                            # fill plasma_heatmap (every tile)
+    a.label('snap_plasma_emit')
+    emit_chunk(tag_plasma_diag_va, b'\xB8' + le32(plasma_diag_va), 0x50, 'snap_skip_plasma_diag')
+    emit_chunk(tag_pheat_va, b'\xB8' + le32(plasma_heatmap_va), 0x800, 'snap_skip_pheat')
 
     # --- Host-side weapon lookup (diagnostic). Resolves the host's currently
     # equipped Primary weapon and stashes (item_id, weapon_obj, item_def) so

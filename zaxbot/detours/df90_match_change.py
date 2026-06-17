@@ -108,6 +108,9 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # graph). Map-name CString (`dword_713C14`) is populated by sub_4F43F0
     # before any sub_59DF90 call, so it's safe to read here.
     a.call_lbl('wp_load')
+    # Capture the active map's CPlasmaTileMap* (lava) for proactive avoidance.
+    # pushad/popad, no args/ret; self-clears plasma_map (0 on non-plasma maps).
+    a.call_lbl('scan_plasma')
     a.raw(b'\x58\x59\x5F')                        # pop eax; pop ecx; pop edi
     a.label('df90_same_match')
     a.raw(b'\xA3' + le32(cap_a2))                 # mov [cap_a2], eax

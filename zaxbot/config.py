@@ -48,8 +48,8 @@ PROJECTILE_SPEED = 10.0
 # Conversion factor applied to the engine's per-weapon raw "Move/Max
 # Velocity" field (pixels per second, schema range ~300..4000) to bring it
 # into the per-pick_target-call units apply_lead's time math expects.
-# Default 1/60 because the engine ticks at ~60Hz under Wine; if frames slow
-# down, the dt term cancels algebraically in
+# Default 1/60 because the engine main loop passes a fixed 1/60 tick; if frames
+# slow down, the dt term cancels algebraically in
 # `lead = vx*t = (real_vel*dt) * (dist/(raw*dt))`, so one tuned constant
 # covers every weapon. Calibrate empirically: spawn a bot with Missile
 # Launcher (slow projectile), watch a strafing host, halve/double until
@@ -222,19 +222,21 @@ WP_SLIDE_TURN_STEP_DEG = 30.0
 # waypoint spacing but large enough to accept collision-limited corner arrival.
 WP_REACHED_RADIUS_SQ = 4096.0
 
-# DORMANT (superseded by pure node-to-node steering + wall-slide). Retained
-# only so the scratch offsets and build wiring don't churn; the movement detour
-# no longer reads it. Bots now steer straight at the node, not at a look-ahead.
+# --- Edge following (hug the connection line) ----------------------------
+# When latched (prev->current edge known), steer toward a point ON the
+# prev->current segment instead of straight at the node, so the bot converges
+# back onto the connection line after any drift (flee, wall-slide, early node
+# advance) rather than cutting diagonally. This is critical on narrow lava
+# corridors where "a few px off the line" means stepping into lava. Set False
+# to revert to straight-at-node steering (the bot will follow more loosely).
+WP_EDGE_FOLLOW_ENABLED = True
 #
-# Edge-follow look-ahead, as a FRACTION of the current edge's length. A latched
-# bot steers toward a point ON its current edge segment [prev -> current],
-# placed this far past the bot's own projection onto the segment once the bot
-# has reached/passed prev, or is already inside prev's arrival radius. While
-# its projection is still before prev and outside that radius, the target is
-# prev itself; this prevents diagonal corner cuts into walls without trapping
-# the bot at the corner. ~0.15 (15% of the edge ahead) gives a smooth lead
-# without overshoot; bigger = more aggressive toward the node, smaller = hugs
-# the line tighter.
+# Look-ahead as a FRACTION of the current edge length: the bot targets its own
+# projection onto the segment plus this much further toward `current` (clamped
+# to the segment, never past the node, so it can't corner-cut onto the next
+# edge). Smaller = hugs the line tighter (slower to advance); bigger = leads
+# more toward the node. ~0.15 is a smooth lead; drop toward 0 for the tightest
+# line-hugging on very narrow paths.
 WP_EDGE_LOOKAHEAD = 0.15
 
 # --- Off-graph recovery (progress-timeout escape) ------------------------
@@ -455,10 +457,14 @@ BOT_COLORS = [_color_pair(n) for n in BOT_NAMES]  # parallel to BOT_NAMES
 # transform internally (vtbl[+0xAC]/[+0xB0] in CGraphics, off_5FF360), so
 # vertices stay glued to the right map position as the camera scrolls.
 #
-# Gated by mp_gate (mgr -> level -> mpd) so the overlay only fires in MP.
-# Set False to compile out the renderer-call hot path entirely; the detour
-# still installs (cheap pushad/jz/popad) but does no work.
-OVERLAY_ENABLED = True
+# Gated by mp_gate (mgr -> level -> mpd) so the overlay only fires in MP. Leave
+# this False for normal play; the renderer loop is a waypoint-authoring
+# diagnostic and is expensive on Windows 11 when many pickups/vertices are
+# visible. That FPS regression did not reproduce on Linux via Wine, so keep
+# Windows-native performance in mind when touching frame hot paths.
+# patch_manifest installs the page-flip detour only when this or pickup
+# registration is enabled.
+OVERLAY_ENABLED = False
 OVERLAY_WAYPOINTS = [(100.0, 200.0), (300.0, 200.0), (300.0, 400.0), (100.0, 400.0)]  # type: list[tuple[float, float]]
 OVERLAY_EDGES     = [(0, 1), (1, 2), (2, 3), (3, 0)]  # type: list[tuple[int, int]]
 
@@ -473,7 +479,7 @@ OVERLAY_EDGE_MAX   = 512
 # CColor struct via sub_53F010 each frame so the palette index stays
 # valid in 8-bit display modes.
 # IMPORTANT — overlay colors are effectively BLUE-CHANNEL ONLY in the game's
-# 8-bit palettized display mode (how it runs under Wine). sub_53F010 stamps each
+# 8-bit palettized display mode (historically observed under Wine). sub_53F010 stamps each
 # CColor's palette index via sub_433A10(BLUE) — derived from the blue byte alone
 # — and the line drawer (sub_568D90) uses that palette index, NOT the RGB. So the
 # rendered color depends only on blue: blue=0 => palette index 0 => BLACK
@@ -500,7 +506,7 @@ OVERLAY_VERTEX_ASPECT  = 1.0                  # y/x ratio (1.0 = round)
 # are CPickupAI grid components, not entries in any flat array (mgr+0x290 is
 # players, mgr+0x2BC is layers), and the engine's spatial query is masked to
 # blocking entities only. See the [[pickup-enumeration]] memory.
-PICKUP_REGISTER_ENABLED = True
+PICKUP_REGISTER_ENABLED = False
 # Max pickups tracked per frame (each slot is 8 bytes: x, y floats). Greed
 # maps scatter many ore / ammo / health / energy items; size generously.
 PICKUP_TABLE_MAX        = 96
@@ -519,8 +525,11 @@ PICKUP_ACTIVE_VALUE     = 0x60000
 
 # --- Stage 2: bots occasionally divert to grab a nearby pickup -----------
 # Master switch. When False the movement detour is behaviorally identical to
-# pure waypoint following (the divert block fast-skips on one cmp/jz).
-PICKUP_DIVERT_ENABLED   = True
+# pure waypoint following (the divert block fast-skips on one cmp/jz). Enable
+# this together with PICKUP_REGISTER_ENABLED when testing item-divert behavior;
+# both are off by default so normal patched gameplay does not hook every pickup
+# update on every frame.
+PICKUP_DIVERT_ENABLED   = False
 # A bot only diverts to a pickup within sqrt(this) of itself (squared px).
 # 250px = "moderate" eagerness — close/on-the-way items, not the whole map.
 PICKUP_DIVERT_RADIUS_SQ = 62500.0
@@ -537,17 +546,64 @@ PICKUP_COOLDOWN_FRAMES  = 180
 # abandons and resumes the graph. A wall-wedge is usually caught much sooner by
 # the shared stuck detector (STUCK_FRAMES_THRESHOLD); this is the backstop.
 PICKUP_DIVERT_TIMEOUT_FRAMES = 150
-# Reactive hazard (lava) avoidance. There is no cheap geometric "is this point
-# lava?" query (lava is a terrain material applying continuous-fire damage, not
-# an entity), so the bot watches its own accumulated damage (char+0x7C): if it
-# rises while diverting — or just before starting one — the bot just stepped on
-# something harmful (lava/fire/weapon fire), so it abandons the divert, takes
-# the cooldown, and follows the waypoint graph (authored on safe ground) back
-# off the hazard. Death-dropped items that land on lava sit off-graph, so the
-# bot touches the lava edge at most, then bails instead of crossing to die for
-# the item. Set False to let bots grab items regardless of damage (e.g. if
-# aborting on incoming weapon fire feels too cautious).
+# Reactive hazard (lava) avoidance — now a FALLBACK behind the proactive
+# plasma-tile detection below. Watches the bot's accumulated damage (char+0x7C):
+# if it rises while diverting — or just before starting one — the bot just
+# stepped on something harmful (lava/fire/weapon fire), so it abandons the
+# divert, takes the cooldown, and follows the waypoint graph back off the
+# hazard. Kept as belt-and-suspenders for the 1-frame edge case the proactive
+# veto can't pre-empt (already on lava at spawn, knockback, etc.). Set False to
+# let bots grab items regardless of damage.
 PICKUP_DIVERT_AVOID_DAMAGE = True
+
+# --- Proactive lava (plasma) avoidance ------------------------------------
+# Molten maps render lava as "Plasma Ground" (engine class CPlasmaTileMap): a
+# 64px tile grid whose heat/elevation grid (CPLASMA_HEAT_OFF) holds a 0..255
+# value per tile. R-snapshot census on Molten Ice: the walkable ambient floor
+# reads <=127, the damaging molten pools ramp 128..255 (host burned at 221),
+# so heat >= 128 is the natural "this tile is lava" boundary. scan_plasma
+# captures the map per match; the movement detour samples the heat grid a short
+# distance ahead along the bot's heading and, if it would step into lava,
+# rotates the heading (like the wall-slide) until a lava-clear direction is
+# found. plasma_map == 0 (non-plasma maps) makes the whole thing a no-op.
+# DISABLED by default. The per-frame heading veto (rotate away from lava)
+# fights the waypoint follower (which steers by the same emitted angle): on a
+# lava-heavy map the lookahead constantly pokes into the central molten mass,
+# so the veto deflects the bot off its waypoint path and into nearby walls
+# ("moves opposite / doesn't follow waypoints / sticks at random walls").
+# Detection (scan_plasma / is_plasma_at) is confirmed working and stays wired
+# for diagnostics; the correct avoidance is GRAPH-AWARE (author waypoints on the
+# safe ambient floor and reject lava-crossing edges via is_plasma_at), which
+# routes around lava without overriding the heading. Re-enable only with a small
+# LAVA_LOOKAHEAD_PX for last-moment edge nudging, or after graph-aware routing.
+LAVA_AVOID_ENABLED = False         # master switch for the per-frame heading veto
+# Heat value at/above which a tile counts as damaging lava. 128 is conservative
+# (gives the pools a wide berth, including the warm 128..191 ring); raise toward
+# ~192 if bots route too timidly around lava, lower if they graze it.
+LAVA_HEAT_THRESHOLD = 160
+# How far ahead (world px) to sample along the emitted heading. ~0.75 of a tile
+# so the bot vetoes the next tile it would enter before reaching it.
+LAVA_LOOKAHEAD_PX = 32.0
+# Heading sweep step (degrees) when the lookahead hits lava: rotate by this each
+# try, up to a full circle, until a lava-clear heading is found. Mirrors the
+# wall-slide step; 30 deg * 12 tries = 360.
+LAVA_SWEEP_STEP_DEG = 30.0
+
+# --- Reactive lava flee (the ACTIVE lava behaviour) -----------------------
+# Lava is walkable and depletes HEALTH fast (Cur Damage at char+0x7C rises;
+# shield is bypassed). So the bot reacts to HEALTH damage: whenever cur_damage
+# rises it just stepped on something health-harmful (lava/fire), and it
+# REVERSES its emitted heading for a short window — backing off the way it came
+# (onto the authored safe ground) — then resumes waypoint following. Re-armed
+# every frame damage continues, so the bot keeps backing off until clear. This
+# is isolated from the wall-slide/waypoint logic (it only negates the emitted
+# vector), so it can't wedge the bot on walls. Closed damaging gates are handled
+# separately: they physically BLOCK the bot, so the existing progress watchdog
+# retreats to the previous node and reroutes to a different neighbour.
+LAVA_FLEE_ENABLED = True
+# Frames to keep reversing after the last health-damage frame (~0.25s at 60Hz).
+# Higher = backs off further / more committed; lower = snappier re-evaluation.
+LAVA_FLEE_FRAMES = 15
 
 # Waypoint editor: when dropping a new node, snap to an existing node if
 # within this world-pixel distance (squared) — avoids duplicate nodes when

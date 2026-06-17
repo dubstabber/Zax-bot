@@ -170,6 +170,10 @@ def main() -> None:
     p_hd.add_argument('--off', type=lambda s: int(s, 0), default=0)
     p_hd.add_argument('--len', dest='length', type=lambda s: int(s, 0), default=None)
 
+    p_plasma = sub.add_parser('plasma', help='decode the plasma (lava) detection pin chunk')
+    p_plasma.add_argument('n', type=int, nargs='?', default=None,
+                          help='snapshot number (default: latest)')
+
     p_cf = sub.add_parser('cross-file', help='diff a tag in one file vs a tag in another file')
     p_cf.add_argument('file1')
     p_cf.add_argument('snap1', type=int)
@@ -221,6 +225,93 @@ def main() -> None:
         diff_payloads(c1.payload, c2.payload,
                       f'{args.tag}#snap{args.n1}', f'{args.tag}#snap{args.n2}',
                       c1.src_va, c2.src_va)
+        return
+
+    if args.cmd == 'plasma':
+        n = args.n if args.n is not None else max(c.snap_idx for c in chunks)
+        c = find(n, 'plasma')
+        nslot = len(c.payload) // 4
+        w = list(struct.unpack_from(f'<{nslot}I', c.payload)) if nslot >= 12 else []
+        if not w:
+            sys.exit(f'plasma chunk too short ({len(c.payload)} bytes)')
+
+        def tile(v):
+            return 'none' if v == 0xFFFFFFFF else f'({(v >> 16) & 0xFFFF},{v & 0xFFFF})'
+
+        labels = [
+            'LAY (active CLayer)', '*(LAY+0x7C) candA', '*(LAY+0x40) candB',
+            'chosen plasma_map', 'tilepx', 'tw (tiles x)', 'th (tiles y)',
+            'host_x', 'host_y', 'host_tx', 'host_ty', 'is_plasma_at@host',
+            'heat@host', 'fp_count (cells)', 'heat_count (cells)',
+            'fp_max', 'heat_max', 'fp_first_tile', 'heat_first_tile', 'is_plasma_at heat',
+        ]
+        print(f'-- plasma pin (snapshot {n}) --')
+        for i, v in enumerate(w):
+            lab = labels[i] if i < len(labels) else f'slot[{i}]'
+            note = ''
+            if i in (0, 1, 2, 3) and is_pointer(v):
+                note = '(ptr)'
+            if i == 3:
+                if v == 0:
+                    note = 'NONE — no CPlasmaTileMap found (non-plasma map?)'
+                elif v == w[1]:
+                    note = 'matched candA (+0x7C) <-- LAYER_PLASMA_MAP_OFF_A'
+                elif len(w) > 2 and v == w[2]:
+                    note = 'matched candB (+0x40) <-- LAYER_PLASMA_MAP_OFF_B'
+            if i == 11:
+                note = 'ON LAVA (heat>=threshold)' if v else 'safe ground'
+            if i in (17, 18):
+                note = tile(v)
+            print(f'  [{i:>2}] {lab:<20} = {v:#010x} ({v}) {note}')
+
+        if nslot >= 19:
+            fp_n, heat_n = w[13], w[14]
+            print('\n  verdict:')
+            print(f'    footprint grid (plasma+0x08): {fp_n} nonzero cells, max {w[15]}, first {tile(w[17])}')
+            print(f'    heat grid    (plasma+0x2C6C): {heat_n} nonzero cells, max {w[16]}, first {tile(w[18])}')
+            if heat_n and not fp_n:
+                print('    => HEAT grid marks the lava region; footprint is empty/unused.')
+                print('       M2 should query plasma+0x2C6C (CPLASMA_HEAT_OFF), not the footprint.')
+            elif fp_n and not heat_n:
+                print('    => FOOTPRINT grid marks lava; keep is_plasma_at on plasma+0x08.')
+            elif fp_n and heat_n:
+                print('    => BOTH grids populated; compare host_tile vs cur_damage to pick the predicate.')
+            else:
+                print('    => NEITHER grid has nonzero cells — capture likely missed lava, or a third')
+                print('       source drives damage. Re-press R while burning (cur_damage rising).')
+        if w[3] and w[4] != 64:
+            print(f'  NOTE: tilepx={w[4]} (not 64) — read at runtime, OK')
+
+        # Render the full per-tile heat map (if the pheat chunk is present).
+        ph = next((c for c in chunks if c.snap_idx == n and c.tag == 'pheat'), None)
+        if ph is not None and len(w) >= 7:
+            tw, th = w[5], w[6]
+            hx, hy = w[9], w[10]
+            m = ph.payload
+
+            def sym(v):
+                return ' .:+*#'[0 if v == 0 else 1 if v < 64 else 2 if v < 128
+                                  else 3 if v < 192 else 4 if v < 255 else 5]
+            if 0 < tw <= 256 and 0 < th <= 256 and tw * th <= len(m):
+                print(f'\n  heat map ({tw}x{th})  legend: " "=0  .=1-63  :=64-127  +=128-191  *=192-254  #=255  H=host')
+                hist = {}
+                for v in m[:tw * th]:
+                    hist[v] = hist.get(v, 0) + 1
+                for ty in range(th):
+                    row = []
+                    for tx in range(tw):
+                        v = m[ty * tw + tx]
+                        row.append('H' if (tx == hx and ty == hy) else sym(v))
+                    print('   ' + ''.join(row))
+                # Distribution: zero, low gradient, and the top value.
+                z = hist.get(0, 0)
+                top = max(hist) if hist else 0
+                ntop = hist.get(top, 0)
+                print(f'\n  distribution: {z} tiles =0 (safe?), '
+                      f'{tw*th - z} nonzero, {ntop} tiles ={top} (max).')
+                if 0 <= hx < tw and 0 <= hy < th:
+                    print(f'  host tile ({hx},{hy}) heat = {m[hy*tw+hx]} '
+                          f'(you were burning here -> that value damages)')
         return
 
     if args.cmd == 'cross-file':

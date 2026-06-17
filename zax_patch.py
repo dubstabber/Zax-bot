@@ -43,7 +43,7 @@ from zaxbot.config import (  # noqa: F401
 from zaxbot.hook.entry import build_hook
 from zaxbot.patch_manifest import build_enabled_patches
 
-GAME = '/run/media/ydro/WDC/Games/ZAX'
+GAME = os.path.dirname(os.path.abspath(__file__))
 EXE = os.path.join(GAME, 'Zax.exe')
 BAK = os.path.join(GAME, 'Zax.exe.bak')
 

@@ -36,8 +36,15 @@ The detailed notes live in `docs/`:
 python3 zax_patch.py
 ```
 
-Then the user runs `Zax.exe` under Wine and reports runtime behavior. Do not
-launch the game from automation.
+Current testing is on Windows 11 in this local workspace. `zax_patch.py` rebuilds
+the `Zax.exe` next to it from the local `Zax.exe.bak`; do not assume old
+`/run/media/...` Linux paths. Then the user runs `Zax.exe` and reports runtime
+behavior. Do not launch the game from automation.
+
+Historical Linux/Wine results are still useful but not definitive. The severe
+low-FPS regression from always-installed waypoint-overlay / pickup-registration
+hot-path detours was observed on Windows 11 only on the same machine; it did
+not reproduce on Linux via Wine.
 
 ## Current state
 
@@ -45,8 +52,8 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 
 - WM_KEYDOWN hook at `0x599A1A` redirects `call sub_599580` to
   `.zaxbot:hook_entry`, then tail-jumps back to `sub_599580`.
-- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x4000`, RWX.
-- Scratch starts at `0x71C000` (`SCRATCH_OFF = 0x2000`).
+- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x8000`, RWX.
+- Scratch starts at `0x71E000` (`SCRATCH_OFF = 0x4000`).
 - B opens the bot menu via `sub_59B260`; R writes a runtime snapshot.
 - Digit selection calls `do_spawn_with_team`.
 - Spawn injects a synthetic DirectPlay "player added" queue entry at

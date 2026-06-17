@@ -27,8 +27,16 @@ Current control path:
 python3 zax_patch.py
 ```
 
-Then the user runs the game under Wine, hosts an MP match, and exercises B/R.
-Do not launch the game from automation; runtime testing is user-owned.
+Current testing is on Windows 11 in this local workspace. `zax_patch.py` rebuilds
+the local `Zax.exe` from the local `Zax.exe.bak`; do not assume old Linux
+`/run/media/...` paths. Then the user runs the game, hosts an MP match, and
+exercises B/R. Do not launch the game from automation; runtime testing is
+user-owned.
+
+Historical Linux/Wine observations are still useful but can miss Windows-native
+behavior. The severe low-FPS regression caused by always-installed
+waypoint-overlay / pickup-registration hot-path detours reproduced on Windows
+11 only on the same machine, not on Linux via Wine.
 
 ## Current result
 
