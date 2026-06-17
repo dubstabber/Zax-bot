@@ -28,6 +28,11 @@ Current dispatcher behavior (`zaxbot/hook/dispatcher.py`):
 - idle + **B**: MP-gate, call `detect_mode`, show a prompt with `sub_59B260`,
   set `menu_state = 1`.
 - idle + **R**: MP-gate, call `do_snapshot`.
+- idle + **O**: MP-gate, toggle `overlay_enabled`, sync pickup-registration
+  markers to that state, and show an on-screen confirmation; the page-flip
+  detour is installed but drawing starts off.
+- idle + **N/J/X/,**: MP-gated waypoint editor controls: drop/snap, select,
+  delete, save.
 - menu open + digit `1..4`: validate against `max_for_mode[mode]`, store
   `chosen_team`, call `do_spawn_with_team`, close the menu.
 - menu open + anything else: close the menu.

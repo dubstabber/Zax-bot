@@ -326,6 +326,7 @@ VK_ESC   = 0x1B
 VK_B     = 0x42
 VK_J     = 0x4A
 VK_N     = 0x4E
+VK_O     = 0x4F
 VK_R     = 0x52
 VK_X     = 0x58
 VK_COMMA = 0xBC   # VK_OEM_COMMA — used for wp_save (S is bound to "move down" in-game)

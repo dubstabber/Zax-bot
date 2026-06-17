@@ -10,6 +10,7 @@ key:
 All paths tail-jmp to ``sub_599580`` so normal key handling is unaffected."""
 
 from .. import addresses as ax
+from .. import config as cfg
 from ..asm import Asm, le32
 from ..layout import ScratchLayout
 from .helpers import mp_gate
@@ -21,6 +22,9 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     prompts_table_va = layout.va('prompts_table')
     max_for_mode_va  = layout.va('max_for_mode')
     chosen_team_va   = layout.va('chosen_team')
+    overlay_enabled_va = layout.va('overlay_enabled')
+    pickup_register_enabled_va = layout.va('pickup_register_enabled')
+    pickup_count_va = layout.va('pickup_count')
 
     # =======================================================================
     # Dispatcher entry: ECX = VK.
@@ -32,12 +36,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # (R's snapshot includes the waypoint-graph diag chunks now;
     # no separate hotkey since W is bound to "move up" in-game).
     # N/J/X drive the waypoint editor (drop / select / delete);
+    # O toggles the visual waypoint overlay for authoring.
     # ',' saves the current graph (load is automatic on match change).
     # S is bound to "move down" in-game so it can't be used for save. ---
     a.raw(b'\x80\xF9' + bytes([ax.VK_R])); a.jz('handle_R')
     a.raw(b'\x80\xF9' + bytes([ax.VK_N])); a.jz('handle_N')
     a.raw(b'\x80\xF9' + bytes([ax.VK_J])); a.jz('handle_J')
     a.raw(b'\x80\xF9' + bytes([ax.VK_X])); a.jz('handle_X')
+    a.raw(b'\x80\xF9' + bytes([ax.VK_O])); a.jz('handle_overlay_toggle')
     a.raw(b'\x80\xF9' + bytes([ax.VK_COMMA])); a.jz('handle_save')
     a.raw(b'\x80\xF9' + bytes([ax.VK_B]))                    # cmp cl, VK_B
     a.jnz('passthru')
@@ -98,6 +104,32 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x61')
     a.jmp_va(ax.ORIG_TARGET_VA)
 
+    a.label('handle_overlay_toggle')
+    a.raw(b'\x60')
+    mp_gate(a, 'pop_passthru')
+    a.raw(b'\x83\x35' + le32(overlay_enabled_va) + b'\x01')   # xor dword [overlay_enabled], 1
+    a.raw(b'\x83\x3D' + le32(overlay_enabled_va) + b'\x00')   # cmp [overlay_enabled], 0
+    a.jz('overlay_msg_off')
+    if cfg.PICKUP_OVERLAY_MARKERS_ENABLED:
+        a.raw(b'\xC7\x05' + le32(pickup_register_enabled_va) + le32(1))
+        a.raw(b'\xC7\x05' + le32(pickup_count_va) + le32(0))
+    a.raw(b'\x6A\xFF')                                        # push -1
+    a.raw(b'\x68'); a.imm32_lbl('wp_overlay_on_msg')           # push msg
+    a.call_va(ax.SHOWMSG_VA)
+    a.jmp('overlay_toggle_done')
+    a.label('overlay_msg_off')
+    if cfg.PICKUP_OVERLAY_MARKERS_ENABLED:
+        pickup_base_enabled = 1 if (cfg.PICKUP_REGISTER_ENABLED or cfg.PICKUP_DIVERT_ENABLED) else 0
+        a.raw(b'\xC7\x05' + le32(pickup_register_enabled_va) + le32(pickup_base_enabled))
+        if not pickup_base_enabled:
+            a.raw(b'\xC7\x05' + le32(pickup_count_va) + le32(0))
+    a.raw(b'\x6A\xFF')                                        # push -1
+    a.raw(b'\x68'); a.imm32_lbl('wp_overlay_off_msg')          # push msg
+    a.call_va(ax.SHOWMSG_VA)
+    a.label('overlay_toggle_done')
+    a.raw(b'\x61')
+    a.jmp_va(ax.ORIG_TARGET_VA)
+
     # --- MENU_OPEN: digit '1'..'4' in range -> spawn; otherwise cancel ---
     a.label('handle_menu_open')
     a.raw(b'\x60')                                             # pushad
@@ -115,3 +147,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x05' + le32(menu_state_va) + le32(0))         # menu_state = 0
     a.raw(b'\x61')                                             # popad
     a.jmp_va(ax.ORIG_TARGET_VA)
+
+    a.label('wp_overlay_on_msg')
+    a.raw(b'[wp] overlay on\x00')
+    a.label('wp_overlay_off_msg')
+    a.raw(b'[wp] overlay off\x00')

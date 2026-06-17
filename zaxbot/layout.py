@@ -727,6 +727,14 @@ def build_scratch_layout(
                      'follow: edge segment dy (current.y - prev.y), per-call temp'),
         ScratchField('wp_tp',                plasma_tmp_base + 0x848, 0x04,
                      'follow: clamped look-ahead param along the edge, per-call temp'),
+        ScratchField('overlay_cull_min_x',   plasma_tmp_base + 0x84C, 0x04,
+                     'overlay: screen-space cull min x (float)'),
+        ScratchField('overlay_cull_max_x',   plasma_tmp_base + 0x850, 0x04,
+                     'overlay: screen-space cull max x (float)'),
+        ScratchField('overlay_cull_min_y',   plasma_tmp_base + 0x854, 0x04,
+                     'overlay: screen-space cull min y (float)'),
+        ScratchField('overlay_cull_max_y',   plasma_tmp_base + 0x858, 0x04,
+                     'overlay: screen-space cull max y (float)'),
     ])
     fields.extend(overlay_fields)
     return ScratchLayout(base_va, scratch_size, fields)

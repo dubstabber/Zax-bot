@@ -41,10 +41,16 @@ the `Zax.exe` next to it from the local `Zax.exe.bak`; do not assume old
 `/run/media/...` Linux paths. Then the user runs `Zax.exe` and reports runtime
 behavior. Do not launch the game from automation.
 
-Historical Linux/Wine results are still useful but not definitive. The severe
-low-FPS regression from always-installed waypoint-overlay / pickup-registration
-hot-path detours was observed on Windows 11 only on the same machine; it did
-not reproduce on Linux via Wine.
+Historical Linux/Wine results are still useful but not definitive. A severe
+low-FPS regression from earlier diagnostic builds with waypoint-overlay /
+pickup-registration hot-path detours was observed on Windows 11 only on the
+same machine; it did not reproduce on Linux via Wine. The visual waypoint
+overlay hook is installed for authoring but starts hidden; press O in a live MP
+match to toggle drawing. When visible, the overlay cheap-culls off-screen graph
+segments before calling the engine draw helpers; tune `OVERLAY_CULL_MARGIN` if
+near-edge visibility vs FPS needs adjustment. Pickup self-registration is
+installed for overlay item markers, but its scratch flag stays off while the
+overlay is hidden and the detour fast-skips the disabled path.
 
 ## Current state
 
@@ -174,6 +180,8 @@ Current patched sites:
 - `0x542360` - bot movement-vector override.
 - `0x5436F0` - bot fire/aim override.
 - `0x542550` - walking-controller capture/scrub.
+- `0x5693A0` - toggleable visual waypoint authoring overlay before page flip.
+- `0x53DA40` - gated pickup self-registration for overlay item markers.
 - `0x480889` - synthetic-id name-block skip in `sub_480800`.
 - `0x4F5204` - character iterator NULL-skip.
 

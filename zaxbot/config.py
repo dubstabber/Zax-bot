@@ -457,13 +457,14 @@ BOT_COLORS = [_color_pair(n) for n in BOT_NAMES]  # parallel to BOT_NAMES
 # transform internally (vtbl[+0xAC]/[+0xB0] in CGraphics, off_5FF360), so
 # vertices stay glued to the right map position as the camera scrolls.
 #
-# Gated by mp_gate (mgr -> level -> mpd) so the overlay only fires in MP. Leave
-# this False for normal play; the renderer loop is a waypoint-authoring
-# diagnostic and is expensive on Windows 11 when many pickups/vertices are
-# visible. That FPS regression did not reproduce on Linux via Wine, so keep
-# Windows-native performance in mind when touching frame hot paths.
-# patch_manifest installs the page-flip detour only when this or pickup
-# registration is enabled.
+# Install the page-flip hook needed for the visual waypoint overlay and the
+# runtime O-key draw toggle. The hook fast-skips when overlay_enabled is 0.
+OVERLAY_HOOK_ENABLED = True
+
+# Initial draw state. Keep this False for normal FPS: the N/J/X editor and
+# saved graph following still work, and O toggles the visual graph in-game
+# only when authoring. Drawing every vertex/edge every frame is expensive on
+# Windows 11 when large graphs are visible.
 OVERLAY_ENABLED = False
 OVERLAY_WAYPOINTS = [(100.0, 200.0), (300.0, 200.0), (300.0, 400.0), (100.0, 400.0)]  # type: list[tuple[float, float]]
 OVERLAY_EDGES     = [(0, 1), (1, 2), (2, 3), (3, 0)]  # type: list[tuple[int, int]]
@@ -484,18 +485,25 @@ OVERLAY_EDGE_MAX   = 512
 # — and the line drawer (sub_568D90) uses that palette index, NOT the RGB. So the
 # rendered color depends only on blue: blue=0 => palette index 0 => BLACK
 # (red/green are ignored); blue=255 => a visible bright color. Confirmed in-game
-# (2026-06-01): vertices (yellow, B=0) and edges (green, B=0) render BLACK; the
-# selected node (magenta, B=255) and pickups (cyan, B=255) render visibly. The
-# black vertices/edges are accepted as-is (distinguished by shape — dots vs lines
-# — and the selected node + pickups are colored). To make ANY overlay element
-# visibly colored, give it a non-zero (ideally 255) BLUE component. The RGBA
-# tuples below are kept as human labels; only blue actually drives the hue here.
-OVERLAY_VERTEX_COLOR   = (255, 255, 0, 255)   # "yellow" but B=0 -> renders BLACK in 8-bit mode
-OVERLAY_EDGE_COLOR     = (0, 255, 0, 255)     # "green" but B=0 -> renders BLACK in 8-bit mode
-OVERLAY_SELECTED_COLOR = (255, 0, 255, 255)   # magenta (B=255) -> visible; currently-selected node
-OVERLAY_PICKUP_COLOR   = (0, 255, 255, 255)   # cyan (B=255) -> visible; detected world pickups
+# (2026-06-01): colors with B=0 rendered BLACK in 8-bit mode. Keep visible
+# graph elements on non-zero blue values so the authoring overlay is actually
+# visible. The RGBA tuples below are kept as human labels; only blue actually
+# drives the hue in palettized mode.
+OVERLAY_VERTEX_COLOR   = (255, 255, 255, 255) # white; B=255 -> visible in 8-bit mode
+OVERLAY_EDGE_COLOR     = (64, 160, 255, 255)  # blue/cyan; B=255 -> visible in 8-bit mode
+OVERLAY_SELECTED_COLOR = (255, 0, 255, 255)   # magenta; B=255 -> visible selected node
+OVERLAY_PICKUP_COLOR   = (0, 255, 255, 255)   # cyan; B=255 -> visible detected pickups
 OVERLAY_VERTEX_RADIUS  = 8.0                  # world-space pixels
 OVERLAY_VERTEX_ASPECT  = 1.0                  # y/x ratio (1.0 = round)
+
+# Cheap screen-space cull before calling the expensive engine line/oval
+# helpers. Zax.CFG currently runs at 640x480. The margin keeps near-edge
+# nodes and lines visible while skipping most of the off-screen authored graph.
+OVERLAY_CULL_MARGIN = 96.0
+OVERLAY_CULL_MIN_X  = -OVERLAY_CULL_MARGIN
+OVERLAY_CULL_MIN_Y  = -OVERLAY_CULL_MARGIN
+OVERLAY_CULL_MAX_X  = 640.0 + OVERLAY_CULL_MARGIN
+OVERLAY_CULL_MAX_Y  = 480.0 + OVERLAY_CULL_MARGIN
 
 # --- Proximity item pickup (bots grab nearby items) ----------------------
 # Stage 1 (detection): a detour on sub_53DA40 — the per-frame CPickupAI
@@ -507,6 +515,11 @@ OVERLAY_VERTEX_ASPECT  = 1.0                  # y/x ratio (1.0 = round)
 # players, mgr+0x2BC is layers), and the engine's spatial query is masked to
 # blocking entities only. See the [[pickup-enumeration]] memory.
 PICKUP_REGISTER_ENABLED = False
+# Install the pickup self-registration detour for visual item markers, but
+# keep the scratch flag disabled until the overlay is visible. The O-key
+# toggle turns registration on/off alongside overlay drawing so normal play
+# does not keep populating pickup_table every frame.
+PICKUP_OVERLAY_MARKERS_ENABLED = True
 # Max pickups tracked per frame (each slot is 8 bytes: x, y floats). Greed
 # maps scatter many ore / ammo / health / energy items; size generously.
 PICKUP_TABLE_MAX        = 96

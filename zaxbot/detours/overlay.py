@@ -31,9 +31,8 @@ renderer's cam stays at 0, so the engine's clip frame matches.
 index via ``sub_433A10(blue)`` — from the BLUE byte alone — and in the game's
 8-bit palettized display mode the line drawer uses that index, not the RGB. So
 the rendered color is driven only by blue: ``blue=0`` renders BLACK (vertices,
-edges), ``blue=255`` renders a visible color (selected node, pickups). The
-black vertices/edges are intentional/accepted; give an element non-zero blue to
-make it visibly colored. See ``cfg.OVERLAY_*_COLOR`` and ``ax.SUB_53F010_VA``.
+edges), ``blue=255`` renders a visible color. Keep visible graph elements on a
+non-zero blue channel. See ``cfg.OVERLAY_*_COLOR`` and ``ax.SUB_53F010_VA``.
 
 For each enabled overlay, the detour:
 
@@ -46,11 +45,13 @@ For each enabled overlay, the detour:
    ``overlay_cam_x/y`` and sets ``overlay_cam_ok = 1``. Failure on any
    step leaves ``cam_ok = 0`` and the loops bail.
 5. Calls ``sub_53F010`` once per color.
-6. Loops vertices: subtract cam to get screen p1, call
-   ``sub_4FCCC0(renderer, &p1, radius, aspect, &color)``.
-7. Loops edges: subtract cam from both endpoints, call
+6. Loops vertices: subtract cam to get screen p1, cheap-cull off-screen
+   points, then call ``sub_4FCCC0(renderer, &p1, radius, aspect, &color)``.
+7. Loops detected pickups from ``pickup_table`` using the same oval path.
+8. Loops edges: subtract cam from both endpoints, cheap-cull segments whose
+   endpoints are both outside the same side of the screen, then call
    ``sub_4B3CB0(renderer, &p1, &p2, &color)``.
-8. ``popad``, re-execute displaced ``mov al, byte_6210C0``, jump back.
+9. ``popad``, re-execute displaced ``mov al, byte_6210C0``, jump back.
 """
 
 from .. import addresses as ax
@@ -74,6 +75,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     overlay_cam_ok_va         = layout.va('overlay_cam_ok')
     overlay_tmp_p1_va         = layout.va('overlay_tmp_p1')
     overlay_tmp_p2_va         = layout.va('overlay_tmp_p2')
+    overlay_cull_min_x_va     = layout.va('overlay_cull_min_x')
+    overlay_cull_max_x_va     = layout.va('overlay_cull_max_x')
+    overlay_cull_min_y_va     = layout.va('overlay_cull_min_y')
+    overlay_cull_max_y_va     = layout.va('overlay_cull_max_y')
     overlay_vertices_va       = layout.va('overlay_vertices') if layout.has_field('overlay_vertices') else 0
     overlay_edges_va          = layout.va('overlay_edges')    if layout.has_field('overlay_edges')    else 0
     wp_selected_idx_va        = layout.va('wp_selected_idx')
@@ -197,12 +202,19 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xD8\x25' + le32(overlay_cam_y_va))           # fsub dword [cam_y]
         a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va + 4))      # fstp dword [tmp_p1 + 4]
 
+        _emit_point_cull(
+            a, overlay_tmp_p1_va,
+            overlay_cull_min_x_va, overlay_cull_max_x_va,
+            overlay_cull_min_y_va, overlay_cull_max_y_va,
+            'ov_vertex_next',
+        )
         a.raw(b'\xBA' + le32(overlay_tmp_p1_va))              # mov edx, &tmp_p1 (oval center)
         a.raw(b'\x68' + le32(overlay_vertex_color_va))        # push &color
         a.raw(b'\xFF\x35' + le32(overlay_vertex_aspect_va))   # push aspect
         a.raw(b'\xFF\x35' + le32(overlay_vertex_radius_va))   # push radius
         a.raw(b'\x89\xF9')                                    # mov ecx, edi (renderer)
         a.call_va(ax.SUB_4FCCC0_VA)
+        a.label('ov_vertex_next')
         a.raw(b'\x46')                                        # inc esi
         a.jmp('ov_vertex_loop')
 
@@ -225,6 +237,12 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xD9\x04\xC5' + le32(overlay_vertices_va + 4))  # fld [eax*8 + verts + 4]
         a.raw(b'\xD8\x25' + le32(overlay_cam_y_va))
         a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va + 4))
+        _emit_point_cull(
+            a, overlay_tmp_p1_va,
+            overlay_cull_min_x_va, overlay_cull_max_x_va,
+            overlay_cull_min_y_va, overlay_cull_max_y_va,
+            'ov_after_selected',
+        )
         a.raw(b'\xBA' + le32(overlay_tmp_p1_va))              # mov edx, &tmp_p1
         a.raw(b'\x68' + le32(overlay_selected_color_va))      # push &selected_color
         a.raw(b'\xFF\x35' + le32(overlay_vertex_aspect_va))   # push aspect
@@ -250,12 +268,19 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xD9\x04\xF5' + le32(pickup_table_va + 4))   # fld dword [table + esi*8 + 4]
         a.raw(b'\xD8\x25' + le32(overlay_cam_y_va))          # fsub dword [cam_y]
         a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va + 4))     # fstp dword [tmp_p1 + 4]
+        _emit_point_cull(
+            a, overlay_tmp_p1_va,
+            overlay_cull_min_x_va, overlay_cull_max_x_va,
+            overlay_cull_min_y_va, overlay_cull_max_y_va,
+            'ov_pickup_next',
+        )
         a.raw(b'\xBA' + le32(overlay_tmp_p1_va))             # mov edx, &tmp_p1 (oval center)
         a.raw(b'\x68' + le32(overlay_pickup_color_va))       # push &pickup_color
         a.raw(b'\xFF\x35' + le32(overlay_vertex_aspect_va))  # push aspect
         a.raw(b'\xFF\x35' + le32(overlay_vertex_radius_va))  # push radius
         a.raw(b'\x89\xF9')                                   # mov ecx, edi (renderer)
         a.call_va(ax.SUB_4FCCC0_VA)
+        a.label('ov_pickup_next')
         a.raw(b'\x46')                                       # inc esi
         a.jmp('ov_pickup_loop')
         a.label('ov_after_pickups')
@@ -295,6 +320,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xD8\x25' + le32(overlay_cam_y_va))
         a.raw(b'\xD9\x1D' + le32(overlay_tmp_p2_va + 4))
 
+        _emit_segment_cull(
+            a, overlay_tmp_p1_va, overlay_tmp_p2_va,
+            overlay_cull_min_x_va, overlay_cull_max_x_va,
+            overlay_cull_min_y_va, overlay_cull_max_y_va,
+            'ov_skip_edge',
+            'ov_edge_cull',
+        )
+
         a.raw(b'\x68' + le32(overlay_edge_color_va))          # push &color
         a.raw(b'\x68' + le32(overlay_tmp_p2_va))              # push &p2
         a.raw(b'\x68' + le32(overlay_tmp_p1_va))              # push &p1
@@ -311,6 +344,91 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('ov_resume')
     a.raw(b'\xA0' + le32(ax.FULLSCREEN_FLAG_VA))              # mov al, byte_6210C0
     a.jmp_va(ax.S5693A0_RESUME)
+
+
+def _emit_point_cull(a: Asm,
+                     point_va: int,
+                     min_x_va: int,
+                     max_x_va: int,
+                     min_y_va: int,
+                     max_y_va: int,
+                     skip_label: str) -> None:
+    """Skip a point outside the expanded screen rect.
+
+    Compares `point.x/y` after world->screen transform against static float
+    bounds. Each `fcomp` pops the loaded value, so the x87 stack stays empty.
+    """
+    a.raw(b'\xD9\x05' + le32(point_va + 0))                   # fld [x]
+    a.raw(b'\xD8\x1D' + le32(min_x_va))                       # fcomp [min_x]
+    a.raw(b'\xDF\xE0\x9E')                                    # fnstsw ax; sahf
+    a.jb(skip_label)                                          # x < min_x
+    a.raw(b'\xD9\x05' + le32(point_va + 0))                   # fld [x]
+    a.raw(b'\xD8\x1D' + le32(max_x_va))                       # fcomp [max_x]
+    a.raw(b'\xDF\xE0\x9E')
+    a.ja(skip_label)                                          # x > max_x
+    a.raw(b'\xD9\x05' + le32(point_va + 4))                   # fld [y]
+    a.raw(b'\xD8\x1D' + le32(min_y_va))                       # fcomp [min_y]
+    a.raw(b'\xDF\xE0\x9E')
+    a.jb(skip_label)                                          # y < min_y
+    a.raw(b'\xD9\x05' + le32(point_va + 4))                   # fld [y]
+    a.raw(b'\xD8\x1D' + le32(max_y_va))                       # fcomp [max_y]
+    a.raw(b'\xDF\xE0\x9E')
+    a.ja(skip_label)                                          # y > max_y
+
+
+def _emit_segment_cull(a: Asm,
+                       p1_va: int,
+                       p2_va: int,
+                       min_x_va: int,
+                       max_x_va: int,
+                       min_y_va: int,
+                       max_y_va: int,
+                       skip_label: str,
+                       prefix: str) -> None:
+    """Skip a line segment only when both endpoints are outside one side."""
+    # Both endpoints left of the screen rect?
+    a.raw(b'\xD9\x05' + le32(p1_va + 0))                      # fld [p1.x]
+    a.raw(b'\xD8\x1D' + le32(min_x_va))                       # fcomp [min_x]
+    a.raw(b'\xDF\xE0\x9E')
+    a.jae(f'{prefix}_not_left')                               # p1.x >= min_x
+    a.raw(b'\xD9\x05' + le32(p2_va + 0))                      # fld [p2.x]
+    a.raw(b'\xD8\x1D' + le32(min_x_va))
+    a.raw(b'\xDF\xE0\x9E')
+    a.jb(skip_label)                                          # p2.x < min_x
+    a.label(f'{prefix}_not_left')
+
+    # Both endpoints right of the screen rect?
+    a.raw(b'\xD9\x05' + le32(p1_va + 0))                      # fld [p1.x]
+    a.raw(b'\xD8\x1D' + le32(max_x_va))                       # fcomp [max_x]
+    a.raw(b'\xDF\xE0\x9E')
+    a.jbe(f'{prefix}_not_right')                              # p1.x <= max_x
+    a.raw(b'\xD9\x05' + le32(p2_va + 0))                      # fld [p2.x]
+    a.raw(b'\xD8\x1D' + le32(max_x_va))
+    a.raw(b'\xDF\xE0\x9E')
+    a.ja(skip_label)                                          # p2.x > max_x
+    a.label(f'{prefix}_not_right')
+
+    # Both endpoints above the screen rect?
+    a.raw(b'\xD9\x05' + le32(p1_va + 4))                      # fld [p1.y]
+    a.raw(b'\xD8\x1D' + le32(min_y_va))                       # fcomp [min_y]
+    a.raw(b'\xDF\xE0\x9E')
+    a.jae(f'{prefix}_not_top')                                # p1.y >= min_y
+    a.raw(b'\xD9\x05' + le32(p2_va + 4))                      # fld [p2.y]
+    a.raw(b'\xD8\x1D' + le32(min_y_va))
+    a.raw(b'\xDF\xE0\x9E')
+    a.jb(skip_label)                                          # p2.y < min_y
+    a.label(f'{prefix}_not_top')
+
+    # Both endpoints below the screen rect?
+    a.raw(b'\xD9\x05' + le32(p1_va + 4))                      # fld [p1.y]
+    a.raw(b'\xD8\x1D' + le32(max_y_va))                       # fcomp [max_y]
+    a.raw(b'\xDF\xE0\x9E')
+    a.jbe(f'{prefix}_not_bottom')                             # p1.y <= max_y
+    a.raw(b'\xD9\x05' + le32(p2_va + 4))                      # fld [p2.y]
+    a.raw(b'\xD8\x1D' + le32(max_y_va))
+    a.raw(b'\xDF\xE0\x9E')
+    a.ja(skip_label)                                          # p2.y > max_y
+    a.label(f'{prefix}_not_bottom')
 
 
 def _split_rgba_static(role):

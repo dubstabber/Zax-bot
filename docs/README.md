@@ -7,6 +7,7 @@ Current control path:
 - **B** opens the bot menu in a hosted MP match.
 - A digit selects the spawn/team option for the current mode.
 - **R** appends a diagnostic runtime snapshot to `zax_dump.bin`; it does not spawn.
+- **O** toggles the visual waypoint graph in a live MP match.
 
 ## Source of truth
 
@@ -34,9 +35,12 @@ exercises B/R. Do not launch the game from automation; runtime testing is
 user-owned.
 
 Historical Linux/Wine observations are still useful but can miss Windows-native
-behavior. The severe low-FPS regression caused by always-installed
-waypoint-overlay / pickup-registration hot-path detours reproduced on Windows
-11 only on the same machine, not on Linux via Wine.
+behavior. A severe low-FPS regression was seen in earlier diagnostic builds
+that kept waypoint-overlay / pickup-registration hot-path detours active on
+Windows 11. The visual waypoint overlay hook is installed for authoring but
+starts hidden; press O in a live MP match to toggle drawing. Pickup
+self-registration is installed for overlay item markers, but its scratch flag is
+off while the overlay is hidden and the detour fast-skips the disabled path.
 
 ## Current result
 
@@ -66,6 +70,14 @@ Current limitations:
   a heading clears the wall and slides along it, decaying back to straight once
   moving. This replaced an architecture that froze bots against walls for a
   150-frame timeout.
+- The visual waypoint overlay is available through the `0x5693A0` page-flip
+  detour but starts hidden for normal FPS. In a live MP match, `O` toggles
+  drawing, `N` drops/snaps a node at the host, `J` selects the nearest node,
+  `X` deletes the nearest node, and `,` saves the current graph to
+  `waypoints/<map>.zwpt`; loading is automatic on match change. When visible,
+  the overlay culls off-screen vertices/edges before calling the expensive
+  engine draw helpers (`OVERLAY_CULL_MARGIN` controls the extra border), and
+  turns on pickup self-registration so collectible item markers appear too.
 - Bots can fire/aim at the host within range and line of sight via `detour_5436F0`.
   `zaxbot/config.py` can force newly spawned bots to equip a selected debug
   inventory item name so projectile lead tuning can be tested without bot movement.

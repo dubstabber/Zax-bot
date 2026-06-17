@@ -134,6 +134,10 @@ def write_static_scratch_data(
     overlay_pickup_color=(255, 128, 0, 255),
     overlay_vertex_radius=8.0,
     overlay_vertex_aspect=1.0,
+    overlay_cull_min_x=-96.0,
+    overlay_cull_max_x=736.0,
+    overlay_cull_min_y=-96.0,
+    overlay_cull_max_y=576.0,
     pickup_register_enabled=True,
     pickup_divert_enabled=True,
     pickup_divert_radius_sq=62500.0,
@@ -316,6 +320,15 @@ def write_static_scratch_data(
                  struct.pack('<f', overlay_vertex_radius))
     layout.write(section, scratch_off, 'overlay_vertex_aspect',
                  struct.pack('<f', overlay_vertex_aspect))
+    if layout.has_field('overlay_cull_min_x'):
+        layout.write(section, scratch_off, 'overlay_cull_min_x',
+                     struct.pack('<f', overlay_cull_min_x))
+        layout.write(section, scratch_off, 'overlay_cull_max_x',
+                     struct.pack('<f', overlay_cull_max_x))
+        layout.write(section, scratch_off, 'overlay_cull_min_y',
+                     struct.pack('<f', overlay_cull_min_y))
+        layout.write(section, scratch_off, 'overlay_cull_max_y',
+                     struct.pack('<f', overlay_cull_max_y))
     layout.write(section, scratch_off, 'overlay_vertex_count',
                  struct.pack('<I', len(overlay_waypoints)))
     layout.write(section, scratch_off, 'overlay_edge_count',

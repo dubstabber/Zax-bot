@@ -54,14 +54,19 @@ def build_enabled_patches():
         ),
     ]
 
-    pickup_runtime_enabled = cfg.PICKUP_REGISTER_ENABLED or cfg.PICKUP_DIVERT_ENABLED
-    if cfg.OVERLAY_ENABLED or pickup_runtime_enabled:
+    pickup_runtime_enabled = (
+        cfg.PICKUP_REGISTER_ENABLED
+        or cfg.PICKUP_DIVERT_ENABLED
+        or cfg.PICKUP_OVERLAY_MARKERS_ENABLED
+    )
+    overlay_hook_enabled = cfg.OVERLAY_HOOK_ENABLED or cfg.OVERLAY_ENABLED
+    if overlay_hook_enabled or pickup_runtime_enabled:
         # Page-flip detour: draws OVERLAY_WAYPOINTS / OVERLAY_EDGES via the
         # engine's renderer just before the back-buffer is presented. It also
         # owns the once-per-frame world_frame counter used by pickup
-        # registration. Keep this out of normal builds: even a fast-skipped
-        # page-flip hook is a global frame hot path, and the full overlay loop
-        # is an authoring diagnostic.
+        # registration. The full drawing loop is gated at runtime by the
+        # overlay_enabled scratch flag; normal builds install the hook for the
+        # O-key authoring toggle but start with drawing disabled.
         patches.append(
             RelocationPatch(
                 'sub_5693A0 waypoint overlay', 'jmp', ax.S5693A0_VA,
@@ -71,10 +76,10 @@ def build_enabled_patches():
 
     if pickup_runtime_enabled:
         # Per-pickup self-registration: detours the CPickupAI per-frame update
-        # so each live pickup records its world position into pickup_table.
-        # The detour re-runs the displaced 8-byte prologue (EBX = entity) then
-        # appends the position. This function runs once per pickup every frame,
-        # so install it only for pickup-divert/diagnostic builds.
+        # so each live pickup can record its world position into pickup_table.
+        # The detour re-runs the displaced 8-byte prologue (EBX = entity), then
+        # fast-skips when pickup_register_enabled is 0. The O-key overlay
+        # toggle enables it for item markers; pickup-divert builds keep it on.
         patches.append(
             RelocationPatch(
                 'sub_53DA40 pickup registration', 'jmp', ax.S53DA40_VA,

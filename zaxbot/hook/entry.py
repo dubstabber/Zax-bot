@@ -190,7 +190,15 @@ def build_hook(section_va_abs):
         overlay_pickup_color=cfg.OVERLAY_PICKUP_COLOR,
         overlay_vertex_radius=cfg.OVERLAY_VERTEX_RADIUS,
         overlay_vertex_aspect=cfg.OVERLAY_VERTEX_ASPECT,
-        pickup_register_enabled=cfg.PICKUP_REGISTER_ENABLED,
+        overlay_cull_min_x=cfg.OVERLAY_CULL_MIN_X,
+        overlay_cull_max_x=cfg.OVERLAY_CULL_MAX_X,
+        overlay_cull_min_y=cfg.OVERLAY_CULL_MIN_Y,
+        overlay_cull_max_y=cfg.OVERLAY_CULL_MAX_Y,
+        pickup_register_enabled=(
+            cfg.PICKUP_REGISTER_ENABLED
+            or cfg.PICKUP_DIVERT_ENABLED
+            or (cfg.PICKUP_OVERLAY_MARKERS_ENABLED and cfg.OVERLAY_ENABLED)
+        ),
         pickup_divert_enabled=cfg.PICKUP_DIVERT_ENABLED,
         pickup_divert_radius_sq=cfg.PICKUP_DIVERT_RADIUS_SQ,
         pickup_reached_radius_sq=cfg.PICKUP_REACHED_RADIUS_SQ,

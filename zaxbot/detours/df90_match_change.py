@@ -27,6 +27,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     bot_pickup_valid_va = layout.va('bot_pickup_valid')
     hazard_count_va     = layout.va('hazard_count')
     frame_counter_va    = layout.va('frame_counter')
+    pickup_count_va     = layout.va('pickup_count')
+    pickup_last_frame_va = layout.va('pickup_last_frame')
 
     a.label('detour_df90')
     a.raw(b'\x50')                                # push eax
@@ -68,6 +70,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # Reset frame counter so per-bot scan-stagger math doesn't see a fake
     # huge delta on the first frame of the new match.
     a.raw(b'\xC7\x05' + le32(frame_counter_va) + le32(0))
+    # Drop stale pickup overlay markers from the previous match/map. The
+    # registration detour repopulates this on the next enabled pickup tick.
+    a.raw(b'\xC7\x05' + le32(pickup_count_va) + le32(0))
+    a.raw(b'\xC7\x05' + le32(pickup_last_frame_va) + le32(0))
     # Clear cached host participant ptr to NULL so the next match's first
     # spawn re-captures it. Must be 0 (not -1) so fire/aim's `test eax`
     # guard works without dereferencing a bogus pointer.

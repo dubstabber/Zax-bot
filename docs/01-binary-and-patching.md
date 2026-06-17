@@ -60,9 +60,11 @@ image, writes it back, and prints the hook/scratch/detour VAs.
 | `0x59DF90` | capture `a2`; clear bot scratch arrays on match change |
 | `0x5AA4E0` | skip bot camera tracker while spawning |
 | `0x4FBC50` | make component attach NULL-tolerant |
-| `0x542360` | zero movement vector for bot controllers |
+| `0x542360` | bot movement-vector override |
 | `0x5436F0` | synthesize bot fire/aim |
 | `0x542550` | capture/scrub walking controllers by bot index |
+| `0x5693A0` | toggleable visual waypoint authoring overlay before page flip |
+| `0x53DA40` | gated pickup self-registration for overlay item markers |
 | `0x480889` | skip unsafe `sub_480800` name block for synthetic ids |
 | `0x4F5204` | skip NULL entries in a character iterator |
 

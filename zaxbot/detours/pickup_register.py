@@ -51,11 +51,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # computation), ESP adjusted exactly as the code at RESUME expects.
     a.raw(ax.S53DA40_PROLOGUE)                            # sub esp,24h; push ebx; mov ebx,[esp+0x30]
 
+    # Fast disabled path. Registration is usually driven by the overlay toggle,
+    # so avoid pushad/pushfd and helper calls while the overlay is hidden.
+    a.raw(b'\x83\x3D' + le32(enabled_va) + b'\x00')       # cmp [pickup_register_enabled], 0
+    a.jz('pr_resume')
+
     a.raw(b'\x60')                                        # pushad
     a.raw(b'\x9C')                                        # pushfd
 
-    a.raw(b'\x83\x3D' + le32(enabled_va) + b'\x00')       # cmp [pickup_register_enabled], 0
-    a.jz('pr_done')
     a.raw(b'\x85\xDB'); a.jz('pr_done')                   # entity (ebx) NULL?
     # Heap-range sanity: entities live in Wine's userland heap, not the PE
     # image — mirrors the snapshot/world_scan range guards.
@@ -110,4 +113,5 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('pr_done')
     a.raw(b'\x9D')                                        # popfd
     a.raw(b'\x61')                                        # popad
+    a.label('pr_resume')
     a.jmp_va(ax.S53DA40_RESUME)                           # resume at 0x53DA48 (test ebx, ebx)
