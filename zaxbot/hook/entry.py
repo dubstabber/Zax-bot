@@ -13,6 +13,7 @@ from .. import config as cfg
 from ..asm import Asm
 from ..layout import build_scratch_layout
 from ..portal_data import resolve_portal_data
+from ..flag_data import resolve_flag_data
 from ..static_data import write_static_scratch_data
 from . import aim_lead, apply_colors, detect_mode, dispatcher, snapshot, spawn, waypoint_diag, waypoint_edit, weapon_speed
 from .helpers import emit_logc_body, emit_wbuf_body
@@ -24,6 +25,7 @@ from ..detours import (
     df90_match_change,
     dp_poll,
     entity_scan,
+    flag_route,
     name_block,
     overlay,
     pickup_register,
@@ -87,6 +89,11 @@ def build_hook(section_va_abs):
         portal_static_point_max=cfg.PORTAL_STATIC_POINT_MAX,
         portal_map_name_slot=cfg.PORTAL_MAP_NAME_SLOT,
         scan_entities_max=cfg.SCAN_ENTITIES_MAX,
+        flag_table_max=cfg.FLAG_TABLE_MAX,
+        flag_static_map_max=cfg.FLAG_STATIC_MAP_MAX,
+        flag_static_point_max=cfg.FLAG_STATIC_POINT_MAX,
+        flag_map_name_slot=cfg.FLAG_MAP_NAME_SLOT,
+        flag_route_max=cfg.FLAG_ROUTE_MAX,
     )
 
     a = Asm(section_va_abs + cfg.HOOK_ENTRY_OFF)
@@ -135,6 +142,7 @@ def build_hook(section_va_abs):
     pickup_register.emit(a, layout)
     portal_register.emit(a, layout)
     entity_scan.emit(a, layout)
+    flag_route.emit(a, layout)
 
     code = a.link()
     assert len(code) <= cfg.SCRATCH_OFF, (
@@ -143,6 +151,7 @@ def build_hook(section_va_abs):
 
     overlay_waypoints, overlay_edges = cfg.resolve_overlay_data()
     portal_maps = resolve_portal_data()
+    flag_maps = resolve_flag_data()
 
     section = bytearray(cfg.NEW_SECTION_SIZE)
     section[cfg.HOOK_ENTRY_OFF:cfg.HOOK_ENTRY_OFF + len(code)] = code
@@ -191,7 +200,7 @@ def build_hook(section_va_abs):
         wp_edge_lookahead=cfg.WP_EDGE_LOOKAHEAD,
         wp_edge_follow_enabled=cfg.WP_EDGE_FOLLOW_ENABLED,
         wp_progress_timeout_frames=cfg.WP_PROGRESS_TIMEOUT_FRAMES,
-        wp_relocate_frames=cfg.WP_RELOCATE_FRAMES,
+        wp_stuck_reached_radius_sq=cfg.WP_STUCK_REACHED_RADIUS_SQ,
         wp_slide_turn_step_deg=cfg.WP_SLIDE_TURN_STEP_DEG,
         overlay_enabled=cfg.OVERLAY_ENABLED,
         overlay_waypoints=overlay_waypoints,
@@ -201,6 +210,9 @@ def build_hook(section_va_abs):
         overlay_selected_color=cfg.OVERLAY_SELECTED_COLOR,
         overlay_pickup_color=cfg.OVERLAY_PICKUP_COLOR,
         overlay_portal_color=cfg.OVERLAY_PORTAL_COLOR,
+        overlay_flag_color=cfg.OVERLAY_FLAG_COLOR,
+        ctf_flag_entity_match_radius_sq=cfg.CTF_FLAG_ENTITY_MATCH_RADIUS_SQ,
+        ctf_flag_home_force_tick_radius_sq=cfg.CTF_FLAG_HOME_FORCE_TICK_RADIUS_SQ,
         overlay_vertex_radius=cfg.OVERLAY_VERTEX_RADIUS,
         overlay_vertex_aspect=cfg.OVERLAY_VERTEX_ASPECT,
         overlay_cull_min_x=cfg.OVERLAY_CULL_MIN_X,
@@ -229,6 +241,8 @@ def build_hook(section_va_abs):
         lava_flee_frames=cfg.LAVA_FLEE_FRAMES,
         portal_maps=portal_maps,
         portal_map_name_slot=cfg.PORTAL_MAP_NAME_SLOT,
+        flag_maps=flag_maps,
+        flag_map_name_slot=cfg.FLAG_MAP_NAME_SLOT,
     )
 
     info = {

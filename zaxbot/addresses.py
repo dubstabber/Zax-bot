@@ -15,6 +15,18 @@ ORIG_TARGET_VA    = 0x599580   # sub_599580: VK -> internal keyid translator
 
 # --- World/manager chain ---------------------------------------------------
 MANAGER_GLOBAL_VA = 0x713F14   # dword_713F14: game/world manager
+
+# Per-entity component advance: __thiscall(this=char, a2=dt_float); ret 4.
+# Gated internally on `char->flags(+0x1C) & 0x800000` (Active). Calls each
+# component's vtbl[25] (e.g. the walking-controller think sub_543B60 -> our
+# sub_542360 override). This is NOT sufficient for far-bot recovery by itself:
+# the normal active-entity driver also runs the entity vtable stages below,
+# including CEntityWalking's post-component position sync.
+SUB_4FADC0_VA = 0x4FADC0
+ENTITY_TICK_PRE1_VTBL_OFF = 0x7C   # sub_57A030 stage 1: entity.vtbl[31](dt)
+ENTITY_TICK_PRE2_VTBL_OFF = 0x80   # sub_57A030 stage 2: entity.vtbl[32](dt)
+ENTITY_TICK_MAIN_VTBL_OFF = 0x8C   # sub_57A030 stage 3: entity.vtbl[35](dt)
+ENTITY_SKIP_UPDATE_BIT    = 0x10000
 VT_OFFSET_TO_LVL  = 0x184      # mgr->vtbl[0x184]() -> active level/match object
 MP_DATA_FIELD     = 0x30       # level->[+0x30] = live CMultiPlayerGameData (NULL outside MP)
 SHOWMSG_VA        = 0x59B260   # __stdcall sub_59B260(char* text, int type); type=-1 => system msg
@@ -96,9 +108,14 @@ FLT_TWO_PI_VA = 0x5EDFFC  # engine float 2*pi constant
 #   hash = sub_523DF0(this=SLOT_NAME_REGISTRY, "Primary", -1)    ; slot hash
 #   item = sub_425290(this=inv, hash)                            ; item id
 #   wpn  = inv.vtable[+0x68](this=inv, item)                     ; weapon obj
-SUB_4267E0_VA              = 0x4267E0   # __thiscall(char) -> inventory*
+SUB_4267E0_VA              = 0x4267E0   # __thiscall(char) -> inventory/group*; ret 0
 SUB_523DF0_VA              = 0x523DF0   # __thiscall(registry, char* name, int) -> hash; ret 8
-SUB_425290_VA              = 0x425290   # __thiscall(inventory, hash) -> item; ret 4
+SUB_425290_VA              = 0x425290   # __thiscall(inventory, gid) -> slot idx (-1 = none); ret 4
+# "Multiplayer Flag" inventory-group id (lazily set by sub_5BAE10's first
+# scoreboard render; runtime == 8). is_carrying(char) ==
+# sub_425290(sub_4267E0(char), [MULTIPLAYER_FLAG_GID_VA]) != -1. 0 = not yet
+# resolved (treat as "not carrying" that frame). See ctf-flag-carry-detection.
+MULTIPLAYER_FLAG_GID_VA    = 0x714454
 SUB_425900_VA              = 0x425900   # __thiscall(inventory, item_def*) -> item; ret 4
 SUB_4DD480_VA              = 0x4DD480   # __thiscall(item_obj) -> inventory item definition*
 SLOT_NAME_REGISTRY_VA      = 0x6C0800   # ECX setup for sub_523DF0 (engine global)

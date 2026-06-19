@@ -58,8 +58,10 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 
 - WM_KEYDOWN hook at `0x599A1A` redirects `call sub_599580` to
   `.zaxbot:hook_entry`, then tail-jumps back to `sub_599580`.
-- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0xA000`, RWX.
-- Scratch starts at `0x71F000` (`SCRATCH_OFF = 0x5000`).
+- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0xD000`, RWX (grown from
+  `0xA000` for the CTF flag static tables, then to `0xC000` for the CTF routing
+  BFS distance field, then to `0xD000` for far-base CTF flag entity force-ticks).
+- Scratch starts at `0x71F800` (`SCRATCH_OFF = 0x5800`).
 - B opens the bot menu via `sub_59B260`; R writes a runtime snapshot.
 - Digit selection calls `do_spawn_with_team`.
 - Spawn injects a synthetic DirectPlay "player added" queue entry at
@@ -195,6 +197,90 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     `portal_table`); routing bots INTO portals and re-acquiring the nearest
     waypoint after the teleport jump are still open (the follower's
     progress-timeout re-acquire partially covers the latter).
+- CTF flags populate `flag_table` (drawn by the overlay in blue) via the SAME
+  static Data.dat pipeline as portals (`flag_data.py` → `world_scan.py:
+  load_flags`, per match). The build-time parse extracts each multiplayer
+  `.zax` map's two flag-base anchors — the `"Red Flag Spawn"` / `"Blue Flag
+  Spawn"` Level Parts (`Position X`/`Y`) — and `load_flags` copies the active
+  map's points into `flag_table` on match change (matched by the runtime map
+  name at `MAP_NAME_CSTRING_VA`, full-path form e.g.
+  `Levels/Multiplayer/CTF/Torture Chamber.zax`). The flag spawn anchors are the
+  HOME-base positions — the right foundation for CTF bot routing (carry the
+  enemy flag to your home base). Current CTF routing uses these static base
+  anchors successfully: bots go to the enemy base, grab the flag, return home,
+  and capture. Live flag state is still open: the patch does not yet know
+  whether the actual enemy flag is still at base, is carried by someone else, or
+  is dropped somewhere on the map. NOTE: in the 8-bit palettized overlay the hue
+  is driven by the BLUE byte alone, so flags
+  (blue), portals (pink), pickups (cyan) and vertices (white) all render with
+  the same palette index — distinguish them by position/count, not color.
+- CTF bots ROUTE to flags through the waypoint graph (`detours/flag_route.py`,
+  gated by `cfg.CTF_FLAG_ROUTING_ENABLED`). Pieces:
+  - **Team tagging** (build time): `flag_data.py` tags each base by anchor name
+    (Red=1/Blue=0); `static_data.py` packs a parallel `flag_static_team`;
+    `load_flags` copies `flag_table` + `flag_team` per match (file order is NOT a
+    reliable Red/Blue order, hence the explicit tag).
+  - **Per-match BFS** (`build_flag_routes`, from `detour_df90`, only when
+    `detect_mode()==CTF` and `flag_count>0`): nearest graph node to each base,
+    then a BFS over the UNDIRECTED edge list fills `flag_dist[base][node]` (hop
+    distance, `0xFFFFFFFF`=unreachable). Arms `flag_routing_active`.
+  - **Goal-biased follow** (`ctf_pick_goal` + `ctf_next_hop`, injected at
+    `s542360_wp_arrived`): goal = carrying ? OWN base : ENEMY base (team to
+    `flag_team`). `ctf_next_hop` steps to the neighbour of the current node with
+    strictly-smaller `flag_dist[goal]` (guaranteed progress on a real shortest
+    path); -1 falls back to the random `wp_advance` whenever routing can't apply
+    (non-CTF / no graph / no flags / unreachable). Carry detection is the
+    live-verified inventory-group test (`sub_4267E0` then
+    `sub_425290(inv,[0x714454])`), fully NULL-guarded; see
+    [[ctf-flag-carry-detection]].
+  - **Final approach** (`bot_movement.py` at `s542360_wp_have_cur`): once the
+    bot's current node IS the goal base's nearest node the graph can't get
+    closer, so steer straight at `flag_table[goal]` to physically TOUCH the flag
+    (grab it / deliver to own base to capture). Without it the bot circles the
+    last node (at the goal node `ctf_next_hop` finds no closer neighbour, the
+    random `wp_advance` bounces it off, routing snaps it back, loop).
+    `ctf_pick_goal` runs every frame, so the instant the bot grabs the flag the
+    goal flips to home and it heads back. v1 routes to the static base anchors
+    only. Next CTF behavior: detect whether the enemy flag is actually present
+    at base; if it is not present because another player carries it or it is
+    dropped somewhere, stop objective BFS and let the bot randomly roam the
+    waypoint graph to search like a real player. Do NOT add BFS/pathfinding for
+    an unknown flag location.
+- Bots are kept SIMULATED when far from the host's camera
+  (`cfg.BOT_FORCE_ACTIVE_ENABLED`). The engine deactivates entities far from the
+  local camera, and the per-entity component advance `sub_4FADC0` gates ALL
+  component updates (incl. the bot walking-controller think `sub_543B60`, which
+  our `sub_542360` override rides inside) on `char->flags(+0x1C) &
+  ENTITY_ACTIVE_BIT (0x800000)`. So a bot walking away from the host (carrying
+  the flag home) froze mid-route until the host approached. The Active bit is
+  sticky (live-verified: a cleared bit is NOT re-set per frame), so the page-flip
+  detour re-sets each live bot char's Active bit every frame. BUT that is NOT
+  enough on its own — breakpoint proof: the engine's update DRIVER skips far
+  entities entirely. Calling only `sub_4FADC0` reaches the controller think, but
+  bypasses the active-entity driver's later position sync, so the bot computes
+  movement without changing `char+0x4C/+0x50`. So the page-flip ALSO
+  **force-ticks** (`cfg.BOT_FORCE_TICK_ENABLED`): for each live bot the engine
+  skipped this frame it mirrors `sub_57A030` for that one bot by running entity
+  vtable stages `+0x7C`, `+0x80`, and `+0x8C` with `EBP=0x10000` (the `+0x8C`
+  player path runs component advance, the controller think → our `sub_542360`
+  → bot movement, then position sync). A per-bot 0/1/2 flag `bot_ticked` (dormant
+  `bot_last_item_scan`), set by `detour_542360` when the engine ticks the bot
+  and reset each page-flip, prevents double-ticking near bots; `bot_indices[slot]==0`
+  (host/unused) is skipped. Both loops are cheap fixed 16-slot loops once per
+  frame — do NOT hook `sub_4FADC0` itself (per entity per frame = the Windows FPS-regression hot
+  path). See the `bot-far-from-camera-freeze` memory.
+- CTF home flag/base entities are also kept awake when needed. The periodic
+  `scan_portal_active` grid walk now caches up to two live entities exactly at
+  each `flag_table` anchor in `flag_entity[]`, matched by raw entity
+  `+0x4C/+0x50` coordinates rather than `sub_4FB0A0` because the getter can
+  alias nearby visual/base pieces to the same anchor while the actual capture
+  objects sit on the raw anchor (confirmed live on Hydroplant Bouncefest:
+  temporarily writing the exact-anchor entities into `flag_entity[home]` made
+  `route_carry` clear within about a second); the page-flip detour force-ticks
+  those cached entities only when a carrying bot is within
+  `CTF_FLAG_HOME_FORCE_TICK_RADIUS_SQ` of its home base. This covers the case
+  where a far bot reaches its base carrying the enemy flag but capture does not
+  fire until the host walks close enough to wake the base area.
 - General world-entity enumeration (`detours/entity_scan.py:scan_entities`,
   gated by `cfg.SCAN_ENTITIES_ENABLED`). The long-standing blocker for object
   detection was that there is no flat entity list: `mgr+0x290` is players,
@@ -243,7 +329,10 @@ Current patched sites:
 - `0x542360` - bot movement-vector override.
 - `0x5436F0` - bot fire/aim override.
 - `0x542550` - walking-controller capture/scrub.
-- `0x5693A0` - toggleable visual waypoint authoring overlay before page flip.
+- `0x5693A0` - toggleable visual waypoint authoring overlay before page flip;
+  also re-sets each live bot char's Active bit every frame
+  (`cfg.BOT_FORCE_ACTIVE_ENABLED`) so the engine keeps simulating bots when they
+  walk far from the host's camera (see below).
 - `0x53DA40` - gated pickup self-registration for overlay item markers.
 - `0x4C11A0` - teleport-portal self-registration (gated by
   `cfg.PORTAL_REGISTER_ENABLED`); records each `CTeleportAction` warp's source
@@ -320,10 +409,11 @@ Older emitted labels or disabled detours are not active unless they appear in
 - Graph authoring tools / coverage: place nodes at corners and junctions so
   the straight node-to-node segments stay in walkable space (corner-cutting is
   what triggers the wall-slide). Consider auto-densifying long edges.
-- CTF/SK objective behavior on top of the node-to-node follower: CTF bots need
-  flag-aware target selection (route to the flag node, then the home node), SK
-  bots need collector-aware return paths. Both can reuse `wp_advance` with a
-  goal-biased neighbour choice instead of a uniform random pick.
+- CTF live flag state on top of the current base routing: detect whether the
+  enemy flag actually exists at its base, is carried, or is dropped. If it is
+  not present at the enemy base, intentionally fall back to random graph roaming
+  so the bot searches the map like a real player; do not BFS toward an unknown
+  flag location. SK bots still need collector-aware return paths.
 - Reintroduce hazard/pickup awareness as GRAPH-AWARE routing (route through
   nodes near pickups, around lava) rather than the removed vector-field
   perturbation that pushed the heading into walls.

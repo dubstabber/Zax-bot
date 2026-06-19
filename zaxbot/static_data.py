@@ -137,6 +137,81 @@ def write_portal_static_table(section, scratch_off, layout, portal_maps, map_nam
         layout.write(section, scratch_off, 'portal_static_points', bytes(packed_points))
 
 
+def write_flag_static_table(section, scratch_off, layout, flag_maps, map_name_slot):
+    """Pack build-time CTF flag map records and point coordinates into scratch.
+
+    Mirror of ``write_portal_static_table`` for the flag overlay block.
+    """
+    if not layout.has_field('flag_static_map_count'):
+        return
+
+    flag_maps = tuple(flag_maps or ())
+    if not layout.has_field('flag_static_maps') and flag_maps:
+        raise ValueError('flag map data present but layout has no flag_static_maps field')
+    if not layout.has_field('flag_static_points') and any(points for _, points in flag_maps):
+        raise ValueError('flag point data present but layout has no flag_static_points field')
+
+    layout.write(section, scratch_off, 'flag_count', struct.pack('<I', 0))
+    if layout.has_field('flag_table'):
+        layout.write(section, scratch_off, 'flag_table', b'\x00' * layout.field('flag_table').size)
+    if layout.has_field('flag_entity'):
+        layout.write(section, scratch_off, 'flag_entity', b'\x00' * layout.field('flag_entity').size)
+
+    map_capacity = 0
+    point_capacity = 0
+    if layout.has_field('flag_static_maps'):
+        map_capacity = layout.field('flag_static_maps').size // (map_name_slot + 8)
+    if layout.has_field('flag_static_points'):
+        point_capacity = layout.field('flag_static_points').size // 8
+
+    if len(flag_maps) > map_capacity:
+        raise ValueError(
+            f'flag map table has {len(flag_maps)} rows but scratch holds {map_capacity}'
+        )
+
+    total_points = sum(len(points) for _, points in flag_maps)
+    if total_points > point_capacity:
+        raise ValueError(
+            f'flag point table has {total_points} rows but scratch holds {point_capacity}'
+        )
+
+    map_stride = map_name_slot + 8
+    packed_maps = bytearray(map_capacity * map_stride)
+    packed_points = bytearray(point_capacity * 8)
+    # Parallel team tag (DWORD per point: 0=Blue, 1=Red) so the runtime can map a
+    # bot's own team to its HOME base vs the ENEMY base. flag file order is not a
+    # reliable Red/Blue ordering, hence the explicit tag.
+    packed_team = bytearray(point_capacity * 4)
+    point_index = 0
+    for map_idx, (map_name, points) in enumerate(flag_maps):
+        name_bytes = map_name.encode('latin1')
+        if b'\x00' in name_bytes:
+            raise ValueError(f'flag map name contains NUL: {map_name!r}')
+        if len(name_bytes) + 1 > map_name_slot:
+            raise ValueError(
+                f'flag map name too long for {map_name_slot}-byte slot: {map_name!r}'
+            )
+        rec_off = map_idx * map_stride
+        packed_maps[rec_off:rec_off + len(name_bytes)] = name_bytes
+        count_off = rec_off + map_name_slot
+        packed_maps[count_off:count_off + 8] = struct.pack('<II', len(points), point_index)
+        for x, y, team in points:
+            struct.pack_into('<ff', packed_points, point_index * 8, float(x), float(y))
+            struct.pack_into('<I', packed_team, point_index * 4, int(team) & 0xFFFFFFFF)
+            point_index += 1
+
+    layout.write(section, scratch_off, 'flag_static_map_count',
+                 struct.pack('<I', len(flag_maps)))
+    layout.write(section, scratch_off, 'flag_static_point_count',
+                 struct.pack('<I', total_points))
+    if layout.has_field('flag_static_maps'):
+        layout.write(section, scratch_off, 'flag_static_maps', bytes(packed_maps))
+    if layout.has_field('flag_static_points'):
+        layout.write(section, scratch_off, 'flag_static_points', bytes(packed_points))
+    if layout.has_field('flag_static_team'):
+        layout.write(section, scratch_off, 'flag_static_team', bytes(packed_team))
+
+
 _FORCE_MODE_TABLE = {None: 0xFFFFFFFF, 'dm': 0, 'ctf': 1, 'sk': 2}
 
 
@@ -186,7 +261,7 @@ def write_static_scratch_data(
     wp_edge_lookahead=0.15,
     wp_edge_follow_enabled=True,
     wp_progress_timeout_frames=150,
-    wp_relocate_frames=150,
+    wp_stuck_reached_radius_sq=16384.0,
     wp_slide_turn_step_deg=30.0,
     overlay_enabled=False,
     overlay_waypoints=(),
@@ -196,6 +271,9 @@ def write_static_scratch_data(
     overlay_selected_color=(255, 0, 255, 255),
     overlay_pickup_color=(255, 128, 0, 255),
     overlay_portal_color=(255, 64, 255, 255),
+    overlay_flag_color=(0, 0, 255, 255),
+    ctf_flag_entity_match_radius_sq=256.0,
+    ctf_flag_home_force_tick_radius_sq=4096.0,
     overlay_vertex_radius=8.0,
     overlay_vertex_aspect=1.0,
     overlay_cull_min_x=-96.0,
@@ -220,6 +298,8 @@ def write_static_scratch_data(
     lava_flee_frames=15,
     portal_maps=(),
     portal_map_name_slot=0,
+    flag_maps=(),
+    flag_map_name_slot=0,
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
     # meaningful — "spawn one bot"); CTF is the only team mode and accepts
@@ -356,8 +436,11 @@ def write_static_scratch_data(
                  struct.pack('<I', 1 if wp_edge_follow_enabled else 0))
     layout.write(section, scratch_off, 'wp_progress_timeout',
                  struct.pack('<I', wp_progress_timeout_frames))
+    # Reuse the dormant wp_relocate_frames slot for the stuck-near-node arrival
+    # radius. Keeping the field name avoids shifting the established scratch
+    # layout while giving the movement detour a second radius for wedged bots.
     layout.write(section, scratch_off, 'wp_relocate_frames',
-                 struct.pack('<I', wp_relocate_frames))
+                 struct.pack('<f', wp_stuck_reached_radius_sq))
     # Wall-slide angle step, packed as radians for the movement detour's fadd.
     layout.write(section, scratch_off, 'wp_slide_turn_step',
                  struct.pack('<f', math.radians(wp_slide_turn_step_deg)))
@@ -418,6 +501,15 @@ def write_static_scratch_data(
     if layout.has_field('overlay_portal_color'):
         layout.write(section, scratch_off, 'overlay_portal_color',
                      _pack_color(overlay_portal_color))
+    if layout.has_field('overlay_flag_color'):
+        layout.write(section, scratch_off, 'overlay_flag_color',
+                     _pack_color(overlay_flag_color))
+    if layout.has_field('flag_entity_match_radius_sq'):
+        layout.write(section, scratch_off, 'flag_entity_match_radius_sq',
+                     struct.pack('<f', ctf_flag_entity_match_radius_sq))
+    if layout.has_field('flag_home_tick_radius_sq'):
+        layout.write(section, scratch_off, 'flag_home_tick_radius_sq',
+                     struct.pack('<f', ctf_flag_home_force_tick_radius_sq))
     if layout.has_field('portal_static_map_count'):
         write_portal_static_table(
             section,
@@ -425,6 +517,14 @@ def write_static_scratch_data(
             layout,
             portal_maps,
             portal_map_name_slot,
+        )
+    if layout.has_field('flag_static_map_count'):
+        write_flag_static_table(
+            section,
+            scratch_off,
+            layout,
+            flag_maps,
+            flag_map_name_slot,
         )
     # Pickup self-registration master switch (per-frame CPickupAI detour).
     if layout.has_field('pickup_register_enabled'):

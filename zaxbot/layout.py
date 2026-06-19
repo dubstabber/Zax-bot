@@ -51,6 +51,7 @@ BOT_STATE_FIELDS = (
 #   bot_wander_x/y     -> block-vector diagnostic mirror (ai_move idx0/idx1)
 #   bot_pickup_x_cache -> bot_last_char (respawn detection)
 #   bot_pickup_y_cache -> wp_best_dsq (min dsq-to-node)
+#   bot_pickup_valid   -> failed_edge_marker (packed failed edge to avoid)
 #   bot_flee_ticks     -> slide_turn (wall-slide deflection ramp)
 AI_PERBOT_FIELDS = (
     ('bot_wander_x',        'DORMANT/diag: mirrored controller block.x (float)'),
@@ -59,10 +60,10 @@ AI_PERBOT_FIELDS = (
     ('bot_last_x',          'stuck: last-tick x (float)'),
     ('bot_last_y',          'stuck: last-tick y (float)'),
     ('bot_stuck_count',     'stuck: frames with delta < STUCK_DELTA_SQ'),
-    ('bot_last_item_scan',  'DORMANT: was attractor scan stagger'),
+    ('bot_last_item_scan',  'force-tick: bot_ticked 0/1 engine, 2 recovery tick'),
     ('bot_pickup_x_cache',  'follow: bot_last_char (respawn detection)'),
     ('bot_pickup_y_cache',  'follow: wp_best_dsq (min dsq-to-node)'),
-    ('bot_pickup_valid',    'DORMANT: was attractor cache-valid flag'),
+    ('bot_pickup_valid',    'follow: packed failed edge marker; avoid retrying blocked edge'),
     ('bot_last_damage',     'follow: reactive cur_damage tracker (pickup-divert hazard avoid)'),
     ('bot_flee_ticks',      'follow: slide_turn (wall-slide deflection ramp)'),
     # --- Waypoint-following per-bot nav state. MUST stay the last three
@@ -170,6 +171,11 @@ def build_scratch_layout(
     portal_static_point_max=0,
     portal_map_name_slot=0,
     scan_entities_max=0,
+    flag_table_max=0,
+    flag_static_map_max=0,
+    flag_static_point_max=0,
+    flag_map_name_slot=0,
+    flag_route_max=0,
 ):
     BOT_STATE_BASE = 0x180
     MAX_BOT_SLOTS = 16
@@ -471,7 +477,7 @@ def build_scratch_layout(
         ScratchField('wp_progress_timeout',       ai_off + 0x70 + AI_HAZARD_CAP * 12,         0x04,
                      'follow: frames of no-progress-toward-target before recover (int)'),
         ScratchField('wp_relocate_frames',        ai_off + 0x74 + AI_HAZARD_CAP * 12,         0x04,
-                     'follow: DORMANT — relocate burst (superseded by wall-slide)'),
+                     'follow: repurposed dormant slot; stuck-near-node arrival radius^2 (float)'),
         # Wall-slide angle step (radians) added to the emitted movement angle
         # per deflection ramp step when a bot is wedged against geometry. See
         # detours/bot_movement.py (the node-to-node follower + wall-slide).
@@ -803,8 +809,10 @@ def build_scratch_layout(
     # walk). All per-call scratch; lives at the very tail so nothing else
     # shifts. scan_table is `scan_entities_max` records of 16 bytes each:
     #   (entity_ptr u32, x f32, y f32, flags u32).
+    tail_off = portal_static_base
     if scan_entities_max > 0:
         scan_base = portal_static_base
+        tail_off = scan_base + 0x30 + scan_entities_max * 16
         overlay_fields.extend([
             ScratchField('scan_class_desc', scan_base + 0x00, 0x04,
                          'scan: class descriptor to match (0 = collect every entity)'),
@@ -851,5 +859,127 @@ def build_scratch_layout(
                              portal_table_max_capped * 4,
                              'portal: the matched (nearest) entity ptr per pad (diag / direct read)'),
             ])
+            tail_off = pa_base + portal_table_max_capped * 12 + 0x08
+
+    # --- CTF flag overlay data --------------------------------------------
+    # Mirrors the portal static-table block. The live flag_table is populated
+    # once per match by load_flags from the compact build-time static table
+    # (parsed from Data.dat). Placed at the very tail so no existing scratch
+    # offset shifts. Map entries are fixed-size:
+    #   name[FLAG_MAP_NAME_SLOT] | count u32 | first_point_index u32
+    flag_table_max_capped = max(0, flag_table_max)
+    flag_static_map_max_capped = max(0, flag_static_map_max)
+    flag_static_point_max_capped = max(0, flag_static_point_max)
+    flag_name_slot_capped = max(0, flag_map_name_slot)
+    flag_map_stride = flag_name_slot_capped + 8
+    flag_base = tail_off
+    overlay_fields.extend([
+        ScratchField('flag_count', flag_base + 0x00, 0x04,
+                     'flag: live entries in flag_table for active map'),
+        ScratchField('overlay_flag_color', flag_base + 0x04, overlay_color_size,
+                     'overlay: detected-flag CColor (rebuilt per-frame)'),
+        ScratchField('flag_entity_match_radius_sq', flag_base + 0x14, 0x04,
+                     'flag: max d^2 for matching live entities to a flag anchor'),
+        ScratchField('flag_home_tick_radius_sq', flag_base + 0x18, 0x04,
+                     'flag: max d^2 for force-ticking home flag entities'),
+    ])
+    flag_static_base = flag_base + 0x1C
+    if flag_table_max_capped > 0:
+        overlay_fields.append(ScratchField(
+            'flag_table', flag_static_base,
+            flag_table_max_capped * 8,
+            'flag: float[2] per CTF flag home base (world coords)',
+        ))
+        flag_static_base += flag_table_max_capped * 8
+        overlay_fields.append(ScratchField(
+            'flag_team', flag_static_base,
+            flag_table_max_capped * 4,
+            'flag: team tag per live flag_table entry (0=Blue, 1=Red)',
+        ))
+        flag_static_base += flag_table_max_capped * 4
+        overlay_fields.append(ScratchField(
+            'flag_entity', flag_static_base,
+            flag_table_max_capped * 2 * 4,
+            'flag: up to two live entity ptrs matched at each flag anchor',
+        ))
+        flag_static_base += flag_table_max_capped * 2 * 4
+    overlay_fields.extend([
+        ScratchField('flag_static_map_count', flag_static_base + 0x00, 0x04,
+                     'flag: build-time static map table count'),
+        ScratchField('flag_static_point_count', flag_static_base + 0x04, 0x04,
+                     'flag: build-time static point table count'),
+    ])
+    flag_static_base += 0x08
+    if flag_static_map_max_capped > 0 and flag_map_stride > 8:
+        overlay_fields.append(ScratchField(
+            'flag_static_maps', flag_static_base,
+            flag_static_map_max_capped * flag_map_stride,
+            'flag: static map records (name/count/first point)',
+        ))
+        flag_static_base += flag_static_map_max_capped * flag_map_stride
+    if flag_static_point_max_capped > 0:
+        overlay_fields.append(ScratchField(
+            'flag_static_points', flag_static_base,
+            flag_static_point_max_capped * 8,
+            'flag: static float[2] point table parsed from Data.dat',
+        ))
+        flag_static_base += flag_static_point_max_capped * 8
+        overlay_fields.append(ScratchField(
+            'flag_static_team', flag_static_base,
+            flag_static_point_max_capped * 4,
+            'flag: static team tag (DWORD per point, parallel to flag_static_points)',
+        ))
+        flag_static_base += flag_static_point_max_capped * 4
+
+    # --- CTF flag routing (BFS path field over the waypoint graph) --------
+    # Precomputed once per match by build_flag_routes (from detour_df90) and
+    # consumed by ctf_next_hop at each bot node arrival. flag_dist[i][node] =
+    # hop distance from flag base i's nearest node to `node` (0xFFFFFFFF =
+    # unreachable / no graph). BFS/routing fields are global; bfs_* are
+    # transient load-time scratch for the BFS itself.
+    flag_route_max_capped = max(0, flag_route_max)
+    overlay_vertex_max_capped = max(0, overlay_vertex_max)
+    if flag_route_max_capped > 0 and overlay_vertex_max_capped > 0:
+        route_base = flag_static_base
+        overlay_fields.extend([
+            ScratchField('flag_routing_active', route_base + 0x00, 0x04,
+                         'flag-route: 1 iff CTF + graph + flags + routes built this match'),
+            ScratchField('route_cur', route_base + 0x04, 0x04,
+                         'flag-route: ctf_next_hop spill of current node idx'),
+            ScratchField('bfs_head', route_base + 0x08, 0x04,
+                         'flag-route: BFS queue head (load-time)'),
+            ScratchField('bfs_tail', route_base + 0x0C, 0x04,
+                         'flag-route: BFS queue tail (load-time)'),
+            ScratchField('bfs_u', route_base + 0x10, 0x04,
+                         'flag-route: BFS current node u (load-time)'),
+            ScratchField('bfs_du', route_base + 0x14, 0x04,
+                         'flag-route: BFS dist of u (load-time)'),
+            ScratchField('bfs_disti', route_base + 0x18, 0x04,
+                         'flag-route: BFS dist-array base for the base being built'),
+            ScratchField('bfr_i', route_base + 0x1C, 0x04,
+                         'flag-route: build_flag_routes outer base-loop index (survives wp_find_nearest+BFS)'),
+            ScratchField('route_carry', route_base + 0x20, 0x04,
+                         'flag-route: ctf_next_hop carry flag spill (survives sub_4267E0/sub_425290)'),
+            ScratchField('route_goal_flag', route_base + 0x24, 0x04,
+                         'flag-route: ctf_pick_goal output = goal flag index (home if carrying, else enemy; -1 = none)'),
+        ])
+        route_tail = route_base + 0x28
+        overlay_fields.append(ScratchField(
+            'flag_route_node', route_tail, flag_route_max_capped * 4,
+            'flag-route: nearest graph node to each routed flag base (goal node)',
+        ))
+        route_tail += flag_route_max_capped * 4
+        overlay_fields.append(ScratchField(
+            'flag_dist', route_tail,
+            flag_route_max_capped * overlay_vertex_max_capped * 4,
+            'flag-route: per-base BFS hop-distance field (FLAG_ROUTE_MAX x vertex_max dwords)',
+        ))
+        route_tail += flag_route_max_capped * overlay_vertex_max_capped * 4
+        overlay_fields.append(ScratchField(
+            'bfs_queue', route_tail, overlay_vertex_max_capped * 4,
+            'flag-route: BFS FIFO of node indices (load-time transient)',
+        ))
+        route_tail += overlay_vertex_max_capped * 4
+
     fields.extend(overlay_fields)
     return ScratchLayout(base_va, scratch_size, fields)

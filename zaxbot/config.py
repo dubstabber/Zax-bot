@@ -11,10 +11,10 @@ from .build import SectionSpec
 # --- new section parameters (.zaxbot) -------------------------------------
 NEW_SECTION_NAME   = b'.zaxbot\x00'
 NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
-NEW_SECTION_SIZE   = 0xA000        # ten pages: 20KB code + 20KB scratch
+NEW_SECTION_SIZE   = 0xD000        # 22KB code + 30KB scratch (grown for CTF far-base flag ticks)
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
-SCRATCH_OFF        = 0x5000        # writable scratch buffer; 20KB code / 20KB scratch
+SCRATCH_OFF        = 0x5800        # writable scratch buffer; 22KB code / 30KB scratch
 
 ZAXBOT_SECTION = SectionSpec(
     name=NEW_SECTION_NAME,
@@ -222,6 +222,14 @@ WP_SLIDE_TURN_STEP_DEG = 30.0
 # waypoint spacing but large enough to accept collision-limited corner arrival.
 WP_REACHED_RADIUS_SQ = 4096.0
 
+# Conditional "good enough" arrival for wedged bots. Normal movement still uses
+# WP_REACHED_RADIUS_SQ so tight graph corners are not skipped early. But if the
+# bot is already visibly stuck or not making waypoint progress and is within
+# this larger radius, accept the node and advance. The latest R-dump showed a
+# far CTF bot pinned ~75px from its target node with the normal 64px radius just
+# out of reach; previous dumps had the same pattern at ~100px.
+WP_STUCK_REACHED_RADIUS_SQ = 16384.0
+
 # --- Edge following (hug the connection line) ----------------------------
 # When latched (prev->current edge known), steer toward a point ON the
 # prev->current segment instead of straight at the node, so the bot converges
@@ -255,16 +263,16 @@ WP_EDGE_LOOKAHEAD = 0.15
 # increments a stall counter. When the bot has made no real progress for this
 # many frames it is genuinely wedged off-graph, so it first re-acquires the
 # nearest node from the bot's current position. If that nearest node is the same
-# failed target, it runs a brief random-wander relocate burst before trying
-# again. Edge-following while genuinely progressing is untouched.
+# failed target, the detour preserves the stall state and lets the angle sweep
+# continue instead of resetting the escape attempt every timeout window.
+# Edge-following while genuinely progressing is untouched.
 # ~2.5s at 60Hz. Lower = recovers faster but may interrupt legitimately-slow
 # progress (squeezing past the host); higher = visible pin before recovery.
 WP_PROGRESS_TIMEOUT_FRAMES = 30
 
-# Length of the random-wander relocate burst used only when progress timeout
-# cannot find a different nearest node. The burst is steering-only: it never
-# teleports the bot. When the countdown ends, the follower re-acquires the
-# nearest node from the new position.
+# Historical knob for the removed random-wander relocate burst. The scratch slot
+# is now repurposed for WP_STUCK_REACHED_RADIUS_SQ to avoid shifting the runtime
+# layout; the name is kept only for compatibility with older notes/tests.
 WP_RELOCATE_FRAMES = 150
 
 # --- Testing knob: force-equip every freshly-spawned bot with this item -----
@@ -494,6 +502,7 @@ OVERLAY_EDGE_COLOR     = (64, 160, 255, 255)  # blue/cyan; B=255 -> visible in 8
 OVERLAY_SELECTED_COLOR = (255, 0, 255, 255)   # magenta; B=255 -> visible selected node
 OVERLAY_PICKUP_COLOR   = (0, 255, 255, 255)   # cyan; B=255 -> visible detected pickups
 OVERLAY_PORTAL_COLOR   = (255, 64, 255, 255)  # pink; B=255 -> visible detected teleports
+OVERLAY_FLAG_COLOR     = (0, 0, 255, 255)     # blue; B=255 -> visible detected CTF flags
 OVERLAY_VERTEX_RADIUS  = 8.0                  # world-space pixels
 OVERLAY_VERTEX_ASPECT  = 1.0                  # y/x ratio (1.0 = round)
 
@@ -534,6 +543,66 @@ PORTAL_TABLE_MAX        = 32  # live overlay points, float[2] each
 PORTAL_STATIC_MAP_MAX   = 8   # shipped Data.dat currently has 4 portal maps
 PORTAL_STATIC_POINT_MAX = 32  # shipped Data.dat currently has 10 portal points
 PORTAL_MAP_NAME_SLOT    = 96  # fixed ASCII bytes per map path, including NUL
+
+# --- CTF flag detection --------------------------------------------------
+# CTF flag home positions are extracted from Data.dat at patch-build time by
+# parsing each multiplayer .zax map for its "Red Flag Spawn" / "Blue Flag
+# Spawn" Level Parts (the flag base anchors). Runtime code only compares the
+# active map name against this compact static table and copies the matching
+# points into flag_table on match change — identical to the portal pipeline,
+# no heap-wide scanning in-game. The flags themselves are CEntityAnimated
+# entities tracked by the CTF gametype, not cleanly enumerable from the world
+# grid, so the authored spawn anchors are the reliable foundation for CTF bot
+# routing (route to the enemy flag base, return to home base).
+FLAG_TABLE_MAX        = 8   # live overlay points, float[2] each (2 flags/map)
+FLAG_STATIC_MAP_MAX   = 8   # shipped Data.dat currently has 7 flag maps
+FLAG_STATIC_POINT_MAX = 16  # shipped Data.dat currently has 14 flag points
+FLAG_MAP_NAME_SLOT    = 96  # fixed ASCII bytes per map path, including NUL
+FLAG_ENTITY_SLOTS_PER_FLAG = 2
+CTF_FLAG_ENTITY_MATCH_RADIUS_SQ = 16.0 * 16.0
+CTF_FLAG_HOME_FORCE_TICK_RADIUS_SQ = 64.0 * 64.0
+
+# --- CTF flag routing (bots navigate the waypoint graph toward flags) ----
+# Master gate. When on and the active match is CTF with a graph + flags, bots
+# route through the authored waypoint graph toward a flag base instead of
+# roaming randomly: NOT carrying -> head to the ENEMY base; carrying the enemy
+# flag -> head to OWN base to capture. The path is a true shortest path — a
+# per-base BFS hop-distance field (flag_dist) is precomputed once per match at
+# load (build_flag_routes, from detour_df90); at each node arrival the follower
+# steps to the neighbour with the smallest distance to the goal base (strictly
+# decreasing => guaranteed progress). Falls back to the random neighbour pick
+# (wp_advance) whenever routing can't apply (non-CTF, no graph, no flags, goal
+# unreachable from here). v1 routes to the static flag BASE anchors only;
+# chasing a carried/dropped flag is future work. See ctf-flag-detection,
+# ctf-flag-carry-detection.
+CTF_FLAG_ROUTING_ENABLED = True
+# Flag bases the BFS distance field is precomputed for (CTF always has 2).
+# flag_dist costs FLAG_ROUTE_MAX * OVERLAY_VERTEX_MAX dwords of scratch.
+FLAG_ROUTE_MAX        = 2
+
+# --- Keep bots simulated when far from the host's camera -----------------
+# The engine advances an entity's components (incl. the bot walking-controller
+# think sub_543B60) only when the char's ACTIVE bit (char+0x1C & 0x800000) is
+# set; it DEACTIVATES entities far from the local camera (a one-shot, sticky
+# transition — verified live: a cleared bit is NOT re-set per frame). So a bot
+# that walks away from the host freezes mid-route (e.g. carrying the flag back
+# to its base) until the host approaches. We re-set each live bot char's Active
+# bit once per frame from the page-flip hook (cheap 16-slot loop, NOT a
+# per-entity hot path), so the engine keeps ticking bots everywhere — in-context
+# (no double-tick: the engine still advances each active bot exactly once).
+BOT_FORCE_ACTIVE_ENABLED = True
+# Setting the Active bit alone is NOT enough: the engine's per-frame update
+# DRIVER skips entities far from the local camera entirely. Calling only the
+# bot character's component advance (`sub_4FADC0`) is also NOT enough: it reaches
+# the walking-controller think, but bypasses the active-entity driver's later
+# position sync, so the bot computes movement without changing char+0x4C/+0x50.
+# The page-flip hook therefore force-runs the same three per-entity vtable
+# stages used by `sub_57A030` (+0x7C, +0x80, +0x8C with EBP=0x10000) for any
+# bot the engine skipped this frame. A per-bot bot_ticked flag (0 = skipped,
+# 1 = engine ticked, 2 = page-flip recovery tick) prevents double-ticking near
+# bots and lets fire/aim suppress stray shots during the recovery tick. Requires
+# BOT_FORCE_ACTIVE_ENABLED because those entity stages still gate on Active.
+BOT_FORCE_TICK_ENABLED = True
 
 # Runtime portal detection: a detour on the relocate/teleport executor
 # (sub_4C11A0) self-registers the SOURCE pad of every CTeleportAction warp into

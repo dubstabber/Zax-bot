@@ -25,6 +25,7 @@ Return: AL = 1 to fire, 0 to skip.
 """
 
 from .. import addresses as ax
+from .. import config as cfg
 from ..asm import Asm, le32
 from ..hook.bot_lookup import emit_addr_to_slot, emit_is_bot_controller
 from ..layout import ScratchLayout
@@ -50,6 +51,9 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
                            label_prefix='s5436f0')
     emit_addr_to_slot(a, layout)                          # eax = slot
     a.raw(b'\xA3' + le32(bot_slot_tmp_va))                # mov [bot_slot_tmp], eax
+    if cfg.BOT_FORCE_TICK_ENABLED and layout.has_field('bot_last_item_scan'):
+        a.raw(b'\x83\x3C\x85' + le32(layout.va('bot_last_item_scan')) + b'\x02')
+        a.jz('s5436f0_no_fire')                           # page-flip recovery tick: move only
 
     # --- (2) Validate per-call args.
     a.raw(b'\x8B\x44\x24\x04')                            # mov eax, [esp+4] (bot char)

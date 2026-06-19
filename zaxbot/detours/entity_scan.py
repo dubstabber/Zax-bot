@@ -230,7 +230,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # portal_table[i] (within PORTAL_ACTIVE_MATCH_RADIUS_SQ) has its Active bit.
     # pushad/popad, no args/ret. Same bounded walk + visit-id dedup as
     # scan_entities; the per-entity body reads position then does the portal
-    # match instead of class-collect.
+    # match instead of class-collect. CTF flag-entity matching deliberately
+    # uses raw entity +0x4C/+0x50 positions, not the sub_4FB0A0 getter: live
+    # flag-base visual pieces can report the base anchor through the getter
+    # while their raw anchor is offset from the actual capture/touch object.
     # =====================================================================
     if not (layout.has_field('portal_active') and layout.has_field('portal_table')
             and layout.has_field('portal_count')):
@@ -243,13 +246,29 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     best_va         = layout.va('portal_best_dist')
     d2_va           = layout.va('scan_d2')
     entity_va       = layout.va('portal_entity') if layout.has_field('portal_entity') else 0
+    flag_scan_enabled = (
+        layout.has_field('flag_count')
+        and layout.has_field('flag_table')
+        and layout.has_field('flag_entity')
+        and layout.has_field('flag_entity_match_radius_sq')
+    )
+    flag_count_va   = layout.va('flag_count') if flag_scan_enabled else 0
+    flag_table_va   = layout.va('flag_table') if flag_scan_enabled else 0
+    flag_entity_va  = layout.va('flag_entity') if flag_scan_enabled else 0
+    flag_match_radius_va = layout.va('flag_entity_match_radius_sq') if flag_scan_enabled else 0
     portal_max      = cfg.PORTAL_TABLE_MAX
     radius_bits     = struct.unpack('<I', struct.pack('<f', cfg.PORTAL_ACTIVE_MATCH_RADIUS_SQ))[0]
 
     a.label('scan_portal_active')
     a.raw(b'\x60')                                          # pushad
     a.raw(b'\x83\x3D' + le32(portal_count_va) + b'\x00')    # cmp [portal_count], 0
-    a.jz('spa_done')
+    a.jnz('spa_has_work')
+    if flag_scan_enabled:
+        a.raw(b'\x83\x3D' + le32(flag_count_va) + b'\x00')  # cmp [flag_count], 0
+        a.jz('spa_done')
+    else:
+        a.jz('spa_done')
+    a.label('spa_has_work')
 
     # Init: portal_active[i] = 0, portal_best_dist[i] = match radius^2 (only an
     # entity strictly nearer than the radius can claim a portal).
@@ -262,6 +281,18 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x46')                                          # inc esi
     a.jmp('spa_init')
     a.label('spa_init_done')
+    if flag_scan_enabled:
+        # Clear cached flag-anchor entities. The match loop below records up to
+        # two entities at each flag base because the home/base interaction can be
+        # split across a visual flag and a touch/action object at the same point.
+        a.raw(b'\x31\xF6')                                  # xor esi, esi
+        a.label('spa_flag_init')
+        a.raw(b'\x81\xFE' + le32(cfg.FLAG_TABLE_MAX * cfg.FLAG_ENTITY_SLOTS_PER_FLAG))
+        a.jae('spa_flag_init_done')
+        a.raw(b'\xC7\x04\xB5' + le32(flag_entity_va) + le32(0))
+        a.raw(b'\x46')
+        a.jmp('spa_flag_init')
+        a.label('spa_flag_init_done')
 
     # mgr -> layer -> grid (identical chain to scan_entities)
     a.raw(b'\xA1' + le32(ax.MANAGER_GLOBAL_VA))
@@ -344,7 +375,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x31\xF6')                                      # xor esi, esi (portal i)
     a.label('spa_match')
     a.raw(b'\x3B\x35' + le32(portal_count_va))              # cmp esi, [portal_count]
-    a.jae('spa_ent_next')
+    a.jae('spa_after_portal_match')
     # d2 = (portal[i].x - pos.x)^2 + (portal[i].y - pos.y)^2
     a.raw(b'\xD9\x04\xF5' + le32(portal_table_va))          # fld [portal_table + esi*8]
     a.raw(b'\xD8\x25' + le32(pos_va))                       # fsub [pos.x]
@@ -371,6 +402,47 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('spa_match_next')
     a.raw(b'\x46')                                          # inc esi
     a.jmp('spa_match')
+
+    a.label('spa_after_portal_match')
+    if flag_scan_enabled:
+        a.raw(b'\x31\xF6')                                  # xor esi, esi (flag i)
+        a.label('spa_flag_match')
+        a.raw(b'\x3B\x35' + le32(flag_count_va))            # cmp esi, [flag_count]
+        a.jae('spa_ent_next')
+        # d2 = (flag[i].x - ent.raw_x)^2 + (flag[i].y - ent.raw_y)^2.
+        # The generic position getter is right for portal pads, but for CTF
+        # flag bases it can alias nearby visual/base pieces to the same anchor.
+        # The capture/touch entities sit exactly on the authored flag anchor in
+        # raw entity coordinates, so use those fields for the cache.
+        a.raw(b'\xA1' + le32(cur_va))                       # eax = ent
+        a.raw(b'\xD9\x04\xF5' + le32(flag_table_va))        # fld [flag_table + esi*8]
+        a.raw(b'\xD8\x60\x4C')                              # fsub [ent+0x4C] raw x
+        a.raw(b'\xD8\xC8')                                  # fmul st,st
+        a.raw(b'\xD9\x04\xF5' + le32(flag_table_va + 4))    # fld [flag_table + esi*8 + 4]
+        a.raw(b'\xD8\x60\x50')                              # fsub [ent+0x50] raw y
+        a.raw(b'\xD8\xC8')                                  # fmul st,st
+        a.raw(b'\xDE\xC1')                                  # faddp -> st0 = d2
+        a.raw(b'\xD9\x15' + le32(d2_va))                    # fst [scan_d2] (keep d2, no pop)
+        a.raw(b'\xD8\x1D' + le32(flag_match_radius_va))     # fcomp [match_radius] (pops)
+        a.raw(b'\xDF\xE0\x9E')                              # fnstsw ax; sahf
+        a.ja('spa_flag_match_next')                         # d2 > radius -> skip
+        # Store the first two distinct entities matched at this flag anchor.
+        a.raw(b'\x8B\x15' + le32(cur_va))                   # edx = ent
+        a.raw(b'\x8B\x04\xF5' + le32(flag_entity_va))       # eax = flag_entity[i*2 + 0]
+        a.raw(b'\x85\xC0'); a.jz('spa_flag_store0')
+        a.raw(b'\x39\xD0'); a.jz('spa_flag_match_next')     # same entity already stored
+        a.raw(b'\x8B\x04\xF5' + le32(flag_entity_va + 4))   # eax = flag_entity[i*2 + 1]
+        a.raw(b'\x85\xC0'); a.jz('spa_flag_store1')
+        a.raw(b'\x39\xD0'); a.jz('spa_flag_match_next')     # same entity already stored
+        a.jmp('spa_flag_match_next')                        # both slots occupied
+        a.label('spa_flag_store0')
+        a.raw(b'\x89\x14\xF5' + le32(flag_entity_va))       # flag_entity[i*2 + 0] = ent
+        a.jmp('spa_flag_match_next')
+        a.label('spa_flag_store1')
+        a.raw(b'\x89\x14\xF5' + le32(flag_entity_va + 4))   # flag_entity[i*2 + 1] = ent
+        a.label('spa_flag_match_next')
+        a.raw(b'\x46')                                      # inc esi
+        a.jmp('spa_flag_match')
 
     a.label('spa_ent_next')
     a.raw(b'\xFF\x05' + le32(k_va))

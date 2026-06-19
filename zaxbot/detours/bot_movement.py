@@ -84,6 +84,7 @@ comment; the canonical map also lives on ``layout.AI_PERBOT_FIELDS``:
 
   - ``bot_pickup_y_cache`` -> ``wp_best_dsq``   (min dsq-to-node seen so far)
   - ``bot_pickup_x_cache`` -> ``bot_last_char`` (respawn detection)
+  - ``bot_pickup_valid``   -> ``failed_edge_marker`` (packed blocked edge)
   - ``bot_flee_ticks``     -> ``slide_turn``    (wall-slide deflection ramp)
   - ``bot_wander_x/y``     -> block-vector diagnostic mirror
   - ``curr_dist_sq``/``cand_tmp`` -> ``dx_accum``/``dy_accum`` (borrowed
@@ -91,20 +92,18 @@ comment; the canonical map also lives on ``layout.AI_PERBOT_FIELDS``:
 """
 
 from .. import addresses as ax
+from .. import config as cfg
 from ..asm import Asm, le32
 from ..hook.bot_lookup import emit_addr_to_slot, emit_is_bot_controller
 from ..layout import ScratchLayout
 
 
 # --- Wall-slide tuning (asm immediates; the angle step is a runtime knob) ----
-# Trigger on LACK OF PROGRESS (wp_try), the ONLY signal that actually works:
-#  - stuck_count (per-frame move < STUCK_DELTA_SQ) FAILS — a bot pinned against
-#    a wall BOUNCES >0.5px/frame (net displacement ~0) so stuck_count never
-#    climbs (confirmed: frozen position, stuck_count==0).
-#  - the engine does NOT populate the controller block vector for bots
-#    (confirmed: BLK==(0,0) while pinned), so a geometric wall-slide is out.
-# wp_try climbs whenever the bot fails to get strictly closer to its node,
-# catching freeze, bounce, AND slide-along-wall. ~8 frames before the sweep.
+# Trigger primarily on LACK OF PROGRESS (wp_try), which catches both freeze and
+# slide-along-wall-without-approach. A pure position-delta stuck_count is not
+# enough for wall grinding, but it is a useful secondary backstop for the fully
+# stationary case seen in R dumps where reacquiring the same nearest node kept
+# resetting wp_try before the sweep could finish a full circle.
 # The circling that a pure wp_try sweep caused is now bounded by the RETREAT
 # below: the sweep only runs for WP_RETREAT_TIMEOUT-WP_SLIDE_TRIGGER frames, then
 # the bot backs up to the previous (reachable) node instead of orbiting forever.
@@ -152,6 +151,7 @@ def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
     wp_try_va         = layout.va('bot_wp_try')
     wp_best_dsq_va    = layout.va('bot_pickup_y_cache')   # min dsq-to-node
     bot_last_char_va  = layout.va('bot_pickup_x_cache')   # respawn detection
+    failed_edge_va    = layout.va('bot_pickup_valid')     # packed failed-edge marker
     slide_turn_va     = layout.va('bot_flee_ticks')       # wall-slide ramp
     pickup_div_active_va = layout.va('pickup_div_active')
     pickup_cd_va         = layout.va('pickup_cd')
@@ -166,6 +166,16 @@ def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
 
     emit_addr_to_slot(a, layout)                          # eax = slot
     a.raw(b'\xA3' + le32(bot_slot_tmp_va))                # save slot
+    # Force-tick handshake: mark this bot as ticked-by-the-engine this frame so
+    # the page-flip force-tick loop won't double-tick it (it only force-ticks
+    # bots the engine SKIPPED — those far from the host's camera). The page-flip
+    # resets this flag each frame. Reuses the dormant per-bot bot_last_item_scan.
+    if cfg.BOT_FORCE_TICK_ENABLED and layout.has_field('bot_last_item_scan'):
+        a.raw(b'\x83\x3C\x85' + le32(layout.va('bot_last_item_scan')) + b'\x02')
+        a.jz('s542360_tick_marked')                       # recovery tick: keep sentinel
+        a.raw(b'\xC7\x04\x85' + le32(layout.va('bot_last_item_scan'))
+              + le32(1))                                  # bot_ticked[slot] = 1  ([..+eax*4])
+        a.label('s542360_tick_marked')
     # The engine's caller (sub_543B60 at 0x543CF2) reads [EBX+0x9C] after we
     # return, so callee-saved regs must survive. pushad covers all 8 GPRs;
     # downstream `[esp+4]`/`[esp+8]` arg reads bump to `[esp+0x24]`/`[esp+0x28]`.
@@ -200,6 +210,7 @@ def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(prev_wp_va) + b'\xFF\xFF\xFF\xFF')     # prev_wp    = -1
     a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))    # best_dsq   = FLT_MAX
     a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))                  # wp_try     = 0
+    a.raw(b'\xC7\x04\x8D' + le32(failed_edge_va) + le32(0))             # failed_edge_marker = 0
     a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))             # slide_turn = 0
     a.raw(b'\xC7\x04\x8D' + le32(pickup_div_active_va) + le32(0))      # drop any pickup divert
     a.raw(b'\xC7\x04\x8D' + le32(pickup_cd_va) + le32(0))             # clear divert cooldown
@@ -514,10 +525,15 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     prev_wp_va        = layout.va('bot_prev_wp')
     wp_try_va         = layout.va('bot_wp_try')
     wp_best_dsq_va    = layout.va('bot_pickup_y_cache')   # min dsq-to-node
+    stuck_count_va    = layout.va('bot_stuck_count')
+    failed_edge_va    = layout.va('bot_pickup_valid')     # packed failed-edge marker
     slide_turn_va     = layout.va('bot_flee_ticks')       # wall-slide ramp
     wp_follow_enabled_va    = layout.va('wp_follow_enabled')
     wp_reached_radius_sq_va = layout.va('wp_reached_radius_sq')
     wp_progress_timeout_va  = layout.va('wp_progress_timeout')
+    wp_stuck_reached_radius_sq_va = layout.va('wp_relocate_frames')  # repurposed dormant slot
+    failed_cur_tmp_va = layout.va('curr_dist_sq')       # timeout spill: failed current node
+    prev_tmp_va       = layout.va('cand_tmp')           # timeout spill: previous node
     overlay_vertex_count_va = layout.va('overlay_vertex_count')
     overlay_vertices_va     = layout.va('overlay_vertices')
     wp_scratch_va           = layout.va('wp_scratch')
@@ -529,6 +545,17 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
 
     dx_accum_va = layout.va('curr_dist_sq')
     dy_accum_va = layout.va('cand_tmp')
+
+    # CTF final-approach: route_goal_flag (this bot's goal flag idx), its nearest
+    # graph node, and the flag base position. Present only on a routing build.
+    routing = (cfg.CTF_FLAG_ROUTING_ENABLED
+               and layout.has_field('route_goal_flag')
+               and layout.has_field('flag_route_node')
+               and layout.has_field('flag_table'))
+    if routing:
+        route_goal_flag_va = layout.va('route_goal_flag')
+        flag_route_node_va = layout.va('flag_route_node')
+        flag_table_va      = layout.va('flag_table')
 
     # === Waypoint following =============================================
     a.raw(b'\x83\x3D' + le32(wp_follow_enabled_va) + b'\x00')
@@ -558,10 +585,42 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(prev_wp_va) + b'\xFF\xFF\xFF\xFF')   # prev_wp = -1
     a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # best_dsq = FLT_MAX
     a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))               # wp_try = 0
+    a.raw(b'\xC7\x04\x8D' + le32(failed_edge_va) + le32(0))          # failed_edge_marker = 0
     # fall through to wp_have_cur
 
     a.label('s542360_wp_have_cur')
+    # --- CTF final approach -------------------------------------------------
+    # Once the bot's current node IS the nearest node to its goal flag, the
+    # graph can take it no closer — so steer straight at the actual flag base
+    # position to physically touch it (grab the enemy flag, or deliver to own
+    # base to capture). Without this the bot "arrives" at the node, ctf_next_hop
+    # finds no closer neighbour, the random wp_advance fallback bounces it to a
+    # neighbour and routing snaps it back -> it circles the node forever and
+    # never reaches the flag. ctf_pick_goal recomputes the goal every frame, so
+    # the instant the bot grabs the flag the goal flips to home and this branch
+    # stops firing (cur != home goal node) -> normal routing resumes.
+    if routing:
+        a.call_lbl('ctf_pick_goal')                       # route_goal_flag for this bot
+        a.raw(b'\xA1' + le32(route_goal_flag_va))         # eax = goal flag idx
+        a.raw(b'\x83\xF8\xFF'); a.jz('s542360_wp_not_final')  # no goal -> normal
+        a.raw(b'\x8B\x0C\x85' + le32(flag_route_node_va)) # ecx = flag_route_node[goal]
+        a.raw(b'\x8B\x15' + le32(bot_slot_tmp_va))        # edx = slot
+        a.raw(b'\x8B\x14\x95' + le32(current_wp_va))      # edx = current_wp[slot] (cur)
+        a.raw(b'\x39\xCA'); a.jnz('s542360_wp_not_final') # cur != goal node -> normal
+        # desired = flag_table[goal] - bot (eax still = goal). Steer to the flag.
+        a.raw(b'\xD9\x04\xC5' + le32(flag_table_va))      # fld [flag_table + eax*8] (flag.x)
+        a.raw(b'\xD8\x25' + le32(bot_pos_va))             # fsub bot.x
+        a.raw(b'\xD9\x1D' + le32(dx_accum_va))            # fstp dx_accum
+        a.raw(b'\xD9\x04\xC5' + le32(flag_table_va + 4))  # fld [flag_table + eax*8 + 4] (flag.y)
+        a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))         # fsub bot.y
+        a.raw(b'\xD9\x1D' + le32(dy_accum_va))            # fstp dy_accum
+        a.jmp('s542360_emit')
+        a.label('s542360_wp_not_final')
     # Arrival test: dsq(bot, vertices[cur]) < wp_reached_radius_sq ?
+    # If the bot is wedged and already near the node, accept a larger "stuck
+    # arrival" radius. This avoids the far-bot failure where collision leaves a
+    # CTF bot 75-100px from the node, outside the normal 64px radius, and the
+    # router retries the same blocked final pixels forever.
     a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
     a.raw(b'\x8B\x04\x8D' + le32(current_wp_va))          # eax = cur
     a.raw(b'\x8D\x0C\xC5' + le32(overlay_vertices_va))    # lea ecx, [eax*8 + verts]
@@ -576,13 +635,92 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     # radius and leaves dsq; CF=1 iff radius < dsq (NOT arrived).
     a.raw(b'\xD9\x05' + le32(wp_reached_radius_sq_va))    # fld radius
     a.raw(b'\xDF\xF1')                                    # fcomip st0,st1
-    a.jb('s542360_wp_progress')                           # radius < dsq -> not arrived
+    a.jb('s542360_wp_not_arrived')                        # radius < dsq -> maybe stuck-near
     a.raw(b'\xDD\xD8')                                    # fstp st(0)  (arrived: pop dsq)
     a.jmp('s542360_wp_arrived')
+
+    a.label('s542360_wp_not_arrived')                     # ST0 = dsq
+    a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
+    a.raw(b'\x8B\x04\x8D' + le32(stuck_count_va))         # eax = stuck_count[slot]
+    a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES]))
+    a.jae('s542360_wp_stuck_near_check')
+    a.raw(b'\x8B\x04\x8D' + le32(wp_try_va))              # eax = wp_try[slot]
+    a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES]))
+    a.jb('s542360_wp_progress')                           # not wedged; normal progress watchdog
+    a.label('s542360_wp_stuck_near_check')
+    a.raw(b'\xD9\x05' + le32(wp_stuck_reached_radius_sq_va))  # fld stuck-arrival radius
+    a.raw(b'\xDF\xF1')                                    # fcomip radius, dsq; pop radius
+    a.jb('s542360_wp_maybe_prev_arrived')                  # not near cur; maybe already back at prev
+    a.raw(b'\xDD\xD8')                                    # fstp st(0)  (near enough: pop dsq)
+    a.jmp('s542360_wp_arrived')
+
+    # If the bot just failed an edge and is physically wedged near the previous
+    # node, count the previous node as reached immediately. Latest dump:
+    # current=14, prev=15, failed_edge_marker=(14,15), bot is ~72px from prev but ~333px
+    # from current. Waiting for the full timeout leaves it visibly stalled; this
+    # swap lets the normal arrival code advance from prev while excluding the
+    # failed current node.
+    a.label('s542360_wp_maybe_prev_arrived')               # ST0 = dsq-to-current
+    a.raw(b'\xDD\xD8')                                    # fstp st(0)  (drop current dsq)
+    a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
+    a.raw(b'\x8B\x1C\x8D' + le32(failed_edge_va))         # ebx = failed_edge_marker[slot]
+    a.raw(b'\x85\xDB')                                    # test ebx, ebx
+    a.jz('s542360_wp_no_progress_popped')
+    a.raw(b'\x8B\x04\x8D' + le32(prev_wp_va))             # eax = prev_wp[slot]
+    a.raw(b'\x83\xF8\xFF')                                # cmp eax, -1
+    a.jz('s542360_wp_no_progress_popped')
+    a.raw(b'\x3B\x05' + le32(overlay_vertex_count_va))    # prev >= vertex_count?
+    a.jae('s542360_wp_no_progress_popped')
+    # Only apply this shortcut for the edge that actually failed. The marker is
+    # unordered: ((max(prev,cur)+1)<<16) | (min(prev,cur)+1), so it blocks both
+    # directions without treating every future backtrack as bad.
+    a.raw(b'\x8B\x14\x8D' + le32(current_wp_va))          # edx = current_wp[slot]
+    a.raw(b'\x89\xC6')                                    # esi = prev
+    a.raw(b'\x89\xD7')                                    # edi = current
+    a.raw(b'\x39\xFE')                                    # cmp esi, edi
+    a.jbe('s542360_wp_prev_edge_ordered')
+    a.raw(b'\x87\xFE')                                    # xchg esi, edi
+    a.label('s542360_wp_prev_edge_ordered')
+    a.raw(b'\x46')                                        # inc esi (min+1)
+    a.raw(b'\x47')                                        # inc edi (max+1)
+    a.raw(b'\xC1\xE7\x10')                                # shl edi, 16
+    a.raw(b'\x09\xFE')                                    # or esi, edi
+    a.raw(b'\x39\xDE')                                    # cmp esi, ebx
+    a.jnz('s542360_wp_no_progress_popped')
+    a.raw(b'\x8D\x14\xC5' + le32(overlay_vertices_va))    # edx = &verts[prev]
+    a.raw(b'\xD9\x02')                                    # fld [edx]     prev.x
+    a.raw(b'\xD8\x25' + le32(bot_pos_va))                 # fsub bot.x
+    a.raw(b'\xD8\xC8')                                    # fmul st,st    dx²
+    a.raw(b'\xD9\x42\x04')                                # fld [edx+4]   prev.y
+    a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))             # fsub bot.y
+    a.raw(b'\xD8\xC8')                                    # fmul st,st    dy²
+    a.raw(b'\xDE\xC1')                                    # faddp -> ST0 = prev_dsq
+    a.raw(b'\xD9\x05' + le32(wp_stuck_reached_radius_sq_va))  # fld stuck-arrival radius
+    a.raw(b'\xDF\xF1')                                    # fcomip radius, prev_dsq; pop radius
+    a.jb('s542360_wp_prev_not_close')                     # radius < prev_dsq
+    a.raw(b'\xDD\xD8')                                    # fstp st(0)  (drop prev_dsq)
+    a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
+    a.raw(b'\x8B\x04\x8D' + le32(prev_wp_va))             # eax = old prev
+    a.raw(b'\x8B\x14\x8D' + le32(current_wp_va))          # edx = old current / failed node
+    a.raw(b'\x89\x04\x8D' + le32(current_wp_va))          # current_wp = old prev
+    a.raw(b'\x89\x14\x8D' + le32(prev_wp_va))             # prev_wp = old current
+    a.jmp('s542360_wp_arrived')
+
+    a.label('s542360_wp_prev_not_close')
+    a.raw(b'\xDD\xD8')                                    # fstp st(0)  (drop prev_dsq)
+    a.jmp('s542360_wp_no_progress_popped')
 
     # --- Progress-toward-target watchdog (off-graph pin safety net). ST0=dsq.
     a.label('s542360_wp_progress')
     a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot (lea clobbered it)
+    # Meaningful progress only. The latest R-dump showed a physically stuck bot
+    # with stuck_count in the thousands but wp_try pinned at 0 because tiny
+    # sub-pixel distance decreases kept resetting the strict best-dsq check.
+    # Once the position-delta detector says "not really moving", force the
+    # watchdog down the no-progress path so retreat/reroute can actually fire.
+    a.raw(b'\x8B\x04\x8D' + le32(stuck_count_va))         # eax = stuck_count[slot]
+    a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES]))
+    a.jae('s542360_wp_no_progress')                       # ST0=dsq, no meaningful progress
     a.raw(b'\xD9\x04\x8D' + le32(wp_best_dsq_va))         # fld best_dsq[slot] (ST0=best, ST1=dsq)
     a.raw(b'\xDF\xF1')                                    # fcomip st0,st1 (best:dsq, pop best)
     a.jbe('s542360_wp_no_progress')                       # best <= dsq -> no improvement
@@ -592,6 +730,7 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
 
     a.label('s542360_wp_no_progress')
     a.raw(b'\xDD\xD8')                                    # fstp st(0)  (drop dsq)
+    a.label('s542360_wp_no_progress_popped')
     a.raw(b'\xFF\x04\x8D' + le32(wp_try_va))              # ++wp_try[slot]
     a.raw(b'\x8B\x04\x8D' + le32(wp_try_va))              # eax = wp_try
     a.raw(b'\x3B\x05' + le32(wp_progress_timeout_va))     # cmp eax, [progress_timeout]
@@ -601,20 +740,78 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     a.label('s542360_wp_reacquire')
     # Couldn't reach cur for WP_PROGRESS_TIMEOUT frames (a wall blocks the
     # straight edge, or the node is otherwise unreachable from here). If LATCHED,
-    # RETREAT to the previous node — the bot just came from it, so it IS
-    # reachable — and on arriving there it advances to a DIFFERENT neighbour
-    # (wp_advance excludes prev), routing AROUND the unreachable node instead of
-    # orbiting it forever. If NOT latched, re-acquire the nearest node.
+    # try to route AROUND the failed edge immediately: pick an alternate
+    # neighbour of prev, excluding the failed cur. R-dumps on the CTF stall
+    # showed the old "retreat to prev" recovery still wedged between the same
+    # two nodes, cycling current/prev without escaping. If prev has no alternate
+    # neighbour, fall back to the old retreat-to-prev behavior. If NOT latched,
+    # re-acquire the nearest node. If that re-acquire returns the SAME failed
+    # target, keep wp_try/slide_turn intact so the wall-slide can continue
+    # sweeping instead of resetting every timeout.
     a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
     a.raw(b'\x8B\x04\x8D' + le32(prev_wp_va))             # eax = prev_wp[slot]
     a.raw(b'\x83\xF8\xFF')                                # cmp eax, -1
     a.jz('s542360_wp_reacq_nearest')                      # not latched -> reacquire nearest
-    # Latched: swap cur <-> prev (eax = prev).
-    a.raw(b'\x8B\x14\x8D' + le32(current_wp_va))          # edx = old cur
+    # Latched: prefer an alternate neighbour of prev, excluding failed cur.
+    # Spill both node ids across wp_advance; with random-neighbour enabled the
+    # helper uses wp_scratch internally, so use movement scratch that will be
+    # overwritten before the final steer vector is emitted.
+    a.raw(b'\x8B\x14\x8D' + le32(current_wp_va))          # edx = failed cur
+    a.raw(b'\x89\x15' + le32(failed_cur_tmp_va))          # spill failed cur
+    a.raw(b'\xA3' + le32(prev_tmp_va))                    # spill prev (eax)
+    a.raw(b'\x89\xC1')                                    # ecx = prev
+    # edx already = failed cur. wp_advance(prev, failed_cur) returns a neighbour
+    # of prev that is NOT failed_cur when one exists; otherwise failed_cur/-1.
+    a.call_lbl('wp_advance')
+    a.raw(b'\x83\xF8\xFF')                                # cmp eax, -1
+    a.jz('s542360_wp_timeout_retreat')
+    a.raw(b'\x3B\x05' + le32(failed_cur_tmp_va))          # alt == failed cur?
+    a.jz('s542360_wp_timeout_retreat')
+    # Alternate exists: current = alt, prev = old prev. This keeps the latch on
+    # the graph but heads away from the failed edge immediately.
+    a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
+    a.raw(b'\x89\x04\x8D' + le32(current_wp_va))          # current_wp[slot] = alt
+    a.raw(b'\x8B\x15' + le32(prev_tmp_va))                # edx = old prev
+    a.raw(b'\x89\x14\x8D' + le32(prev_wp_va))             # prev_wp[slot] = old prev
+    a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # best_dsq = FLT_MAX
+    a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))               # wp_try = 0
+    # failed_edge_marker = unordered(old prev, failed cur), with +1 packing so
+    # zero remains the "no blocked edge" sentinel.
+    a.raw(b'\x8B\x15' + le32(prev_tmp_va))                # edx = old prev
+    a.raw(b'\xA1' + le32(failed_cur_tmp_va))              # eax = failed cur
+    a.raw(b'\x39\xC2')                                    # cmp edx, eax
+    a.jbe('s542360_wp_alt_edge_ordered')
+    a.raw(b'\x92')                                        # xchg eax, edx
+    a.label('s542360_wp_alt_edge_ordered')
+    a.raw(b'\x42')                                        # inc edx (min+1)
+    a.raw(b'\x40')                                        # inc eax (max+1)
+    a.raw(b'\xC1\xE0\x10')                                # shl eax, 16
+    a.raw(b'\x09\xC2')                                    # or edx, eax
+    a.raw(b'\x89\x14\x8D' + le32(failed_edge_va))         # failed_edge_marker[slot] = edx
+    a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))           # slide_turn = 0
+    a.jmp('s542360_wp_steer')
+
+    # No alternate: swap cur <-> prev (old behavior).
+    a.label('s542360_wp_timeout_retreat')
+    a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
+    a.raw(b'\xA1' + le32(prev_tmp_va))                    # eax = old prev
+    a.raw(b'\x8B\x15' + le32(failed_cur_tmp_va))          # edx = failed cur
     a.raw(b'\x89\x04\x8D' + le32(current_wp_va))          # current_wp[slot] = prev
     a.raw(b'\x89\x14\x8D' + le32(prev_wp_va))             # prev_wp[slot]    = old cur
     a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # best_dsq = FLT_MAX
     a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))               # wp_try = 0
+    # failed_edge_marker = unordered(old prev, failed cur).
+    a.raw(b'\x8B\x15' + le32(prev_tmp_va))                # edx = old prev
+    a.raw(b'\xA1' + le32(failed_cur_tmp_va))              # eax = failed cur
+    a.raw(b'\x39\xC2')                                    # cmp edx, eax
+    a.jbe('s542360_wp_retreat_edge_ordered')
+    a.raw(b'\x92')                                        # xchg eax, edx
+    a.label('s542360_wp_retreat_edge_ordered')
+    a.raw(b'\x42')                                        # inc edx (min+1)
+    a.raw(b'\x40')                                        # inc eax (max+1)
+    a.raw(b'\xC1\xE0\x10')                                # shl eax, 16
+    a.raw(b'\x09\xC2')                                    # or edx, eax
+    a.raw(b'\x89\x14\x8D' + le32(failed_edge_va))         # failed_edge_marker[slot] = edx
     a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))           # slide_turn = 0
     a.jmp('s542360_wp_steer')
 
@@ -627,10 +824,13 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x83\xFB\xFF')                                # cmp ebx, -1
     a.jz('s542360_wp_steer')                              # no candidate -> keep cur
     a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # reload slot
+    a.raw(b'\x3B\x1C\x8D' + le32(current_wp_va))          # same nearest as failed cur?
+    a.jz('s542360_wp_steer')                              # preserve high wp_try + slide sweep
     a.raw(b'\x89\x1C\x8D' + le32(current_wp_va))          # current_wp[slot] = nearest
     a.raw(b'\xC7\x04\x8D' + le32(prev_wp_va) + b'\xFF\xFF\xFF\xFF')   # prev_wp = -1
     a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # best_dsq = FLT_MAX
     a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))               # wp_try = 0
+    a.raw(b'\xC7\x04\x8D' + le32(failed_edge_va) + le32(0))          # failed_edge_marker = 0
     a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))           # slide_turn = 0
     a.jmp('s542360_wp_steer')
 
@@ -648,7 +848,48 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     a.jnz('s542360_wp_do_adv')
     a.raw(b'\x89\xCA')                                    # edx = cur (latch)
     a.label('s542360_wp_do_adv')
-    a.call_lbl('wp_advance')                              # eax = next idx or -1
+    # CTF goal-biased routing: in a CTF match, step one hop along the shortest
+    # path toward the goal flag base (ctf_next_hop) instead of a random neighbour.
+    # -1 (routing inactive / non-CTF / no progress here) => fall back to the
+    # random wp_advance, byte-identical to the non-CTF behaviour. ECX=cur,
+    # EDX=prev are live here; both are saved across ctf_next_hop so wp_advance
+    # gets them back on the fallback path. If the progress watchdog marked this
+    # edge as blocked, force the fallback and pass the blocked next-hop as the
+    # "previous" node to wp_advance so random fallback also avoids it.
+    if cfg.CTF_FLAG_ROUTING_ENABLED:
+        a.raw(b'\x51')                                   # push cur (ecx)
+        a.raw(b'\x52')                                   # push prev (edx)
+        a.call_lbl('ctf_next_hop')                       # eax = goal next-hop or -1 (in: ecx=cur)
+        a.raw(b'\x5A')                                   # pop edx (prev)
+        a.raw(b'\x59')                                   # pop ecx (cur)
+        a.raw(b'\x83\xF8\xFF')                           # cmp eax, -1
+        a.jz('s542360_wp_route_fallback')                # no route -> random neighbour
+        a.raw(b'\x8B\x1D' + le32(bot_slot_tmp_va))       # ebx = slot
+        a.raw(b'\x8B\x1C\x9D' + le32(failed_edge_va))    # ebx = failed_edge_marker[slot]
+        a.raw(b'\x85\xDB')                               # test ebx, ebx
+        a.jz('s542360_wp_have_next')
+        # candidate marker = unordered(cur, route_next)
+        a.raw(b'\x89\xCE')                               # esi = cur
+        a.raw(b'\x89\xC7')                               # edi = route_next
+        a.raw(b'\x39\xFE')                               # cmp esi, edi
+        a.jbe('s542360_wp_route_edge_ordered')
+        a.raw(b'\x87\xFE')                               # xchg esi, edi
+        a.label('s542360_wp_route_edge_ordered')
+        a.raw(b'\x46')                                   # inc esi (min+1)
+        a.raw(b'\x47')                                   # inc edi (max+1)
+        a.raw(b'\xC1\xE7\x10')                           # shl edi, 16
+        a.raw(b'\x09\xFE')                               # or esi, edi
+        a.raw(b'\x39\xDE')                               # cmp esi, ebx
+        a.jnz('s542360_wp_have_next')
+        a.label('s542360_wp_bad_edge_fallback')
+        a.raw(b'\x89\xC2')                               # edx = blocked route_next
+        a.call_lbl('wp_advance')                         # fallback excluding the blocked edge
+        a.jmp('s542360_wp_have_next')
+        a.label('s542360_wp_route_fallback')
+        a.call_lbl('wp_advance')                         # fallback: random/non-prev neighbour
+        a.label('s542360_wp_have_next')
+    else:
+        a.call_lbl('wp_advance')                          # eax = next idx or -1
     a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
     a.raw(b'\x8B\x14\x8D' + le32(current_wp_va))          # edx = old cur
     a.raw(b'\x89\x14\x8D' + le32(prev_wp_va))             # prev_wp[slot] = old cur (LATCH)
@@ -657,6 +898,8 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x89\x04\x8D' + le32(current_wp_va))          # current_wp[slot] = next
     a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # best_dsq = FLT_MAX
     a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))               # wp_try = 0
+    # Keep failed_edge_marker until respawn/reacquire or another edge failure;
+    # otherwise CTF routing immediately reselects the same bad direct edge.
     # fall through to steer toward the (new) current node
 
     a.label('s542360_wp_steer')
@@ -820,6 +1063,7 @@ def _emit_wall_slide(a: Asm, layout: ScratchLayout) -> None:
     diagnostics, then ramps a per-bot deflection driven by wp_try."""
     bot_slot_tmp_va  = layout.va('bot_slot_tmp')
     wp_try_va        = layout.va('bot_wp_try')
+    stuck_count_va   = layout.va('bot_stuck_count')
     slide_turn_va    = layout.va('bot_flee_ticks')        # wall-slide ramp
     diag_block_x_va  = layout.va('bot_wander_x')          # block-vec diag mirror
     diag_block_y_va  = layout.va('bot_wander_y')
@@ -853,15 +1097,19 @@ def _emit_wall_slide(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(diag_block_y_va) + le32(0))
     a.label('s542360_ws_diag_done')
 
-    # Update the deflection from LACK OF PROGRESS (wp_try). While the bot fails
-    # to get closer to its node, cycle the heading one step every (SWEEP_MASK+1)
-    # frames to try to find a way around the wall. While progressing (wp_try
-    # below the trigger) clear the deflection so the bot steers straight at its
-    # node. Infinite circling is prevented by the RETREAT in the follow block
-    # (wp_try >= WP_RETREAT_TIMEOUT backs the bot up to the previous node).
+    # Update the deflection from LACK OF PROGRESS (wp_try), with stuck_count as
+    # a secondary "not moving at all" trigger. While the bot fails to get closer
+    # to its node, cycle the heading one step every (SWEEP_MASK+1) frames to try
+    # to find a way around the wall. While progressing (both counters below the
+    # trigger) clear the deflection so the bot steers straight at its node.
+    # Infinite circling is prevented by the RETREAT in the follow block.
+    a.raw(b'\x8B\x04\x8D' + le32(stuck_count_va))         # eax = stuck_count[slot]
+    a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES])) # cmp eax, TRIGGER
+    a.jae('s542360_ws_triggered')                         # physically frozen -> sweep
     a.raw(b'\x8B\x04\x8D' + le32(wp_try_va))              # eax = wp_try[slot]
     a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES]))  # cmp eax, TRIGGER
     a.jb('s542360_ws_reset')                             # progressing -> straight
+    a.label('s542360_ws_triggered')
     a.raw(b'\x8B\x15' + le32(frame_counter_va))           # edx = frame_counter
     a.raw(b'\x83\xE2' + bytes([WP_SLIDE_SWEEP_MASK]))     # and edx, MASK
     a.jnz('s542360_ws_have_turn')                         # hold heading between steps
@@ -975,6 +1223,7 @@ def _emit_dead_and_zero_return(a: Asm, layout: ScratchLayout) -> None:
     prev_wp_va      = layout.va('bot_prev_wp')
     wp_try_va       = layout.va('bot_wp_try')
     wp_best_dsq_va  = layout.va('bot_pickup_y_cache')     # min dsq-to-node
+    failed_edge_va  = layout.va('bot_pickup_valid')       # packed failed-edge marker
     slide_turn_va   = layout.va('bot_flee_ticks')         # wall-slide ramp
 
     # --- Bot dead this frame (char slot NULL). Reset nav so it cold-acquires
@@ -986,6 +1235,7 @@ def _emit_dead_and_zero_return(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))             # slide_turn = 0
     a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))    # best_dsq = FLT_MAX
     a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))                # wp_try = 0
+    a.raw(b'\xC7\x04\x8D' + le32(failed_edge_va) + le32(0))           # failed_edge_marker = 0
     # fall through to zero-vector return.
 
     # --- Zero-vector return (panic / NULL char / degenerate normalize) ---

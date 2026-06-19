@@ -97,8 +97,8 @@ keeps the controller and captures it:
 
 Net result: bots follow the saved waypoint graph node-to-node, roaming the
 whole graph by picking random connected neighbours, and slide along walls
-instead of freezing. With no graph they idle. CTF/SK bots use the same
-follower but don't pursue objectives yet.
+instead of freezing. With no graph they idle. CTF bots layer objective routing
+on top of the same follower; SK bots still do not pursue collectors.
 
 ## Bot movement (waypoint follower + wall-slide)
 
@@ -180,6 +180,56 @@ populates it near walls — the input needed to later add a smoother geometric
 slide (project the heading onto the wall tangent) on top of the angle sweep.
 
 A `MOVEMENT_ENABLED = False` panic switch reverts to the zero-vector behavior.
+
+## CTF flag routing and far-base capture
+
+CTF bots now use the waypoint graph for objective routing:
+
+- `flag_data.py` parses static Red/Blue flag-base anchors from `Data.dat`.
+  Do not assume CTF maps live only under `/CTF/`: live testing used CTF mode on
+  `Levels/Multiplayer/DeathMatch/Hydroplant Bouncefest.zax`, and its Red/Blue
+  flag anchors are valid.
+- `world_scan.py:load_flags` copies the active map's anchors plus explicit
+  team tags (`0` Blue, `1` Red) into `flag_table` / `flag_team` on match change.
+- `build_flag_routes` runs once per CTF match and fills `flag_dist[base][node]`
+  by BFS over the authored waypoint graph. At each node arrival,
+  `ctf_next_hop` picks a connected neighbour with a strictly smaller distance
+  to the current goal base.
+- `ctf_pick_goal` chooses enemy base while not carrying and own base while
+  carrying. Carry detection is the live-verified inventory-group test:
+  `sub_4267E0(char)` then `sub_425290(inv, [0x714454]) != -1`.
+- When the current waypoint is already the goal base's nearest node, the
+  movement detour steers directly at `flag_table[goal]`. This final approach is
+  required to physically touch the flag or home capture object; without it the
+  bot bounces between graph nodes around the base.
+
+Far from the host camera, two things must be forced awake. The page-flip detour
+already force-ticks skipped bot characters through the same three entity stages
+as the engine's active-entity driver (`vtbl +0x7C`, `+0x80`, `+0x8C` with
+`EBP=0x10000`). That keeps the carrier moving, but capture still did not fire
+until the host approached the carrier's home base. The missing piece was the
+home flag/base entities themselves: they are camera-gated too. The periodic
+`scan_portal_active` grid walk now also caches up to two live entities at each
+`flag_table` anchor in `flag_entity[]`, and the page-flip detour force-ticks
+the cached home entries only while a carrying bot is within
+`CTF_FLAG_HOME_FORCE_TICK_RADIUS_SQ` of its home base.
+
+Important CE finding: flag-base entity matching must use raw entity
+`+0x4C/+0x50` coordinates, not `sub_4FB0A0`. On Hydroplant Bouncefest,
+`sub_4FB0A0` aliased nearby visual/base pieces to the flag anchor and cached
+the wrong pair, while the actual capture/touch entities sat exactly on the raw
+anchor. Temporarily writing those exact-anchor entity pointers into
+`flag_entity[home]` made `route_carry` clear within about a second, proving that
+the capture path was correct and the cache selection was wrong.
+
+The next CTF task is live flag state. Current routing assumes the enemy flag is
+at its base unless the bot itself is carrying. Future work should detect
+whether the actual enemy flag exists at the enemy base, is carried, or is
+dropped somewhere on the map. If it is not present at the enemy base, the bot
+should stop objective BFS and randomly roam the waypoint graph to search, the
+same way a human player would sweep the map. Do not add BFS/pathfinding toward
+an unknown flag state; random graph walking is the intended search behavior
+until a live dropped-flag position is explicitly detected.
 
 ### Movement calibration recipe
 
@@ -332,15 +382,19 @@ ignore this knob (they skip `apply_lead` unconditionally).
 - Quadratic intercept solver with muzzle-offset compensation.
 - Per-shot lead vs straight-shot randomization (`LEAD_PROBABILITY`).
 - Hitscan detection (Semi Auto Pistol, Alien Electrical Weapon).
+- CTF static-base routing: not carrying -> enemy base, carrying -> own base.
+- Far-camera CTF capture support by force-ticking skipped bots and nearby
+  cached home flag/base entities.
 
 ## Still open
 
 - Engine `CWayPointMap` integration. The active navigation path uses the
   patch's saved `waypoints/<map>.zwpt` overlay graph, not the shipped engine
   `CWayPointMap` / `CWayPointPath` data.
-- CTF/SK objective AI. CTF bots now move but don't pursue flags; SK bots
-  don't gather at their own collector. Both require team/objective
-  awareness on top of the movement primitive.
+- CTF live flag state: detect whether the enemy flag is still at base, carried,
+  or dropped. If it is absent from the enemy base, bots should randomly roam the
+  graph to search instead of using objective BFS.
+- SK objective AI: SK bots don't gather at their own collector yet.
 - Remote display name. Host writes the stats CString after spawn, but the
   synthetic DirectPlay player-data store is not populated for PC2.
 

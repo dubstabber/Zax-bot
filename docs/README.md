@@ -55,8 +55,9 @@ Current limitations:
 - `detect_mode` calls the engine's `sub_59FF90` getter and reads `[result+0]`
   to resolve DM, CTF, and Salvage King. CTF (the only team mode) supports
   picking the bot's team via digit `'1'`/`'2'`; DM and SK both spawn one
-  free-for-all bot per `'1'` press. None of the bots chase flags or collect
-  salvage yet — objective AI is still absent.
+  free-for-all bot per `'1'` press. CTF bots now route to the enemy base,
+  grab the flag, return to their own base, and capture even when the host is
+  far away. SK objective behavior is still absent.
 - Bots navigate with `detour_542360`: if a saved `waypoints/<map>.zwpt` graph
   is loaded they steer **straight at the current node**, advance along real
   edges to a **random connected neighbour** (so they roam the whole graph), and
@@ -70,6 +71,21 @@ Current limitations:
   a heading clears the wall and slides along it, decaying back to straight once
   moving. This replaced an architecture that froze bots against walls for a
   150-frame timeout.
+- CTF routing uses static Red/Blue flag-base anchors parsed from `Data.dat`,
+  per-match BFS distance fields over the authored waypoint graph, and a final
+  direct approach to the base anchor so the bot physically touches the flag or
+  home capture object. The page-flip hook keeps far bots simulated and also
+  force-ticks the cached home flag/base entities while a carrier is at home;
+  this was required because the engine camera-gates the base interaction too.
+  Live CE verification showed flag-base entity caching must match raw entity
+  `+0x4C/+0x50` coordinates, not `sub_4FB0A0`, because the getter can alias
+  nearby visual pieces to the same anchor while the actual capture objects sit
+  on the raw anchor.
+- The next CTF gap is live flag state. The current route assumes the enemy flag
+  is at its base unless the bot itself is carrying. Future work should detect
+  whether the actual enemy flag is at base, carried, or dropped. If it is not
+  present at the enemy base, bots should drop out of objective BFS and randomly
+  roam the waypoint graph to search, like human players sweeping the map.
 - The visual waypoint overlay is available through the `0x5693A0` page-flip
   detour but starts hidden for normal FPS. In a live MP match, `O` toggles
   drawing, `N` drops/snaps a node at the host, `J` selects the nearest node,

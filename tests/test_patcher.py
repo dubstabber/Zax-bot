@@ -72,6 +72,17 @@ class ScratchLayoutTests(unittest.TestCase):
             force_bot_ammo_slot_size=cfg.FORCE_BOT_AMMO_SLOT_SIZE,
             overlay_vertex_max=cfg.OVERLAY_VERTEX_MAX,
             overlay_edge_max=cfg.OVERLAY_EDGE_MAX,
+            pickup_table_max=cfg.PICKUP_TABLE_MAX,
+            portal_table_max=cfg.PORTAL_TABLE_MAX,
+            portal_static_map_max=cfg.PORTAL_STATIC_MAP_MAX,
+            portal_static_point_max=cfg.PORTAL_STATIC_POINT_MAX,
+            portal_map_name_slot=cfg.PORTAL_MAP_NAME_SLOT,
+            scan_entities_max=cfg.SCAN_ENTITIES_MAX,
+            flag_table_max=cfg.FLAG_TABLE_MAX,
+            flag_static_map_max=cfg.FLAG_STATIC_MAP_MAX,
+            flag_static_point_max=cfg.FLAG_STATIC_POINT_MAX,
+            flag_map_name_slot=cfg.FLAG_MAP_NAME_SLOT,
+            flag_route_max=cfg.FLAG_ROUTE_MAX,
         )
 
         self.assertEqual(layout.off('msg'), 0x30)
@@ -98,6 +109,8 @@ class ScratchLayoutTests(unittest.TestCase):
         self.assertEqual(layout.off('wp_follow_enabled'), 0x1FDC)
         self.assertEqual(layout.off('wp_reached_radius_sq'), 0x1FE0)
         self.assertLessEqual(layout.field('wp_diag_data').end, 0x2080)
+        self.assertFalse(layout.has_field('ft_vel_x'))
+        self.assertFalse(layout.has_field('ft_last_x'))
 
         self.assertLessEqual(layout.used_size, zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF)
 
@@ -228,6 +241,36 @@ class PortalDataTests(unittest.TestCase):
         self.assertTrue(maps, 'expected at least the shipped MP portal maps')
         self.assertTrue(all('Multiplayer' in name for name in maps))
 
+    def test_ctf_flag_spawns_are_extracted_from_data_dat(self):
+        # Each CTF map authors two flag-base anchors ("Red Flag Spawn" /
+        # "Blue Flag Spawn"); pin Hydro Vengence's pair (verified against the
+        # live runtime map name "Levels/Multiplayer/CTF/...zax").
+        from zaxbot.flag_data import resolve_flag_data
+
+        maps = dict(resolve_flag_data())
+        # Each anchor carries its team tag (Red=1, Blue=0) so the runtime maps a
+        # bot's own team to its HOME base regardless of file order.
+        self.assertEqual(
+            maps['Levels/Multiplayer/CTF/Hydro Vengence.zax'],
+            ((431.0, 2502.0, 1), (486.0, 1074.0, 0)),
+        )
+
+    def test_flag_data_is_multiplayer_scoped_and_two_per_map(self):
+        # load_flags powers CTF objective routing. Do not restrict this to the
+        # /CTF/ folder: live testing showed CTF mode running on Hydroplant
+        # Bouncefest, whose runtime map path is under /DeathMatch/ but whose
+        # Red/Blue flag anchors are valid.
+        from zaxbot.flag_data import resolve_flag_data
+
+        maps = dict(resolve_flag_data())
+        self.assertTrue(maps, 'expected at least the shipped MP flag maps')
+        self.assertTrue(all('/Multiplayer/' in name for name in maps))
+        self.assertIn('Levels/Multiplayer/DeathMatch/Hydroplant Bouncefest.zax', maps)
+        self.assertTrue(all(len(points) == 2 for points in maps.values()))
+        # Every map ships exactly one Blue (team 0) and one Red (team 1) base.
+        for points in maps.values():
+            self.assertEqual(sorted(team for _, _, team in points), [0, 1])
+
 
 class PatcherTests(unittest.TestCase):
     def test_patch_manifest_names_and_targets_are_valid(self):
@@ -342,8 +385,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = 'bc5ef1b23d24a6c406264b31f400cd55ef57bd5280fef6b8bcfa762e5df537c6'
-    HOOK_ENTRY_SIZE = 18003
+    SECTION_SHA256 = 'f151766bf6f17e72d05b1ff4d1a6818cba9bcc8ae13f68686c0d3860a7a3ab1a'
+    HOOK_ENTRY_SIZE = 20787
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

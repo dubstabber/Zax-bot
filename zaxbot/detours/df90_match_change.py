@@ -118,6 +118,24 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # overlay table. This is cheap and bounded: a fixed static map-name table
     # plus a small float[2] copy, no heap scan.
     a.call_lbl('load_portals')
+    # Copy this map's build-time parsed CTF flag-base anchors into the live
+    # flag_table (overlay markers + future CTF bot routing). Same cheap bounded
+    # static-table copy as load_portals; inert stub on non-flag builds.
+    a.call_lbl('load_flags')
+    # CTF flag routing: when the active match is CTF with a graph + flags,
+    # precompute the per-base BFS distance field (build_flag_routes) and arm the
+    # runtime gate (flag_routing_active). detect_mode returns 0/1/2 (DM/CTF/SK);
+    # only CTF (1) routes. Otherwise the gate stays 0 and bots roam randomly.
+    if cfg.CTF_FLAG_ROUTING_ENABLED and layout.has_field('flag_routing_active'):
+        a.raw(b'\xC7\x05' + le32(layout.va('flag_routing_active')) + le32(0))
+        a.call_lbl('detect_mode')                    # eax = 0 DM / 1 CTF / 2 SK
+        a.raw(b'\x83\xF8\x01')                        # cmp eax, 1 (CTF)
+        a.jnz('df90_no_ctf_routes')
+        a.raw(b'\x83\x3D' + le32(layout.va('flag_count')) + b'\x00')  # flags present?
+        a.jz('df90_no_ctf_routes')
+        a.call_lbl('build_flag_routes')              # per-match BFS distance field
+        a.raw(b'\xC7\x05' + le32(layout.va('flag_routing_active')) + le32(1))
+        a.label('df90_no_ctf_routes')
     # Capture the active map's CPlasmaTileMap* (lava) for proactive avoidance.
     # pushad/popad, no args/ret; self-clears plasma_map (0 on non-plasma maps).
     a.call_lbl('scan_plasma')

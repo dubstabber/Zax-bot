@@ -28,10 +28,10 @@ Current values from `zaxbot/config.py`:
 | name | `.zaxbot` |
 | RVA / VA | `0x31A000` / `0x71A000` |
 | raw file offset | `0x231000` |
-| size | `0xA000` bytes |
+| size | `0xD000` bytes |
 | characteristics | `0xE0000020` (`CODE | EXEC | READ | WRITE`) |
 | code start | `0x71A000` |
-| scratch start | `0x71F000` (`SCRATCH_OFF = 0x5000`) |
+| scratch start | `0x71F800` (`SCRATCH_OFF = 0x5800`) |
 
 The IDB is for the original image, so `.zaxbot` bytes must be inspected from
 `Zax.exe` at raw offset `0x231000`.
@@ -63,8 +63,9 @@ image, writes it back, and prints the hook/scratch/detour VAs.
 | `0x542360` | bot movement-vector override |
 | `0x5436F0` | synthesize bot fire/aim |
 | `0x542550` | capture/scrub walking controllers by bot index |
-| `0x5693A0` | toggleable visual waypoint authoring overlay before page flip |
+| `0x5693A0` | waypoint overlay/page-flip hook; also force-ticks far bots and far CTF home flag/base entities |
 | `0x53DA40` | gated pickup self-registration for overlay item markers |
+| `0x4C11A0` | teleport/portal source self-registration |
 | `0x480889` | skip unsafe `sub_480800` name block for synthetic ids |
 | `0x4F5204` | skip NULL entries in a character iterator |
 

@@ -90,18 +90,124 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     portal_count_va           = layout.va('portal_count') if layout.has_field('portal_count') else 0
     portal_table_va           = layout.va('portal_table') if layout.has_field('portal_table') else 0
     portal_scan_count_va      = layout.va('portal_scan_count') if layout.has_field('portal_scan_count') else 0
+    overlay_flag_color_va     = layout.va('overlay_flag_color') if layout.has_field('overlay_flag_color') else 0
+    flag_count_va             = layout.va('flag_count') if layout.has_field('flag_count') else 0
+    flag_table_va             = layout.va('flag_table') if layout.has_field('flag_table') else 0
+    flag_entity_va            = layout.va('flag_entity') if layout.has_field('flag_entity') else 0
+    flag_home_tick_radius_va  = layout.va('flag_home_tick_radius_sq') if layout.has_field('flag_home_tick_radius_sq') else 0
+    route_carry_va            = layout.va('route_carry') if layout.has_field('route_carry') else 0
+    route_goal_va             = layout.va('route_goal_flag') if layout.has_field('route_goal_flag') else 0
 
     vr, vg, vb, va_ = _split_rgba_static('vertex')
     er, eg, eb, ea  = _split_rgba_static('edge')
     sr, sg, sb, sa  = _split_rgba_static('selected')
     pr, pg, pb, pa  = _split_rgba_static('pickup')
     tr, tg, tb, ta  = _split_rgba_static('portal')
+    fr, fg, fb, fa  = _split_rgba_static('flag')
 
     a.label('detour_5693A0')
     # Per-frame tick — bumped here (the one reliable once-per-frame site, the
     # page flip) BEFORE the overlay_enabled gate so the pickup table's lazy
     # reset keeps working even when the overlay itself is disabled.
     a.raw(b'\xFF\x05' + le32(world_frame_va))                 # ++world_frame
+    # Keep bots simulated when far from the host's camera. The engine advances a
+    # char's components (incl. the bot walking-controller think) only while the
+    # char's ACTIVE bit (char+0x1C & ENTITY_ACTIVE_BIT) is set, and it
+    # DEACTIVATES entities far from the local camera (a sticky one-shot
+    # transition). Re-set each live bot char's Active bit every frame so the
+    # engine keeps ticking bots everywhere (in-context, exactly once per frame).
+    # Cheap fixed 16-slot loop, NOT a per-entity hot path. Runs before the
+    # overlay gate so it works with the overlay hidden. bot_indices[slot] is the
+    # bot's index into the mgr+0x290 char array (0 / unused -> host char, whose
+    # Active bit is always set anyway, so the spurious set is a harmless no-op).
+    if cfg.BOT_FORCE_ACTIVE_ENABLED:
+        bot_indices_va = layout.va('bot_indices')
+        a.raw(b'\x60')                                        # pushad
+        a.raw(b'\xA1' + le32(ax.MANAGER_GLOBAL_VA))           # eax = [mgr]
+        a.raw(b'\x85\xC0'); a.jz('ov_ba_done')
+        a.raw(b'\x8B\x98\x94\x02\x00\x00')                    # ebx = [eax+0x294] char count
+        a.raw(b'\x8B\x80\x90\x02\x00\x00')                    # eax = [eax+0x290] char array
+        a.raw(b'\x85\xC0'); a.jz('ov_ba_done')
+        a.raw(b'\x89\xC5')                                    # ebp = char array base
+        a.raw(b'\x31\xF6')                                    # esi = 0 (slot)
+        a.label('ov_ba_loop')
+        a.raw(b'\x8B\x14\xB5' + le32(bot_indices_va))         # edx = bot_indices[slot]
+        a.raw(b'\x39\xDA')                                    # cmp edx, ebx (idx vs count)
+        a.jae('ov_ba_next')                                   # idx >= count -> skip (unused/garbage)
+        a.raw(b'\x8B\x44\x95\x00')                            # eax = [ebp + edx*4] (char)
+        a.raw(b'\x85\xC0'); a.jz('ov_ba_next')                # NULL char
+        a.raw(b'\x81\x48' + bytes([ax.ENTITY_FLAGS_OFF])
+              + le32(ax.ENTITY_ACTIVE_BIT))                   # or [char+0x1C], ACTIVE_BIT
+        a.label('ov_ba_next')
+        a.raw(b'\x46')                                        # inc esi
+        a.raw(b'\x83\xFE' + bytes([cfg.MAX_BOT_SLOTS]))       # cmp esi, MAX_BOT_SLOTS
+        a.jb('ov_ba_loop')
+        a.label('ov_ba_done')
+        a.raw(b'\x61')                                        # popad
+    # Force-tick bots the engine SKIPPED this frame. sub_57A030, the normal
+    # active-entity driver, runs three entity vtable stages (+0x7C, +0x80,
+    # +0x8C) with EBP=0x10000; the +0x8C player path then calls the component
+    # advance and commits the pending walking-controller movement back to the
+    # char position. Calling only sub_4FADC0 reaches our controller but leaves
+    # that position-sync stage skipped, so far bots think but do not move.
+    # bot_ticked=2 during that recovery tick suppresses out-of-band fire, and
+    # we reset it to 0 here every frame so near bots are never double-ticked.
+    # idx==0 (host/unused) is skipped so the host is never force-ticked.
+    if cfg.BOT_FORCE_TICK_ENABLED and layout.has_field('bot_last_item_scan'):
+        bot_indices_va = layout.va('bot_indices')
+        bot_ticked_va = layout.va('bot_last_item_scan')
+        a.raw(b'\x60')                                        # pushad
+        a.raw(b'\xA1' + le32(ax.MANAGER_GLOBAL_VA))           # eax = [mgr]
+        a.raw(b'\x85\xC0'); a.jz('ov_ft_done')
+        a.raw(b'\x8B\x98\x94\x02\x00\x00')                    # ebx = [eax+0x294] char count
+        a.raw(b'\x8B\x80\x90\x02\x00\x00')                    # eax = [eax+0x290] char array
+        a.raw(b'\x85\xC0'); a.jz('ov_ft_done')
+        a.raw(b'\x89\xC5')                                    # ebp = char array base
+        a.raw(b'\x31\xF6')                                    # esi = 0 (slot)
+        a.label('ov_ft_loop')
+        a.raw(b'\x8B\x14\xB5' + le32(bot_indices_va))         # edx = bot_indices[slot]
+        a.raw(b'\x85\xD2'); a.jz('ov_ft_next')                # idx==0 -> host/unused -> skip
+        a.raw(b'\x39\xDA'); a.jae('ov_ft_next')               # idx >= count -> skip
+        a.raw(b'\x8B\x44\x95\x00')                            # eax = [ebp + edx*4] (char)
+        a.raw(b'\x85\xC0'); a.jz('ov_ft_next')                # NULL char -> skip
+        # Force-tick only when the engine did not tick this bot's controller.
+        a.raw(b'\x83\x3C\xB5' + le32(bot_ticked_va) + b'\x00')  # cmp [bot_ticked + esi*4], 0
+        a.jnz('ov_ft_reset')                                  # engine ticked controller -> skip force-call
+        a.raw(b'\xC7\x04\xB5' + le32(bot_ticked_va) + le32(2))  # recovery tick sentinel
+        a.raw(b'\x89\xC7')                                    # mov edi, eax (char)
+        a.raw(b'\xF7\x47' + bytes([ax.ENTITY_FLAGS_OFF])
+              + le32(ax.ENTITY_SKIP_UPDATE_BIT))              # test [char+flags], skip-update bit
+        a.jnz('ov_ft_reset')                                  # pending-delete/no-update -> skip
+        a.raw(b'\x55')                                        # push ebp (loop uses ebp=char array)
+        a.raw(b'\xBD' + le32(ax.ENTITY_SKIP_UPDATE_BIT))       # ebp = 0x10000 (sub_57A030 context)
+        a.raw(b'\x68\x89\x88\x88\x3C')                        # push 0x3C888889 (1/60 float = dt)
+        a.raw(b'\x89\xF9')                                    # mov ecx, edi (char)
+        a.raw(b'\x8B\x17')                                    # mov edx, [edi]
+        a.raw(b'\xFF\x52' + bytes([ax.ENTITY_TICK_PRE1_VTBL_OFF]))  # call [edx + 0x7C]; ret 4
+        a.raw(b'\xF7\x47' + bytes([ax.ENTITY_FLAGS_OFF])
+              + le32(ax.ENTITY_SKIP_UPDATE_BIT))              # test [char+flags], skip-update bit
+        a.jnz('ov_ft_restore_ebp')
+        a.raw(b'\x68\x89\x88\x88\x3C')                        # push dt
+        a.raw(b'\x89\xF9')                                    # mov ecx, edi
+        a.raw(b'\x8B\x17')                                    # mov edx, [edi]
+        a.raw(b'\xFF\x92' + le32(ax.ENTITY_TICK_PRE2_VTBL_OFF))  # call [edx + 0x80]; ret 4
+        a.raw(b'\xF7\x47' + bytes([ax.ENTITY_FLAGS_OFF])
+              + le32(ax.ENTITY_SKIP_UPDATE_BIT))              # test [char+flags], skip-update bit
+        a.jnz('ov_ft_restore_ebp')
+        a.raw(b'\x68\x89\x88\x88\x3C')                        # push dt
+        a.raw(b'\x89\xF9')                                    # mov ecx, edi
+        a.raw(b'\x8B\x17')                                    # mov edx, [edi]
+        a.raw(b'\xFF\x92' + le32(ax.ENTITY_TICK_MAIN_VTBL_OFF))  # call [edx + 0x8C]; ret 4
+        a.label('ov_ft_restore_ebp')
+        a.raw(b'\x5D')                                        # pop ebp
+        a.label('ov_ft_reset')
+        a.raw(b'\xC7\x04\xB5' + le32(bot_ticked_va) + le32(0))  # bot_ticked[slot] = 0
+        a.label('ov_ft_next')
+        a.raw(b'\x46')                                        # inc esi
+        a.raw(b'\x83\xFE' + bytes([cfg.MAX_BOT_SLOTS]))       # cmp esi, MAX_BOT_SLOTS
+        a.jb('ov_ft_loop')
+        a.label('ov_ft_done')
+        a.raw(b'\x61')                                        # popad
     # Per-portal active-state periodic re-scan (immune to the overlay gate, so it
     # tracks dynamic activation even with the overlay hidden). Countdown frames;
     # when it hits 0, reset to the interval and run scan_portal_active (self-
@@ -119,6 +225,72 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
               + le32(pa_interval))                            # reset countdown
         a.call_lbl('scan_portal_active')
         a.label('ov_pa_skip')
+    # Far CTF capture support. The bot force-tick above keeps the carrier
+    # moving, but capture itself is driven by the home flag/base entities at the
+    # destination. Those entities are also camera-gated by the engine, so a bot
+    # standing on its far home base can keep carrying until the host walks close
+    # enough to wake that area. scan_portal_active also caches up to two live
+    # entities at each flag_table anchor in flag_entity[]; when a carrying bot is
+    # close to its HOME base, tick those cached entities through the same
+    # sub_57A030 vtable stages used for far bots.
+    if (cfg.BOT_FORCE_TICK_ENABLED and flag_entity_va and flag_home_tick_radius_va
+            and route_carry_va and route_goal_va and flag_table_va and flag_count_va):
+        bot_indices_va = layout.va('bot_indices')
+        bot_slot_tmp_va = layout.va('bot_slot_tmp')
+        bot_char_tmp_va = layout.va('bot_char_tmp')
+        d2_va = layout.va('scan_d2') if layout.has_field('scan_d2') else layout.va('curr_dist_sq')
+        a.raw(b'\x60')                                        # pushad
+        a.raw(b'\xA1' + le32(ax.MANAGER_GLOBAL_VA))           # eax = [mgr]
+        a.raw(b'\x85\xC0'); a.jz('ov_ff_done')
+        a.raw(b'\x8B\x98\x94\x02\x00\x00')                    # ebx = [mgr+0x294] char count
+        a.raw(b'\x8B\x80\x90\x02\x00\x00')                    # eax = [mgr+0x290] char array
+        a.raw(b'\x85\xC0'); a.jz('ov_ff_done')
+        a.raw(b'\x89\xC5')                                    # ebp = char array base
+        a.raw(b'\x31\xF6')                                    # esi = slot
+        a.label('ov_ff_loop')
+        a.raw(b'\x8B\x14\xB5' + le32(bot_indices_va))         # edx = bot_indices[slot]
+        a.raw(b'\x85\xD2'); a.jz('ov_ff_next')                # idx==0 -> host/unused
+        a.raw(b'\x39\xDA'); a.jae('ov_ff_next')               # idx >= count -> skip
+        a.raw(b'\x8B\x7C\x95\x00')                            # edi = [char_array + idx*4]
+        a.raw(b'\x85\xFF'); a.jz('ov_ff_next')
+        a.raw(b'\x89\x35' + le32(bot_slot_tmp_va))            # bot_slot_tmp = esi
+        a.raw(b'\x89\x3D' + le32(bot_char_tmp_va))            # bot_char_tmp = edi
+        a.raw(b'\x53\x56\x57')                                # save ebx/esi/edi across helper
+        a.call_lbl('ctf_pick_goal')                           # route_carry + route_goal_flag
+        a.raw(b'\x5F\x5E\x5B')                                # restore edi/esi/ebx
+        a.raw(b'\x83\x3D' + le32(route_carry_va) + b'\x00')   # carrying?
+        a.jz('ov_ff_next')
+        a.raw(b'\xA1' + le32(route_goal_va))                  # eax = goal flag idx
+        a.raw(b'\x83\xF8\xFF'); a.jz('ov_ff_next')
+        a.raw(b'\x3B\x05' + le32(flag_count_va))              # goal >= flag_count?
+        a.jae('ov_ff_next')
+        # d2 = (flag[goal] - botchar.pos)^2
+        a.raw(b'\xD9\x04\xC5' + le32(flag_table_va))          # fld flag.x
+        a.raw(b'\xD8\x67\x4C')                                # fsub [botchar+0x4C]
+        a.raw(b'\xD8\xC8')                                    # fmul st,st
+        a.raw(b'\xD9\x04\xC5' + le32(flag_table_va + 4))      # fld flag.y
+        a.raw(b'\xD8\x67\x50')                                # fsub [botchar+0x50]
+        a.raw(b'\xD8\xC8')                                    # fmul st,st
+        a.raw(b'\xDE\xC1')                                    # faddp -> st0 = d2
+        a.raw(b'\xD9\x15' + le32(d2_va))                      # fst [d2] (keep d2)
+        a.raw(b'\xD8\x1D' + le32(flag_home_tick_radius_va))   # fcomp [radius] (pop)
+        a.raw(b'\xDF\xE0\x9E')                                # fnstsw ax; sahf
+        a.ja('ov_ff_next')                                    # too far from home base
+        # Tick both cached entities for this flag anchor, if present.
+        a.raw(b'\x8B\x15' + le32(route_goal_va))              # edx = goal
+        a.raw(b'\x8B\x14\xD5' + le32(flag_entity_va))         # edx = flag_entity[goal*2 + 0]
+        _emit_force_tick_entity_from_edx(a, 'ov_ff_e0', 'ov_ff_after_e0')
+        a.label('ov_ff_after_e0')
+        a.raw(b'\x8B\x15' + le32(route_goal_va))              # edx = goal
+        a.raw(b'\x8B\x14\xD5' + le32(flag_entity_va + 4))     # edx = flag_entity[goal*2 + 1]
+        _emit_force_tick_entity_from_edx(a, 'ov_ff_e1', 'ov_ff_after_e1')
+        a.label('ov_ff_after_e1')
+        a.label('ov_ff_next')
+        a.raw(b'\x46')                                        # inc esi
+        a.raw(b'\x83\xFE' + bytes([cfg.MAX_BOT_SLOTS]))       # cmp esi, MAX_BOT_SLOTS
+        a.jb('ov_ff_loop')
+        a.label('ov_ff_done')
+        a.raw(b'\x61')                                        # popad
     a.raw(b'\x83\x3D' + le32(overlay_enabled_va) + b'\x00')   # cmp [overlay_enabled], 0
     a.jz('ov_resume')
 
@@ -213,6 +385,15 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xB9' + le32(overlay_portal_color_va))
         a.call_va(ax.SUB_53F010_VA)
 
+    # --- Build flag-marker color (consumed by the flag pass) --------------
+    if overlay_flag_color_va:
+        a.raw(b'\x6A' + bytes([fa]))
+        a.raw(b'\x6A' + bytes([fb]))
+        a.raw(b'\x6A' + bytes([fg]))
+        a.raw(b'\x6A' + bytes([fr]))
+        a.raw(b'\xB9' + le32(overlay_flag_color_va))
+        a.call_va(ax.SUB_53F010_VA)
+
     # --- Draw vertices ----------------------------------------------------
     if overlay_vertices_va:
         a.raw(b'\x31\xF6')                                    # xor esi, esi
@@ -300,6 +481,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xBD' + le32(portal_table_va))               # ebp = table base
         a.raw(b'\x8B\x1D' + le32(portal_count_va))           # ebx = count
         a.raw(b'\xB9' + le32(overlay_portal_color_va))       # ecx = color
+        a.call_lbl('ov_draw_point_table')
+
+    # --- Draw detected CTF flag bases ------------------------------------
+    # Populated once per match by load_flags from static Data.dat-derived map
+    # data. Same world->screen + oval path as portals, distinct color so flag
+    # detection can be verified in-game.
+    if flag_table_va and overlay_flag_color_va:
+        a.raw(b'\xBD' + le32(flag_table_va))                 # ebp = table base
+        a.raw(b'\x8B\x1D' + le32(flag_count_va))             # ebx = count
+        a.raw(b'\xB9' + le32(overlay_flag_color_va))         # ecx = color
         a.call_lbl('ov_draw_point_table')
 
     # --- Draw edges -------------------------------------------------------
@@ -395,6 +586,41 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.jmp('ov_dpt_loop')
     a.label('ov_dpt_ret')
     a.raw(b'\xC3')
+
+
+def _emit_force_tick_entity_from_edx(a: Asm, prefix: str, done_label: str) -> None:
+    """Run the normal active-entity driver stages for entity pointer EDX."""
+    a.raw(b'\x85\xD2'); a.jz(done_label)                    # NULL
+    a.raw(b'\x81\xFA\x00\x00\x40\x00'); a.jb(done_label)    # below image/heap-ish range
+    a.raw(b'\x81\xFA\x00\x00\x00\x70'); a.jae(done_label)   # above normal 32-bit heap range
+    a.raw(b'\x89\xD7')                                      # edi = entity
+    a.raw(b'\x81\x4F' + bytes([ax.ENTITY_FLAGS_OFF])
+          + le32(ax.ENTITY_ACTIVE_BIT))                     # set Active
+    a.raw(b'\xF7\x47' + bytes([ax.ENTITY_FLAGS_OFF])
+          + le32(ax.ENTITY_SKIP_UPDATE_BIT))                # pending-delete/no-update?
+    a.jnz(done_label)
+    a.raw(b'\x55')                                          # save loop EBP
+    a.raw(b'\xBD' + le32(ax.ENTITY_SKIP_UPDATE_BIT))         # ebp = sub_57A030 context
+    a.raw(b'\x68\x89\x88\x88\x3C')                          # push dt
+    a.raw(b'\x89\xF9')                                      # ecx = entity
+    a.raw(b'\x8B\x17')                                      # edx = [entity]
+    a.raw(b'\xFF\x52' + bytes([ax.ENTITY_TICK_PRE1_VTBL_OFF]))
+    a.raw(b'\xF7\x47' + bytes([ax.ENTITY_FLAGS_OFF])
+          + le32(ax.ENTITY_SKIP_UPDATE_BIT))
+    a.jnz(f'{prefix}_restore')
+    a.raw(b'\x68\x89\x88\x88\x3C')                          # push dt
+    a.raw(b'\x89\xF9')
+    a.raw(b'\x8B\x17')
+    a.raw(b'\xFF\x92' + le32(ax.ENTITY_TICK_PRE2_VTBL_OFF))
+    a.raw(b'\xF7\x47' + bytes([ax.ENTITY_FLAGS_OFF])
+          + le32(ax.ENTITY_SKIP_UPDATE_BIT))
+    a.jnz(f'{prefix}_restore')
+    a.raw(b'\x68\x89\x88\x88\x3C')                          # push dt
+    a.raw(b'\x89\xF9')
+    a.raw(b'\x8B\x17')
+    a.raw(b'\xFF\x92' + le32(ax.ENTITY_TICK_MAIN_VTBL_OFF))
+    a.label(f'{prefix}_restore')
+    a.raw(b'\x5D')                                          # restore loop EBP
 
 
 def _emit_point_cull(a: Asm,
@@ -493,6 +719,8 @@ def _split_rgba_static(role):
         src = cfg.OVERLAY_PICKUP_COLOR
     elif role == 'portal':
         src = cfg.OVERLAY_PORTAL_COLOR
+    elif role == 'flag':
+        src = cfg.OVERLAY_FLAG_COLOR
     else:
         raise ValueError(f'unknown overlay color role: {role!r}')
     return tuple(int(v) & 0xFF for v in src)
