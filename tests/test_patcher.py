@@ -278,8 +278,13 @@ class PatcherTests(unittest.TestCase):
         self.assertEqual(len(names), len(set(names)))
         self.assertIn('sub_5693A0 waypoint overlay', names)
         self.assertIn('sub_53DA40 pickup registration', names)
-        self.assertIn('sub_5B3100 CTF flag-use home-flag guard', names)
+        self.assertIn('sub_4C29F0 CActivateAction apply flag-home event', names)
+        self.assertIn('sub_4C2D60 CDeactivateAction apply flag-away event', names)
         self.assertIn('sub_5A9960 CTF score home-flag guard', names)
+        # The flag-use guard was removed: the drop-on-death canned script uses
+        # the same CUseInventoryItemAction, so a home-flag guard there blocked
+        # legitimate flag drops whenever both flags were out.
+        self.assertNotIn('sub_5B3100 CTF flag-use home-flag guard', names)
 
         _, info = zax_patch.build_hook(zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA)
         for patch in zax_patch.ENABLED_PATCHES:
@@ -387,8 +392,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '31cd7493423853754d16f5dbcdd9fe7546ef7393faa483397d7bfc58d47192f0'
-    HOOK_ENTRY_SIZE = 22694
+    SECTION_SHA256 = 'bcfab165494f0fc5fd464a8bac53e5de0fc7e76f0734afc4d365966213954a02'
+    HOOK_ENTRY_SIZE = 22243
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

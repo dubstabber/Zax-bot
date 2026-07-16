@@ -1,16 +1,24 @@
-"""CTF capture guards.
+"""CTF capture score guard (last-resort backstop).
 
-There are two relevant map-script actions at a CTF base:
+``CGiveTeamAPointAction::execute`` awards the capture point at a CTF base. The
+detour suppresses the award while the scoring team's own flag is away — first
+by the event-driven ``flag_present[]`` (kept in lockstep with the map script's
+checker activation by ``detours/flag_events.py``), then by a live inventory
+sweep that catches a carried flag even if an event was somehow missed.
 
-* ``CUseInventoryItemAction::execute`` consumes the carried enemy flag item.
-* ``CGiveTeamAPointAction::execute`` awards the capture point.
+With the checker force-tick correctly gated on ``flag_present[]`` the capture
+chain can no longer fire while the flag is away, so this guard should never
+trigger; it stays as defence in depth because a wrongful chain also consumes
+the carried flag and respawns it at its base, which the score guard cannot
+undo — only the point itself is protected here.
 
-The old guard only wrapped the score action. That stopped the numeric score
-from increasing while the scoring team's own flag was away, but it ran too
-late: the use action had already consumed the carried flag and fired the base's
-success feedback. This module guards both points. The use-action guard blocks
-only exact Red/Blue flag-item uses; every other inventory-use action falls
-through unchanged.
+HISTORY: an earlier companion guard wrapped ``CUseInventoryItemAction::execute``
+(``sub_5B3100``) to stop the flag-consume step of the capture chain too. It was
+REMOVED: the shared drop-on-death canned script ("Does player have a flag")
+consumes the dying carrier's flag through the very same action, so the guard
+could not tell a capture consume from a drop consume and wrongly blocked flag
+drops whenever both flags were out — one of the state-corruption sources behind
+bot-match CTF anomalies. Do not reinstate it at that site.
 """
 
 from .. import addresses as ax
@@ -53,9 +61,6 @@ def _emit_fallback(a: Asm) -> None:
     a.label('detour_5A9960')
     a.raw(ax.S5A9960_PROLOGUE)
     a.jmp_va(ax.S5A9960_RESUME)
-    a.label('detour_5B3100')
-    a.raw(ax.S5B3100_PROLOGUE)
-    a.jmp_va(ax.S5B3100_RESUME)
 
 
 def emit(a: Asm, layout: ScratchLayout) -> None:
@@ -128,64 +133,6 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC2\x10\x00')                                   # ret 0x10
 
     # ------------------------------------------------------------------
-    # CUseInventoryItemAction::execute. This is the earlier path that consumes
-    # a carried flag. Block exact flag-delivery uses while own flag is away.
-    # ------------------------------------------------------------------
-    a.label('detour_5B3100')
-    a.raw(b'\x60')                                            # pushad
-    _emit_state_reset(a, block_va, team_va, target_def_va, gid_va, inv_va)
-
-    # Validate action pointer; action+8 is the item-definition id consumed by
-    # the use action.
-    a.raw(b'\x85\xC9'); a.jz('csg_use_done')                 # action NULL?
-    a.raw(b'\x81\xF9' + le32(ax.IMAGE_BASE)); a.jb('csg_use_done')
-    a.raw(b'\x81\xF9' + le32(HIGH_PTR)); a.jae('csg_use_done')
-    a.raw(b'\x8B\x59\x08')                                   # ebx = action->Item Def
-    a.raw(b'\x85\xDB'); a.jz('csg_use_done')
-    a.raw(b'\x83\xFB\xFF'); a.jz('csg_use_done')
-
-    # If the action consumes Blue Flag, Red is trying to score and Red Flag
-    # must be home. Store the Blue id temporarily in target_def so the Red
-    # consumed path can reuse it without another registry lookup.
-    _emit_resolve_blue_flag(a)
-    a.raw(b'\xA3' + le32(target_def_va))                     # temp: blue flag id
-    a.raw(b'\x83\xF8\xFF'); a.jz('csg_use_check_red')
-    a.raw(b'\x39\xC3')                                       # cmp ebx, eax
-    a.jnz('csg_use_check_red')
-    a.raw(b'\xC7\x05' + le32(team_va) + le32(1))             # Red team scoring
-    _emit_resolve_red_flag(a)                                # target = own Red flag
-    a.raw(b'\x83\xF8\xFF'); a.jz('csg_use_done')
-    a.raw(b'\xA3' + le32(target_def_va))
-    a.call_lbl('csg_check_current_team')
-    a.jmp('csg_use_done')
-
-    # If the action consumes Red Flag, Blue is trying to score and Blue Flag
-    # must be home. target_def still holds the previously resolved Blue id.
-    a.label('csg_use_check_red')
-    _emit_resolve_red_flag(a)
-    a.raw(b'\x83\xF8\xFF'); a.jz('csg_use_done')
-    a.raw(b'\x39\xC3')                                       # cmp ebx, eax
-    a.jnz('csg_use_done')
-    a.raw(b'\xC7\x05' + le32(team_va) + le32(0))             # Blue team scoring
-    a.raw(b'\xA1' + le32(target_def_va))                     # eax = own Blue flag id
-    a.raw(b'\x83\xF8\xFF'); a.jz('csg_use_done')
-    a.raw(b'\xA3' + le32(target_def_va))
-    a.call_lbl('csg_check_current_team')
-
-    a.label('csg_use_done')
-    a.raw(b'\x61')                                           # popad
-    a.raw(b'\x83\x3D' + le32(block_va) + b'\x00')            # block?
-    a.jnz('csg_use_block')
-
-    # Allow: replay displaced prologue and continue into the original body.
-    a.raw(ax.S5B3100_PROLOGUE)
-    a.jmp_va(ax.S5B3100_RESUME)
-
-    a.label('csg_use_block')
-    a.raw(b'\x31\xC0')                                       # xor eax, eax
-    a.raw(b'\xC2\x10\x00')                                   # ret 0x10
-
-    # ------------------------------------------------------------------
     # Shared check. Inputs:
     #   ctf_score_team       = scoring team (0 Blue, 1 Red)
     #   ctf_score_target_def = scoring team's own flag item-definition id
@@ -200,9 +147,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x83\x3D' + le32(target_def_va) + b'\xFF')
     a.jz('csg_check_done')
 
-    # If the periodic world scan says the score recipient's own base flag is
-    # absent, block immediately. The inventory scan below catches the carried
-    # case even if flag_present is stale.
+    # flag_present[] is event-driven (the checker activate/deactivate apply
+    # detours in flag_events.py), so it is the authoritative home/away answer
+    # with no scan staleness. The inventory sweep below stays as a fallback
+    # for a hypothetical missed event: a carried flag always implies "away".
     if flag_present_enabled:
         a.raw(b'\x8B\x1D' + le32(flag_count_va))             # ebx = flag_count
         a.raw(b'\x83\xFB' + bytes([cfg.FLAG_TABLE_MAX]))

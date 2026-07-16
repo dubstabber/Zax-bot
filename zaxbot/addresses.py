@@ -344,11 +344,43 @@ S5A9960_PROLOGUE = b'\x56\x8B\xF1\x8B\x0D\x14\x3F\x71\x00'
 
 # --- CUseInventoryItemAction::execute (CTF capture flag consume action) ----
 # Flag-base scripts first consume the carried enemy flag through this action,
-# then award the capture point. Guarding only CGiveTeamAPointAction blocks the
-# score but is too late to stop flag removal and success feedback.
+# then award the capture point. NOTE: the shared drop-on-death canned script
+# ("Does player have a flag") consumes the dying carrier's flag through the
+# SAME action, so a home-flag guard here cannot tell a capture consume from a
+# drop consume and wrongly blocks drops whenever both flags are out. The old
+# use-guard detour was removed for that reason; the site constants stay for
+# reference.
 S5B3100_VA       = 0x5B3100
 S5B3100_RESUME   = 0x5B3106
 S5B3100_PROLOGUE = b'\x53\x55\x8B\x6C\x24\x10'
+
+# --- CActivateAction / CDeactivateAction per-entity apply -------------------
+# The vanilla CTF rule "your own flag must be home to capture" is enforced by
+# the map scripts through the base "checker" touch trigger ("Red Checker" /
+# "Blue Checker", authored exactly on the flag spawn anchor on every CTF map):
+# the shared canned scripts run CDeactivateAction on the checker when that
+# team's flag is stolen and CActivateAction when it is returned/reset, so a
+# deactivated checker simply never fires its capture Enter Action.
+#
+# Both action executes (vtable slot 23) funnel through the generic by-name
+# multi-target resolver sub_41AED0, which calls the class's PER-ENTITY apply
+# (vtable slot 27) once per resolved target entity:
+#   sub_4C29F0 — CActivateAction apply:  set entity Active bit (+0x1C, 0x800000)
+#   sub_4C2D60 — CDeactivateAction apply: clear entity Active bit
+# Each is reachable only through its own vtable (single data xref), receives
+# the RESOLVED entity at [esp+0x10], and returns with ret 0x10. Detouring the
+# applies (not the executes) yields the exact script transition PLUS the live
+# checker entity pointer, with no name strings or grid walks needed: the
+# detour matches the entity's raw +0x4C/+0x50 position against flag_table and
+# writes flag_present[] (1 on activate, 0 on deactivate).
+S4C29F0_VA       = 0x4C29F0
+S4C29F0_RESUME   = 0x4C29F6
+S4C29F0_PROLOGUE = b'\x53\x57\x8B\x7C\x24\x18'  # push ebx; push edi; mov edi,[esp+0x18]
+S4C2D60_VA       = 0x4C2D60
+S4C2D60_RESUME   = 0x4C2D66   # the jz consuming the replayed `test ecx, ecx` flags
+S4C2D60_PROLOGUE = b'\x8B\x4C\x24\x10\x85\xC9'  # mov ecx,[esp+0x10]; test ecx,ecx
+VT_CACTIVATE_ACTION_VA   = 0x5F6374  # CActivateAction vtable
+VT_CDEACTIVATE_ACTION_VA = 0x5F63E4  # CDeactivateAction vtable
 
 # --- Active-gametype getter (used by detect_mode) --------------------------
 # `sub_59FF90(ecx=mgr)` returns the active CMultiPlayerGameType-derived

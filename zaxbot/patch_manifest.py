@@ -101,16 +101,33 @@ def build_enabled_patches():
             )
         )
 
-    if cfg.CTF_SCORE_GUARD_ENABLED:
-        # Harden the CTF capture chain while the scoring team's own flag is
-        # away/carried. The inventory-use action is the early consume/feedback
-        # path; the score action remains a late numeric-score fallback.
+    if cfg.CTF_FLAG_EVENTS_ENABLED:
+        # Event-driven CTF flag-home tracking. The map scripts encode "own
+        # flag is home" as the base checker trigger's activation (deactivated
+        # on steal, reactivated on return/capture); detouring the two action
+        # per-entity applies keeps flag_present[] in exact lockstep with that
+        # state, with no scan staleness. This is what gates the far-base
+        # force-tick so it can never re-arm a script-deactivated checker.
+        # NOTE: the old sub_5B3100 (CUseInventoryItemAction) guard was removed
+        # deliberately — the drop-on-death canned script consumes flags via
+        # the same action, so a home-flag guard there wrongly blocked drops.
         patches.append(
             RelocationPatch(
-                'sub_5B3100 CTF flag-use home-flag guard', 'jmp', ax.S5B3100_VA,
-                ax.S5B3100_PROLOGUE, 'detour_5B3100_va', 6,
+                'sub_4C29F0 CActivateAction apply flag-home event', 'jmp',
+                ax.S4C29F0_VA, ax.S4C29F0_PROLOGUE, 'detour_4C29F0_va', 6,
             )
         )
+        patches.append(
+            RelocationPatch(
+                'sub_4C2D60 CDeactivateAction apply flag-away event', 'jmp',
+                ax.S4C2D60_VA, ax.S4C2D60_PROLOGUE, 'detour_4C2D60_va', 6,
+            )
+        )
+
+    if cfg.CTF_SCORE_GUARD_ENABLED:
+        # Last-resort backstop: suppress a capture point award while the
+        # scoring team's own flag is away/carried. Should never fire with the
+        # event-driven flag_present[] gating the checker wake-ups.
         patches.append(
             RelocationPatch(
                 'sub_5A9960 CTF score home-flag guard', 'jmp', ax.S5A9960_VA,

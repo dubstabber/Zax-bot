@@ -66,8 +66,9 @@ image, writes it back, and prints the hook/scratch/detour VAs.
 | `0x5693A0` | waypoint overlay/page-flip hook; also force-ticks far bots and far CTF home flag/base entities |
 | `0x53DA40` | gated pickup self-registration for overlay item markers |
 | `0x4C11A0` | teleport/portal source self-registration |
-| `0x5B3100` | CTF flag-use guard; blocks enemy-flag consumption while own flag is away/carried |
-| `0x5A9960` | CTF score action guard; suppresses capture award while own flag is away/carried |
+| `0x4C29F0` | CActivateAction per-entity apply; flag-home event (`flag_present[i]=1` when the target sits on a flag anchor) |
+| `0x4C2D60` | CDeactivateAction per-entity apply; flag-away event (`flag_present[i]=0`) |
+| `0x5A9960` | CTF score action guard (backstop); suppresses capture award while own flag is away/carried |
 | `0x480889` | skip unsafe `sub_480800` name block for synthetic ids |
 | `0x4F5204` | skip NULL entries in a character iterator |
 

@@ -432,8 +432,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x8B\x0D' + le32(flag_count_va))                   # ecx = flag_count (count)
         a.raw(b'\xF3\xA5')                                         # rep movsd
         if flag_present_va:
-            # Static bases are the optimistic state until scan_portal_active
-            # confirms the live exact-anchor flag/base entity pair.
+            # Flags always start at their bases. From here on flag_present[]
+            # is EVENT-owned: the checker activate/deactivate apply detours
+            # (detours/flag_events.py) flip it in lockstep with the map
+            # script's steal/return/capture transitions.
             a.raw(b'\xBF' + le32(flag_present_va))                  # edi = flag_present
             a.raw(b'\x8B\x0D' + le32(flag_count_va))                # ecx = flag_count
             a.raw(b'\xB8\x01\x00\x00\x00')                          # eax = 1

@@ -74,13 +74,19 @@ Current limitations:
 - CTF routing uses static Red/Blue flag-base anchors parsed from `Data.dat`,
   per-match BFS distance fields over the authored waypoint graph, and a final
   direct approach to the base anchor so the bot physically touches the flag or
-  home capture object. The periodic grid scan also matches the expected
-  exact-anchor flag/base entity pair at each base and writes `flag_present[]`;
-  after that scan it clears a team's entry again if any live character carries
-  that team's exact `Red Flag` / `Blue Flag` inventory item, or if that exact
-  flag item exists as a dropped world entity away from its home anchor. The
-  subtraction is required because base action entities can remain at the anchor
-  while the flag item is away.
+  home capture object.
+  `flag_present[]` ("is that team's flag at its base?") is EVENT-DRIVEN: the
+  vanilla map scripts express the state as the base "checker" trigger's
+  activation (deactivated by the shared canned scripts when the flag is stolen,
+  reactivated on return/capture), and `detours/flag_events.py` detours the
+  `CActivateAction`/`CDeactivateAction` per-entity applies (`sub_4C29F0` /
+  `sub_4C2D60`) to mirror exactly those transitions whenever the resolved
+  target entity sits on a flag anchor. Flags start home; there is no engine
+  auto-return, so the two events are the complete transition set. The old
+  scan-derived heuristics (anchor-pair counting plus carried/dropped
+  subtraction) were removed: a dropped flag is a plain renamed CEntityAnimated
+  with no inventory identity, so they never saw the dropped state and left
+  `flag_present[]` stuck at 1.
   If an attacker sees the enemy flag absent, it randomly chooses a stable
   temporary policy for that missing-flag episode: random waypoint roaming to
   search, or continuing to route toward the missing flag's base to wait nearby.
@@ -89,27 +95,26 @@ Current limitations:
   the bot switches goals. Routing to a live dropped flag position is still
   future work.
 - The page-flip hook keeps far bots simulated and also force-ticks the cached
-  home flag/base entities while a carrier is at home and `flag_present[home]`
+  exact-anchor base entities while a carrier is at home and `flag_present[home]`
   is true; this was required because the engine camera-gates the base
-  interaction too, but must not bypass the normal "your flag must be home to
-  score" rule. Live CE verification showed flag-base entity caching must match
-  raw entity `+0x4C/+0x50` coordinates, not `sub_4FB0A0`, because the getter can
-  alias nearby visual pieces to the same anchor while the actual capture objects
-  sit on the raw anchor. The flag cache also excludes live player characters:
-  a carrier standing on its home base can otherwise be cached as a base entity,
-  making `flag_present[]` falsely true and causing the far-base force-tick path
-  to tick the bot a second time. Live CE also showed that non-character base
-  entities can still leave `flag_present[]` true while the real flag item is
-  carried or dropped away from home, so the periodic scan now subtracts exact
-  carried-flag inventory state and exact dropped flag item state before routing
-  or far-base ticks consume `flag_present[]`.
-- The CTF flag-use action is guarded at `sub_5B3100`
-  (`CUseInventoryItemAction::execute`) so an illegal capture does not consume
-  the carried enemy flag or fire the base's success feedback while the scoring
-  team's own flag is away. The actual score action is also guarded at
-  `sub_5A9960` (`CGiveTeamAPointAction::execute`) as a numeric-score fallback.
-  Both guards use `flag_present[]` plus an exact live inventory scan for the
-  scoring team's own `Red Flag` / `Blue Flag` item.
+  interaction too. The event-driven gate flips the same frame a steal
+  deactivates the checker, so the tick can never re-arm a script-deactivated
+  checker — which is the vanilla "your flag must be home to score" enforcement
+  and was the root cause of bots capturing while the enemy's own flag lay
+  dropped on the ground. Live CE verification showed flag-base entity caching
+  must match raw entity `+0x4C/+0x50` coordinates, not `sub_4FB0A0`, because
+  the getter can alias nearby visual pieces to the same anchor while the actual
+  capture objects sit on the raw anchor. The cache holds up to three entities
+  per anchor (checker, spawn marker, recreated flag) so grid order cannot evict
+  the checker, and still excludes live player characters (a carrier standing on
+  its base was once cached and double-ticked).
+- The CTF score action is guarded at `sub_5A9960`
+  (`CGiveTeamAPointAction::execute`) as a last-resort backstop, using
+  `flag_present[]` plus an exact live inventory scan for the scoring team's own
+  `Red Flag` / `Blue Flag` item. The old companion guard at `sub_5B3100`
+  (`CUseInventoryItemAction::execute`) was REMOVED: the drop-on-death canned
+  script consumes the dying carrier's flag through the same action, so that
+  guard wrongly blocked flag drops whenever both flags were out.
 - The visual waypoint overlay is available through the `0x5693A0` page-flip
   detour but starts hidden for normal FPS. In a live MP match, `O` toggles
   drawing, `N` drops/snaps a node at the host, `J` selects the nearest node,

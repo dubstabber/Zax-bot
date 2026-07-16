@@ -27,8 +27,11 @@ per-frame search:
   inactive, no goal base for this team, the current node is unreachable from the
   goal, or the bot already sits on the goal node.
 
-Live flag-base presence is refreshed by ``scan_portal_active`` into
-``flag_present[]``. When an attacker sees the enemy flag missing from its base,
+Live flag-base presence (``flag_present[]``) is EVENT-driven: the
+``detours/flag_events.py`` detours mirror the map script's base-checker
+activation (deactivated on steal, reactivated on return/capture), which is the
+vanilla "own flag is home" state. When an attacker sees the enemy flag missing
+from its base,
 the bot rolls one temporary policy for that missing-goal episode: either search
 (``route_goal_flag = -1``, so node arrivals fall back to random roaming), or
 wait near the enemy base (keep the goal so BFS moves it toward that home

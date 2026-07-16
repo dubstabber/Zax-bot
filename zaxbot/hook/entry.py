@@ -26,6 +26,7 @@ from ..detours import (
     df90_match_change,
     dp_poll,
     entity_scan,
+    flag_events,
     flag_route,
     name_block,
     overlay,
@@ -59,7 +60,8 @@ _DETOUR_LABEL_KEYS = {
     'detour_53DA40':           'detour_53DA40_va',
     'detour_4C11A0':           'detour_4C11A0_va',
     'detour_5A9960':           'detour_5A9960_va',
-    'detour_5B3100':           'detour_5B3100_va',
+    'detour_4C29F0':           'detour_4C29F0_va',
+    'detour_4C2D60':           'detour_4C2D60_va',
 }
 
 
@@ -97,6 +99,7 @@ def build_hook(section_va_abs):
         flag_static_point_max=cfg.FLAG_STATIC_POINT_MAX,
         flag_map_name_slot=cfg.FLAG_MAP_NAME_SLOT,
         flag_route_max=cfg.FLAG_ROUTE_MAX,
+        flag_entity_slots=cfg.FLAG_ENTITY_SLOTS_PER_FLAG,
     )
 
     a = Asm(section_va_abs + cfg.HOOK_ENTRY_OFF)
@@ -145,6 +148,7 @@ def build_hook(section_va_abs):
     pickup_register.emit(a, layout)
     portal_register.emit(a, layout)
     entity_scan.emit(a, layout)
+    flag_events.emit(a, layout)
     flag_route.emit(a, layout)
     ctf_score_guard.emit(a, layout)
 

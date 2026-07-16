@@ -176,6 +176,7 @@ def build_scratch_layout(
     flag_static_point_max=0,
     flag_map_name_slot=0,
     flag_route_max=0,
+    flag_entity_slots=2,
 ):
     BOT_STATE_BASE = 0x180
     MAX_BOT_SLOTS = 16
@@ -882,8 +883,10 @@ def build_scratch_layout(
                      'flag: max d^2 for matching live entities to a flag anchor'),
         ScratchField('flag_home_tick_radius_sq', flag_base + 0x18, 0x04,
                      'flag: max d^2 for force-ticking home flag entities'),
+        ScratchField('flag_evt_present', flag_base + 0x1C, 0x04,
+                     'flag: value (0/1) the activate/deactivate event detours write to flag_present'),
     ])
-    flag_static_base = flag_base + 0x1C
+    flag_static_base = flag_base + 0x20
     if flag_table_max_capped > 0:
         overlay_fields.append(ScratchField(
             'flag_table', flag_static_base,
@@ -897,12 +900,13 @@ def build_scratch_layout(
             'flag: team tag per live flag_table entry (0=Blue, 1=Red)',
         ))
         flag_static_base += flag_table_max_capped * 4
+        flag_entity_slots_capped = max(1, flag_entity_slots)
         overlay_fields.append(ScratchField(
             'flag_entity', flag_static_base,
-            flag_table_max_capped * 2 * 4,
-            'flag: up to two live entity ptrs matched at each flag anchor',
+            flag_table_max_capped * flag_entity_slots_capped * 4,
+            'flag: live entity ptrs matched exactly at each flag anchor (checker/marker/flag)',
         ))
-        flag_static_base += flag_table_max_capped * 2 * 4
+        flag_static_base += flag_table_max_capped * flag_entity_slots_capped * 4
         overlay_fields.append(ScratchField(
             'flag_present', flag_static_base,
             flag_table_max_capped * 4,

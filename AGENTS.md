@@ -208,10 +208,9 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   HOME-base positions — the right foundation for CTF bot routing (carry the
   enemy flag to your home base). Current CTF routing uses these static base
   anchors successfully: bots go to the enemy base, grab the flag, return home,
-  and capture. The periodic grid scan also matches the expected exact-anchor
-  flag/base entity pair at each base and writes `flag_present[]`; the scan then
-  subtracts exact carried flags and exact dropped Red/Blue flag world items away
-  from their home anchors. This is still not a dropped-flag routing target.
+  and capture. `flag_present[]` ("is that team's flag at its base?") is
+  EVENT-DRIVEN — see the checker state machine below; it is NOT derived from
+  the grid scan anymore, and it is still not a dropped-flag routing target.
   NOTE: in the
   8-bit palettized overlay the hue
   is driven by the BLUE byte alone, so flags
@@ -274,35 +273,66 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   (host/unused) is skipped. Both loops are cheap fixed 16-slot loops once per
   frame — do NOT hook `sub_4FADC0` itself (per entity per frame = the Windows FPS-regression hot
   path). See the `bot-far-from-camera-freeze` memory.
-- CTF home flag/base entities are also kept awake when needed. The periodic
-  `scan_portal_active` grid walk now caches up to two live entities exactly at
-  each `flag_table` anchor in `flag_entity[]`, matched by raw entity
-  `+0x4C/+0x50` coordinates rather than `sub_4FB0A0` because the getter can
-  alias nearby visual/base pieces to the same anchor while the actual capture
-  objects sit on the raw anchor (confirmed live on Hydroplant Bouncefest:
-  temporarily writing the exact-anchor entities into `flag_entity[home]` made
-  `route_carry` clear within about a second); the page-flip detour force-ticks
-  those cached entities only when a carrying bot is within
-  `CTF_FLAG_HOME_FORCE_TICK_RADIUS_SQ` of its home base. This covers the case
-  where a far bot reaches its base carrying the enemy flag but capture does not
-  fire until the host walks close enough to wake the base area. The scan
-  deliberately excludes player characters from `flag_entity[]`: live CE caught
-  a carrier standing on its home base being cached as a flag/base entity, which
-  made `flag_present[home]` falsely true, kept routing pinned to the empty base,
-  and let the far-base force-tick path tick the bot a second time. It also
-  subtracts carried-flag inventory state and exact dropped flag-item state after
-  the exact-anchor scan: live CE later showed non-character base/action entities
-  could keep `flag_present[]` true while the real Red/Blue flag item was away,
-  leaving a carrier stuck final-approaching an empty home base even though the
-  extra-tick bug was gone.
-- CTF capture is guarded at the flag-use action and the score action.
-  `detour_5B3100` wraps `CUseInventoryItemAction::execute` and blocks exact
-  `Red Flag` / `Blue Flag` uses when the scoring team's own flag is away by
-  `flag_present[]` or is found in any live character inventory. This prevents
-  the enemy flag from disappearing from the carrier inventory and prevents the
-  base's success feedback from firing. `detour_5A9960` still wraps
-  `CGiveTeamAPointAction::execute` as a late fallback and suppresses the
-  gametype score callback if a score action is reached directly.
+- **Vanilla CTF rule = the checker state machine, and `flag_present[]` mirrors
+  it exactly.** Every CTF-capable map (all 6 CTF maps + Hydroplant Bouncefest)
+  authors a hidden `Red Checker` / `Blue Checker` `CTouchingOvalTriggerAI`
+  exactly on the flag spawn anchor, whose Enter Action runs the shared canned
+  object `Canned Objects/Returned a Flag` (Data.dat): same-team toucher
+  carrying the enemy flag ⇒ recreate the enemy flag at ITS spawn, consume the
+  carried item, `CGiveTeamAPointAction`, reactivate the ENEMY checker. The
+  companion canned `Picked up a Flag` (on the flag entity's
+  `CPassThroughTriggerAI`) DEACTIVATES a team's checker when its flag is
+  stolen and REACTIVATES it when a same-team player touches the dropped copy
+  (sequence `Not Home`) to return it; `Does player have a flag` is the
+  drop-on-death script (consume carried item, spawn dropped copy at the death
+  spot). A deactivated checker is never ticked, so captures while your own
+  flag is away are impossible — that trigger activation IS the whole vanilla
+  "own flag must be home" rule; the engine has no separate check and no
+  auto-return (no exe reference to the spawn-point names). The patch therefore
+  detours the two action PER-ENTITY APPLIES (`sub_4C29F0` =
+  CActivateAction apply, `sub_4C2D60` = CDeactivateAction apply — vtable slot
+  27, entity at `[esp+0x10]`, both funnel every execute through the by-name
+  resolver `sub_41AED0`) in `detours/flag_events.py`: when the resolved target
+  entity sits on a `flag_table` anchor (that entity is the checker), it writes
+  `flag_present[i] = 1/0`. Zero staleness, no strings, no grid walk; flags
+  start home (`load_flags` seeds 1). The OLD heuristics (2-entities-at-anchor
+  presence, carried-inventory subtraction, dropped-item `+8` def-id grid
+  match) were REMOVED — the world flag is a plain CEntityAnimated (unnamed in
+  some maps' authored form, `New Name="Red Flag"` when script-recreated) with
+  NO inventory identity, so a DROPPED flag was invisible to them and
+  `flag_present` stuck at 1, which let the far-base force-tick re-arm a
+  script-deactivated checker and hand out illegal captures (the "enemy scores
+  while my flag lies on the ground" bug).
+- CTF home base entities are also kept awake when needed. The periodic
+  `scan_portal_active` grid walk caches the distinct live entities sitting
+  exactly on each `flag_table` anchor in `flag_entity[]`
+  (`FLAG_ENTITY_SLOTS_PER_FLAG = 3`: checker trigger, spawn marker, recreated
+  flag — 2 slots could evict the checker depending on grid order), matched by
+  raw entity `+0x4C/+0x50` coordinates rather than `sub_4FB0A0` because the
+  getter can alias nearby visual/base pieces to the same anchor. The page-flip
+  detour force-ticks (and Active-bit-arms) those cached entities only when a
+  carrying bot is within `CTF_FLAG_HOME_FORCE_TICK_RADIUS_SQ` of its home base
+  AND `flag_present[home]` is 1 — the event-driven gate flips the same frame a
+  steal deactivates the checker, so this path can no longer re-arm a
+  script-deactivated checker (the root cause of bot-only illegal captures).
+  This covers the case where a far bot reaches its base carrying the enemy
+  flag but capture does not fire until the host walks close enough to wake the
+  base area. The scan still excludes player characters from `flag_entity[]`
+  (live CE once caught a carrier standing on its base being cached and
+  double-ticked). The cache carries NO presence meaning.
+- CTF capture score is guarded at the score action only, as a last-resort
+  backstop. `detour_5A9960` wraps `CGiveTeamAPointAction::execute` and
+  suppresses the gametype score callback while the scoring team's own flag is
+  away per `flag_present[]` (event-accurate) or found in any live character
+  inventory (fallback for a missed event). It should never fire now that the
+  checker wake-ups are gated correctly. The old `detour_5B3100` flag-USE guard
+  was REMOVED and must NOT come back at that site: the drop-on-death canned
+  script consumes the dying carrier's flag through the very same
+  `CUseInventoryItemAction`, so a home-flag guard there cannot tell a capture
+  consume from a drop consume and wrongly blocked flag drops whenever both
+  flags were out (a common CTF state) — and a blocked capture chain is not
+  clean anyway (the canned object's enemy-flag re-create runs BEFORE the use
+  action, so blocking mid-chain duplicates flags).
 - General world-entity enumeration (`detours/entity_scan.py:scan_entities`,
   gated by `cfg.SCAN_ENTITIES_ENABLED`). The long-standing blocker for object
   detection was that there is no flat entity list: `mgr+0x290` is players,
@@ -359,10 +389,14 @@ Current patched sites:
 - `0x4C11A0` - teleport-portal self-registration (gated by
   `cfg.PORTAL_REGISTER_ENABLED`); records each `CTeleportAction` warp's source
   pad into `portal_table`.
-- `0x5B3100` - CTF flag-use guard; blocks enemy-flag consumption while the
-  scoring team's own flag is away/carried.
-- `0x5A9960` - CTF score action guard; blocks capture awards while the scoring
-  team's own flag is away/carried.
+- `0x4C29F0` - CActivateAction per-entity apply; flag-home event (sets
+  `flag_present[i]=1` when the activated entity sits on a flag anchor —
+  the base checker). Gated by `cfg.CTF_FLAG_EVENTS_ENABLED`.
+- `0x4C2D60` - CDeactivateAction per-entity apply; flag-away event
+  (`flag_present[i]=0`). Gated by `cfg.CTF_FLAG_EVENTS_ENABLED`.
+- `0x5A9960` - CTF score action guard; last-resort backstop that blocks capture
+  awards while the scoring team's own flag is away/carried. (The old
+  `0x5B3100` flag-use guard was removed — it broke flag drops; see above.)
 - `0x480889` - synthetic-id name-block skip in `sub_480800`.
 - `0x4F5204` - character iterator NULL-skip.
 
@@ -405,8 +439,11 @@ Older emitted labels or disabled detours are not active unless they appear in
 | `VT_CTF_VA = 0x5EF544` | Capture-the-Flag game-type vtable |
 | `VT_SK_VA = 0x5FED48` | Salvage King game-type vtable |
 | `stats + 0x14` | team id |
-| `sub_5B3100` | `CUseInventoryItemAction::execute`; map-script inventory-use action that consumes the carried enemy flag before the score action. Detoured for exact Red/Blue flag uses to enforce own-flag-home before consumption / success feedback. |
-| `sub_5A9960` | `CGiveTeamAPointAction::execute`; map-script score action. Original body only calls active gametype vtable[+0x68](team, 1); detoured as a fallback to enforce own-flag-home before awarding CTF capture points. |
+| `sub_5B3100` | `CUseInventoryItemAction::execute`; consumes the carried enemy flag in the capture chain AND the dying carrier's flag in the drop-on-death canned script — the two are indistinguishable here, so this site must NOT carry a home-flag guard (the old detour was removed for breaking drops). |
+| `sub_5A9960` | `CGiveTeamAPointAction::execute`; map-script score action. Original body only calls active gametype vtable[+0x68](team, 1); detoured as a last-resort backstop to enforce own-flag-home before awarding CTF capture points. |
+| `sub_4C29F0` / `sub_4C2D60` | CActivateAction / CDeactivateAction PER-ENTITY apply (vtable slot 27; entity at `[esp+0x10]`, `ret 0x10`; sets/clears `entity+0x1C & 0x800000` via entity vtbl `+0xE8`/`+0xEC`). Detoured for event-driven `flag_present[]`: the map scripts express "own flag home" as the base checker's activation. Executes (slot 23) funnel through the by-name multi-target resolver `sub_41AED0`. |
+| `VT_CACTIVATE_ACTION_VA = 0x5F6374` / `VT_CDEACTIVATE_ACTION_VA = 0x5F63E4` | the two action vtables (each apply is reachable only through its own vtable). |
+| `"Red Checker"` / `"Blue Checker"` | per-map base touch trigger (CTouchingOvalTriggerAI) authored exactly on the flag spawn anchor; Enter Action = canned `Returned a Flag` (the capture chain). Deactivated while that team's flag is away. Names verified on all 7 CTF-capable maps. |
 | `"Red Flag"` / `"Blue Flag"` | inventory item definition names resolved through `sub_523DF0(dword_6C0C08, name, -1)`; compare against carried `CInventoryItem + 8` to know which exact flag is carried. |
 | `"Multiplayer Flag"` | inventory group name resolved through `sub_591FC0(dword_6C0800, name, -1)`; `sub_425290(inv, [0x714454]) != -1` means the character carries any CTF flag. |
 | `sub_4C11A0` | relocate/teleport executor (`__thiscall`: `ecx`=action, `[esp+4]`=entity at SOURCE pos; reads dest via `sub_4F4AC0` later). The chokepoint every `CRelocate`/`CTeleportAction` funnels through (both override execute vtable slot 27 with `sub_5A5A60` → `sub_4C1060` → here). Detour site for runtime portal detection. |
@@ -439,12 +476,18 @@ Older emitted labels or disabled detours are not active unless they appear in
 - Graph authoring tools / coverage: place nodes at corners and junctions so
   the straight node-to-node segments stay in walkable space (corner-cutting is
   what triggers the wall-slide). Consider auto-densifying long edges.
-- CTF dropped-flag pursuit on top of the current away/home resolver:
-  `flag_present[]` now detects carried flags and exact dropped Red/Blue flag
-  world items away from base; attackers randomly search or wait near that base,
-  while carriers with a missing home flag search instead of touching the empty
-  capture base. The patch still does not route to the dropped position. SK bots
-  still need collector-aware return paths.
+- CTF dropped-flag pursuit on top of the event-driven away/home resolver:
+  `flag_present[]` is now exact for stolen AND dropped flags (checker
+  activate/deactivate events); attackers randomly search or wait near that
+  base, while carriers with a missing home flag search instead of touching the
+  empty capture base. The patch still does not route to the dropped position
+  (the dropped copy is a script-created `CEntityAnimated` named
+  `Red Flag`/`Blue Flag` with sequence `Not Home` — findable in the grid by
+  name+sequence if pursuit is ever added). Also open: an ATTACKER arriving at
+  a far ENEMY base cannot steal until the host wakes the area — the carrier
+  force-tick only covers the HOME checker; a symmetric enemy-base tick would
+  need the flag entity awake (and is legal in any flag state). SK bots still
+  need collector-aware return paths.
 - Reintroduce hazard/pickup awareness as GRAPH-AWARE routing (route through
   nodes near pickups, around lava) rather than the removed vector-field
   perturbation that pushed the heading into walls.

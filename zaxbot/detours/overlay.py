@@ -227,14 +227,17 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.call_lbl('scan_portal_active')
         a.label('ov_pa_skip')
     # Far CTF capture support. The bot force-tick above keeps the carrier
-    # moving, but capture itself is driven by the home flag/base entities at the
+    # moving, but capture itself is driven by the base "checker" trigger at the
     # destination. Those entities are also camera-gated by the engine, so a bot
     # standing on its far home base can keep carrying until the host walks close
-    # enough to wake that area. scan_portal_active also caches up to two live
-    # entities at each flag_table anchor in flag_entity[] and marks
-    # flag_present[]. Only tick a carrier's HOME base while that home flag is
-    # present; otherwise this helper can bypass the normal "your flag must be
-    # home to score" CTF rule.
+    # enough to wake that area. scan_portal_active caches the exact-anchor
+    # entities (checker / spawn marker / recreated flag) in flag_entity[].
+    # Only tick a carrier's HOME base while flag_present[goal] says the home
+    # flag is at base. flag_present[] is EVENT-driven (the CActivateAction /
+    # CDeactivateAction apply detours mirror the map script's checker state),
+    # so it flips the moment a steal deactivates the checker — this path can
+    # therefore never re-arm a script-deactivated checker, which is the
+    # engine's entire "your flag must be home to score" enforcement.
     if (cfg.BOT_FORCE_TICK_ENABLED and flag_entity_va and flag_home_tick_radius_va
             and route_carry_va and route_goal_va and flag_table_va and flag_count_va
             and flag_present_va):
@@ -281,15 +284,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xD8\x1D' + le32(flag_home_tick_radius_va))   # fcomp [radius] (pop)
         a.raw(b'\xDF\xE0\x9E')                                # fnstsw ax; sahf
         a.ja('ov_ff_next')                                    # too far from home base
-        # Tick both cached entities for this flag anchor, if present.
-        a.raw(b'\x8B\x15' + le32(route_goal_va))              # edx = goal
-        a.raw(b'\x8B\x14\xD5' + le32(flag_entity_va))         # edx = flag_entity[goal*2 + 0]
-        _emit_force_tick_entity_from_edx(a, 'ov_ff_e0', 'ov_ff_after_e0')
-        a.label('ov_ff_after_e0')
-        a.raw(b'\x8B\x15' + le32(route_goal_va))              # edx = goal
-        a.raw(b'\x8B\x14\xD5' + le32(flag_entity_va + 4))     # edx = flag_entity[goal*2 + 1]
-        _emit_force_tick_entity_from_edx(a, 'ov_ff_e1', 'ov_ff_after_e1')
-        a.label('ov_ff_after_e1')
+        # Tick every cached exact-anchor entity for this flag base, if present.
+        flag_entity_slots = max(1, cfg.FLAG_ENTITY_SLOTS_PER_FLAG)
+        for k in range(flag_entity_slots):
+            a.raw(b'\x8B\x15' + le32(route_goal_va))          # edx = goal
+            a.raw(b'\x6B\xD2' + bytes([flag_entity_slots * 4]))  # imul edx, edx, slots*4
+            a.raw(b'\x8B\x92' + le32(flag_entity_va + 4 * k))  # edx = flag_entity[goal*slots + k]
+            _emit_force_tick_entity_from_edx(a, f'ov_ff_e{k}', f'ov_ff_after_e{k}')
+            a.label(f'ov_ff_after_e{k}')
         a.label('ov_ff_next')
         a.raw(b'\x46')                                        # inc esi
         a.raw(b'\x83\xFE' + bytes([cfg.MAX_BOT_SLOTS]))       # cmp esi, MAX_BOT_SLOTS
@@ -594,7 +596,15 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
 
 
 def _emit_force_tick_entity_from_edx(a: Asm, prefix: str, done_label: str) -> None:
-    """Run the normal active-entity driver stages for entity pointer EDX."""
+    """Run the normal active-entity driver stages for entity pointer EDX.
+
+    Sets the entity's Active bit first: the same bit encodes BOTH camera-wake
+    and script (de)activation, and sub_4FADC0 gates component updates on it, so
+    a camera-slept trigger will not think without it. Callers MUST therefore
+    gate this helper on the event-driven flag_present[] — waking a
+    script-DEACTIVATED checker would re-enable captures the map script has
+    forbidden (own flag away), and the bit is sticky.
+    """
     a.raw(b'\x85\xD2'); a.jz(done_label)                    # NULL
     a.raw(b'\x81\xFA\x00\x00\x40\x00'); a.jb(done_label)    # below image/heap-ish range
     a.raw(b'\x81\xFA\x00\x00\x00\x70'); a.jae(done_label)   # above normal 32-bit heap range

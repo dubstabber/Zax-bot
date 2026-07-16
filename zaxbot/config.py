@@ -550,26 +550,39 @@ PORTAL_MAP_NAME_SLOT    = 96  # fixed ASCII bytes per map path, including NUL
 # Spawn" Level Parts (the flag base anchors). Runtime code only compares the
 # active map name against this compact static table and copies the matching
 # points into flag_table on match change — identical to the portal pipeline,
-# no heap-wide scanning in-game. The flags themselves are CEntityAnimated
-# entities tracked by the CTF gametype, not cleanly enumerable from the world
-# grid, so the authored spawn anchors are the reliable foundation for CTF bot
-# routing (route to the enemy flag base, return to home base). The periodic
-# scan_portal_active grid walk also matches the expected exact-anchor
-# flag/base entity pair at each anchor; that feeds flag_present[] for the
-# current "is the flag still home?" signal. The scan then clears a team's
-# flag_present[] entry if that team's exact Red/Blue flag item is currently in
-# any live character inventory, or if that exact flag item exists as a dropped
-# world entity away from its home anchor, because base/action entities can
-# remain at the anchor while the actual flag is away. Active bits are
-# deliberately not used for presence because camera-gating can clear them while
-# the flag/base object is still physically at home.
+# no heap-wide scanning in-game.
+#
+# flag_present[] ("is that team's flag home?") is EVENT-DRIVEN, mirroring the
+# vanilla rule exactly. Every CTF map authors a hidden "Red Checker" / "Blue
+# Checker" touch trigger exactly on the flag spawn anchor; the shared canned
+# scripts (Data.dat "Picked up a Flag" / "Returned a Flag") deactivate that
+# checker when the team's flag is stolen and reactivate it when the flag is
+# returned or reset after a capture — a deactivated checker never fires its
+# capture action, which IS the vanilla "own flag must be home" enforcement.
+# The patch detours the CActivateAction/CDeactivateAction per-entity applies
+# (sub_4C29F0 / sub_4C2D60) and, when the resolved target entity sits on a
+# flag_table anchor (it is the checker), writes flag_present[] = 1/0. Flags
+# start home (load_flags seeds 1) and there is no engine-side auto-return, so
+# the two script events are the complete transition set. Heuristics that
+# previously derived presence from anchor-entity counts, carried-inventory
+# scans and dropped-item grid matches were removed: the world flag entity is a
+# plain unnamed-or-renamed CEntityAnimated with no inventory identity, so
+# those scans could not see a dropped flag and left flag_present stuck at 1.
 FLAG_TABLE_MAX        = 8   # live overlay points, float[2] each (2 flags/map)
 FLAG_STATIC_MAP_MAX   = 8   # shipped Data.dat currently has 7 flag maps
 FLAG_STATIC_POINT_MAX = 16  # shipped Data.dat currently has 14 flag points
 FLAG_MAP_NAME_SLOT    = 96  # fixed ASCII bytes per map path, including NUL
-FLAG_ENTITY_SLOTS_PER_FLAG = 2
+# Exact-anchor entity cache used by the far-base force-tick. Up to three
+# distinct entities can legitimately sit on the anchor (checker trigger, spawn
+# position marker, and the flag entity itself once a return/capture recreated
+# it exactly at the spawn); two slots could evict the checker depending on
+# grid iteration order, which silently broke far captures.
+FLAG_ENTITY_SLOTS_PER_FLAG = 3
 CTF_FLAG_ENTITY_MATCH_RADIUS_SQ = 16.0 * 16.0
 CTF_FLAG_HOME_FORCE_TICK_RADIUS_SQ = 64.0 * 64.0
+# Master gate for the CActivateAction/CDeactivateAction apply detours that
+# keep flag_present[] in lockstep with the map script's checker state.
+CTF_FLAG_EVENTS_ENABLED = True
 
 # --- CTF flag routing (bots navigate the waypoint graph toward flags) ----
 # Master gate. When on and the active match is CTF with a graph + flags, bots
@@ -592,8 +605,11 @@ CTF_FLAG_HOME_FORCE_TICK_RADIUS_SQ = 64.0 * 64.0
 CTF_FLAG_ROUTING_ENABLED = True
 # Guard the engine score action itself: a map-script capture point award is
 # suppressed when the scoring team's own flag is away from base or carried by a
-# player. This fixes the bot-specific far/base wake path bypassing normal CTF
-# "your flag must be home" scoring behavior.
+# player. Last-resort backstop behind the event-driven flag_present[] — with
+# checker wake-ups gated correctly this should never fire. The old companion
+# guard on CUseInventoryItemAction was REMOVED: the drop-on-death canned script
+# consumes the dying carrier's flag through the same action, so that guard
+# wrongly blocked flag drops whenever both flags were out.
 CTF_SCORE_GUARD_ENABLED = True
 # Flag bases the BFS distance field is precomputed for (CTF always has 2).
 # flag_dist costs FLAG_ROUTE_MAX * OVERLAY_VERTEX_MAX dwords of scratch.

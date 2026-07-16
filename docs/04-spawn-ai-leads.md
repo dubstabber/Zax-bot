@@ -198,13 +198,18 @@ CTF bots now use the waypoint graph for objective routing:
 - `ctf_pick_goal` chooses enemy base while not carrying and own base while
   carrying. Carry detection is the live-verified inventory-group test:
   `sub_4267E0(char)` then `sub_425290(inv, [0x714454]) != -1`.
-- The periodic `scan_portal_active` grid walk matches the expected exact-anchor
-  flag/base entity pair at each base and writes `flag_present[]`, then clears a
-  team's entry if any live character inventory contains that team's exact
-  `Red Flag` / `Blue Flag` item, or if that exact flag item exists as a dropped
-  world entity away from its home anchor. The subtraction is required because
-  non-character base/action entities can remain at the anchor while the flag
-  item is carried or dropped away. If an attacker sees the enemy flag absent,
+- `flag_present[]` is EVENT-DRIVEN. Vanilla CTF expresses "own flag is home"
+  as the base checker trigger's activation (`Red Checker` / `Blue Checker`,
+  authored exactly on the flag spawn anchor on every CTF-capable map): the
+  shared canned scripts in Data.dat run `CDeactivateAction` on the checker
+  when that flag is stolen and `CActivateAction` when it is returned or reset
+  after a capture. `detours/flag_events.py` detours the two actions'
+  per-entity applies (`sub_4C29F0` / `sub_4C2D60`) and, when the resolved
+  target entity sits on a `flag_table` anchor, writes `flag_present[i] = 1/0`
+  — the exact vanilla transition set with no scan staleness. Flags start home
+  (`load_flags` seeds 1); the engine has no auto-return (no exe reference to
+  the spawn-point names), so nothing else moves a flag. If an attacker sees
+  the enemy flag absent,
   `ctf_pick_goal` rolls a stable temporary policy for that missing-flag episode:
   either set `route_goal_flag = -1` so node arrivals fall back to random
   waypoint roaming/search, or keep the goal base so the bot waits/patrols near
@@ -222,46 +227,42 @@ already force-ticks skipped bot characters through the same three entity stages
 as the engine's active-entity driver (`vtbl +0x7C`, `+0x80`, `+0x8C` with
 `EBP=0x10000`). That keeps the carrier moving, but capture still did not fire
 until the host approached the carrier's home base. The missing piece was the
-home flag/base entities themselves: they are camera-gated too. The periodic
-`scan_portal_active` grid walk now also caches up to two live entities at each
-`flag_table` anchor in `flag_entity[]`, and the page-flip detour force-ticks
-the cached home entries only while a carrying bot is within
-`CTF_FLAG_HOME_FORCE_TICK_RADIUS_SQ` of its home base AND
-`flag_present[home] != 0`. That final gate is load-bearing: without it a bot
-carrier could wake the empty home-base capture entities and score while the
-team's own flag was still away, which normal players cannot do.
+base checker trigger itself: it is camera-gated too. The periodic
+`scan_portal_active` grid walk caches the distinct entities sitting exactly on
+each `flag_table` anchor in `flag_entity[]` (three slots per anchor — checker,
+spawn marker, recreated flag — so grid iteration order cannot evict the
+checker), and the page-flip detour force-ticks the cached home entries only
+while a carrying bot is within `CTF_FLAG_HOME_FORCE_TICK_RADIUS_SQ` of its home
+base AND `flag_present[home] != 0`. That final gate is load-bearing AND now
+exact: the checker deactivation event flips `flag_present[home]` in the same
+action chain that steals the flag, so this path can never re-arm a
+script-deactivated checker. (Waking a deactivated checker sets a sticky Active
+bit, which re-enables captures for EVERYONE until the next script transition —
+that was the mechanism behind bots scoring while the enemy team's own flag lay
+dropped on the ground, something vanilla players can never do.)
 
 The flag-entity cache must exclude player characters. Live CE caught the red
 carrier itself in `flag_entity[red][0]` while it stood on the red base with the
-blue flag. That made `flag_present[red]` falsely true, kept CTF routing pinned
-to the empty home base, and let the far-base helper tick the bot as if it were a
-base entity, visibly increasing its fire/update rate.
+blue flag; the far-base helper then ticked the bot as if it were a base entity,
+visibly increasing its fire/update rate. The cache carries no presence meaning
+anymore — earlier designs derived `flag_present[]` from anchor entity
+pairs/counts plus carried-inventory and dropped-item subtractions, and every
+variant had a false-home hole (most fatally: a DROPPED flag is a plain
+script-created `CEntityAnimated` with no inventory identity, invisible to a
+`CInventoryItem + 8` definition-id match, so `flag_present` stayed 1 after a
+carrier died).
 
-Live CE later showed the same routing symptom without the extra tick:
-`flag_entity[red]` correctly held non-character base/action entities and the bot
-shot at normal speed, but `flag_present[red]` stayed true while the host carried
-the real Red Flag. `route_carry=1` and `route_goal_flag=1` then kept the red
-carrier final-approaching its empty base. The periodic scan now reuses the
-capture guard's exact carried-flag inventory check and clears `flag_present[]`
-for carried Red/Blue flags before routing reads it.
-
-The same false-home state can happen after a carrier dies: the exact flag item
-is no longer in a character inventory, but it may exist as a dropped world item
-away from its home anchor while the base action entities are still matched at
-home. `scan_portal_active` now resolves the exact `Red Flag` / `Blue Flag`
-definition ids, watches non-character grid entities' `CInventoryItem + 8`
-definition id, and clears that team's `flag_present[]` entry when the exact
-flag item is away from its own base. This blocks bot captures and final-base
-force ticks until the item is really home again.
-
-The hard stop starts at the flag-use action. `detour_5B3100` wraps
-`CUseInventoryItemAction::execute` and blocks exact `Red Flag` / `Blue Flag`
-uses when the scoring team's own flag is away according to `flag_present[]` or
-is found in any live character inventory. That prevents the enemy flag from
-being consumed and prevents the base's success feedback from firing. The score
-action is still guarded too: `detour_5A9960` wraps
-`CGiveTeamAPointAction::execute` and suppresses the gametype score callback as a
-late fallback if a score action is reached directly.
+The score action keeps a last-resort guard: `detour_5A9960` wraps
+`CGiveTeamAPointAction::execute` and suppresses the gametype score callback
+while the scoring team's own flag is away per `flag_present[]` or any live
+character inventory. It should never fire with the event-driven gate in place.
+The old flag-use guard at `sub_5B3100` (`CUseInventoryItemAction::execute`) was
+REMOVED and must not be reinstated there: the drop-on-death canned script
+("Does player have a flag") consumes the dying carrier's flag through the very
+same action, so a home-flag guard at that site wrongly blocked flag drops
+whenever both flags were out; and blocking the capture chain mid-way is not
+clean regardless, because the canned object's enemy-flag re-create runs before
+the use action.
 
 Important CE finding: flag-base entity matching must use raw entity
 `+0x4C/+0x50` coordinates, not `sub_4FB0A0`. On Hydroplant Bouncefest,
@@ -271,11 +272,13 @@ anchor. Temporarily writing those exact-anchor entity pointers into
 `flag_entity[home]` made `route_carry` clear within about a second, proving that
 the capture path was correct and the cache selection was wrong.
 
-The current live flag state detects home-vs-away for carried flags and for exact
-dropped flag world items, but routing still does not chase the dropped position.
-Do not add BFS/pathfinding toward a dropped flag without a deliberate live
-position table and role policy; random graph walking is the intended search
-behavior until that is built.
+The live flag state is now exact for all three states (home / carried /
+dropped), but routing still does not chase the dropped position. If pursuit is
+ever added: the dropped copy is a script-created entity named `Red Flag` /
+`Blue Flag` with sequence `Not Home`, findable in the spatial grid. Do not add
+BFS/pathfinding toward a dropped flag without a deliberate live position table
+and role policy; random graph walking is the intended search behavior until
+that is built.
 
 ### Movement calibration recipe
 
