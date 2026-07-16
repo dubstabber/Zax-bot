@@ -74,18 +74,42 @@ Current limitations:
 - CTF routing uses static Red/Blue flag-base anchors parsed from `Data.dat`,
   per-match BFS distance fields over the authored waypoint graph, and a final
   direct approach to the base anchor so the bot physically touches the flag or
-  home capture object. The page-flip hook keeps far bots simulated and also
-  force-ticks the cached home flag/base entities while a carrier is at home;
-  this was required because the engine camera-gates the base interaction too.
-  Live CE verification showed flag-base entity caching must match raw entity
-  `+0x4C/+0x50` coordinates, not `sub_4FB0A0`, because the getter can alias
-  nearby visual pieces to the same anchor while the actual capture objects sit
-  on the raw anchor.
-- The next CTF gap is live flag state. The current route assumes the enemy flag
-  is at its base unless the bot itself is carrying. Future work should detect
-  whether the actual enemy flag is at base, carried, or dropped. If it is not
-  present at the enemy base, bots should drop out of objective BFS and randomly
-  roam the waypoint graph to search, like human players sweeping the map.
+  home capture object. The periodic grid scan also matches the expected
+  exact-anchor flag/base entity pair at each base and writes `flag_present[]`;
+  after that scan it clears a team's entry again if any live character carries
+  that team's exact `Red Flag` / `Blue Flag` inventory item, or if that exact
+  flag item exists as a dropped world entity away from its home anchor. The
+  subtraction is required because base action entities can remain at the anchor
+  while the flag item is away.
+  If an attacker sees the enemy flag absent, it randomly chooses a stable
+  temporary policy for that missing-flag episode: random waypoint roaming to
+  search, or continuing to route toward the missing flag's base to wait nearby.
+  If a carrier's own home flag is absent, it always searches instead of routing
+  into the empty home base. The policy clears once that flag is present again or
+  the bot switches goals. Routing to a live dropped flag position is still
+  future work.
+- The page-flip hook keeps far bots simulated and also force-ticks the cached
+  home flag/base entities while a carrier is at home and `flag_present[home]`
+  is true; this was required because the engine camera-gates the base
+  interaction too, but must not bypass the normal "your flag must be home to
+  score" rule. Live CE verification showed flag-base entity caching must match
+  raw entity `+0x4C/+0x50` coordinates, not `sub_4FB0A0`, because the getter can
+  alias nearby visual pieces to the same anchor while the actual capture objects
+  sit on the raw anchor. The flag cache also excludes live player characters:
+  a carrier standing on its home base can otherwise be cached as a base entity,
+  making `flag_present[]` falsely true and causing the far-base force-tick path
+  to tick the bot a second time. Live CE also showed that non-character base
+  entities can still leave `flag_present[]` true while the real flag item is
+  carried or dropped away from home, so the periodic scan now subtracts exact
+  carried-flag inventory state and exact dropped flag item state before routing
+  or far-base ticks consume `flag_present[]`.
+- The CTF flag-use action is guarded at `sub_5B3100`
+  (`CUseInventoryItemAction::execute`) so an illegal capture does not consume
+  the carried enemy flag or fire the base's success feedback while the scoring
+  team's own flag is away. The actual score action is also guarded at
+  `sub_5A9960` (`CGiveTeamAPointAction::execute`) as a numeric-score fallback.
+  Both guards use `flag_present[]` plus an exact live inventory scan for the
+  scoring team's own `Red Flag` / `Blue Flag` item.
 - The visual waypoint overlay is available through the `0x5693A0` page-flip
   detour but starts hidden for normal FPS. In a live MP match, `O` toggles
   drawing, `N` drops/snaps a node at the host, `J` selects the nearest node,

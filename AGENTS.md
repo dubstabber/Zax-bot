@@ -61,7 +61,7 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 - `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0xD000`, RWX (grown from
   `0xA000` for the CTF flag static tables, then to `0xC000` for the CTF routing
   BFS distance field, then to `0xD000` for far-base CTF flag entity force-ticks).
-- Scratch starts at `0x71F800` (`SCRATCH_OFF = 0x5800`).
+- Scratch starts at `0x71FA00` (`SCRATCH_OFF = 0x5A00`).
 - B opens the bot menu via `sub_59B260`; R writes a runtime snapshot.
 - Digit selection calls `do_spawn_with_team`.
 - Spawn injects a synthetic DirectPlay "player added" queue entry at
@@ -208,9 +208,12 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   HOME-base positions — the right foundation for CTF bot routing (carry the
   enemy flag to your home base). Current CTF routing uses these static base
   anchors successfully: bots go to the enemy base, grab the flag, return home,
-  and capture. Live flag state is still open: the patch does not yet know
-  whether the actual enemy flag is still at base, is carried by someone else, or
-  is dropped somewhere on the map. NOTE: in the 8-bit palettized overlay the hue
+  and capture. The periodic grid scan also matches the expected exact-anchor
+  flag/base entity pair at each base and writes `flag_present[]`; the scan then
+  subtracts exact carried flags and exact dropped Red/Blue flag world items away
+  from their home anchors. This is still not a dropped-flag routing target.
+  NOTE: in the
+  8-bit palettized overlay the hue
   is driven by the BLUE byte alone, so flags
   (blue), portals (pink), pickups (cyan) and vertices (white) all render with
   the same palette index — distinguish them by position/count, not color.
@@ -240,12 +243,14 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     last node (at the goal node `ctf_next_hop` finds no closer neighbour, the
     random `wp_advance` bounces it off, routing snaps it back, loop).
     `ctf_pick_goal` runs every frame, so the instant the bot grabs the flag the
-    goal flips to home and it heads back. v1 routes to the static base anchors
-    only. Next CTF behavior: detect whether the enemy flag is actually present
-    at base; if it is not present because another player carries it or it is
-    dropped somewhere, stop objective BFS and let the bot randomly roam the
-    waypoint graph to search like a real player. Do NOT add BFS/pathfinding for
-    an unknown flag location.
+    goal flips to home and it heads back. If the current goal flag is absent
+    from its base (`flag_present[goal] == 0`), attacker bots roll one stable
+    temporary policy for that missing-flag episode: search by random waypoint
+    roaming (`route_goal_flag = -1`), or keep routing toward the missing flag's
+    base to wait/patrol nearby. Carrier bots whose OWN home flag is missing
+    always use search mode; do not route/final-approach a carrier into an empty
+    home base. The policy clears when the flag becomes present again or the bot
+    switches goals. Do NOT add BFS/pathfinding for an unknown flag location.
 - Bots are kept SIMULATED when far from the host's camera
   (`cfg.BOT_FORCE_ACTIVE_ENABLED`). The engine deactivates entities far from the
   local camera, and the per-entity component advance `sub_4FADC0` gates ALL
@@ -280,7 +285,24 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   those cached entities only when a carrying bot is within
   `CTF_FLAG_HOME_FORCE_TICK_RADIUS_SQ` of its home base. This covers the case
   where a far bot reaches its base carrying the enemy flag but capture does not
-  fire until the host walks close enough to wake the base area.
+  fire until the host walks close enough to wake the base area. The scan
+  deliberately excludes player characters from `flag_entity[]`: live CE caught
+  a carrier standing on its home base being cached as a flag/base entity, which
+  made `flag_present[home]` falsely true, kept routing pinned to the empty base,
+  and let the far-base force-tick path tick the bot a second time. It also
+  subtracts carried-flag inventory state and exact dropped flag-item state after
+  the exact-anchor scan: live CE later showed non-character base/action entities
+  could keep `flag_present[]` true while the real Red/Blue flag item was away,
+  leaving a carrier stuck final-approaching an empty home base even though the
+  extra-tick bug was gone.
+- CTF capture is guarded at the flag-use action and the score action.
+  `detour_5B3100` wraps `CUseInventoryItemAction::execute` and blocks exact
+  `Red Flag` / `Blue Flag` uses when the scoring team's own flag is away by
+  `flag_present[]` or is found in any live character inventory. This prevents
+  the enemy flag from disappearing from the carrier inventory and prevents the
+  base's success feedback from firing. `detour_5A9960` still wraps
+  `CGiveTeamAPointAction::execute` as a late fallback and suppresses the
+  gametype score callback if a score action is reached directly.
 - General world-entity enumeration (`detours/entity_scan.py:scan_entities`,
   gated by `cfg.SCAN_ENTITIES_ENABLED`). The long-standing blocker for object
   detection was that there is no flat entity list: `mgr+0x290` is players,
@@ -337,6 +359,10 @@ Current patched sites:
 - `0x4C11A0` - teleport-portal self-registration (gated by
   `cfg.PORTAL_REGISTER_ENABLED`); records each `CTeleportAction` warp's source
   pad into `portal_table`.
+- `0x5B3100` - CTF flag-use guard; blocks enemy-flag consumption while the
+  scoring team's own flag is away/carried.
+- `0x5A9960` - CTF score action guard; blocks capture awards while the scoring
+  team's own flag is away/carried.
 - `0x480889` - synthetic-id name-block skip in `sub_480800`.
 - `0x4F5204` - character iterator NULL-skip.
 
@@ -379,6 +405,10 @@ Older emitted labels or disabled detours are not active unless they appear in
 | `VT_CTF_VA = 0x5EF544` | Capture-the-Flag game-type vtable |
 | `VT_SK_VA = 0x5FED48` | Salvage King game-type vtable |
 | `stats + 0x14` | team id |
+| `sub_5B3100` | `CUseInventoryItemAction::execute`; map-script inventory-use action that consumes the carried enemy flag before the score action. Detoured for exact Red/Blue flag uses to enforce own-flag-home before consumption / success feedback. |
+| `sub_5A9960` | `CGiveTeamAPointAction::execute`; map-script score action. Original body only calls active gametype vtable[+0x68](team, 1); detoured as a fallback to enforce own-flag-home before awarding CTF capture points. |
+| `"Red Flag"` / `"Blue Flag"` | inventory item definition names resolved through `sub_523DF0(dword_6C0C08, name, -1)`; compare against carried `CInventoryItem + 8` to know which exact flag is carried. |
+| `"Multiplayer Flag"` | inventory group name resolved through `sub_591FC0(dword_6C0800, name, -1)`; `sub_425290(inv, [0x714454]) != -1` means the character carries any CTF flag. |
 | `sub_4C11A0` | relocate/teleport executor (`__thiscall`: `ecx`=action, `[esp+4]`=entity at SOURCE pos; reads dest via `sub_4F4AC0` later). The chokepoint every `CRelocate`/`CTeleportAction` funnels through (both override execute vtable slot 27 with `sub_5A5A60` → `sub_4C1060` → here). Detour site for runtime portal detection. |
 | `CTeleportAction vtbl = 0x6033B0` | genuine warp teleporter (parent chain `CSwitchMapAction 0x6032C4` → `CRelocateAction 0x603338` → `CTeleportAction`); the portal detour filters `[action]` to this. |
 | `CTouchingPolygonTriggerAI vtbl = 0x5EDC20` / `CTouchingOvalTriggerAI = 0x5EDB58` | touch-trigger volumes (Enter Action @+0x20, Exit @+0x24, Repeat @+0x28; "Triggered By" filter bytes @+0x10..+0x14). Portals can be a trigger's Enter Action OR a script/event-driven `CTeleportAction` referenced by name — hence runtime execute-hooking instead of per-map structure walking. |
@@ -409,11 +439,12 @@ Older emitted labels or disabled detours are not active unless they appear in
 - Graph authoring tools / coverage: place nodes at corners and junctions so
   the straight node-to-node segments stay in walkable space (corner-cutting is
   what triggers the wall-slide). Consider auto-densifying long edges.
-- CTF live flag state on top of the current base routing: detect whether the
-  enemy flag actually exists at its base, is carried, or is dropped. If it is
-  not present at the enemy base, intentionally fall back to random graph roaming
-  so the bot searches the map like a real player; do not BFS toward an unknown
-  flag location. SK bots still need collector-aware return paths.
+- CTF dropped-flag pursuit on top of the current away/home resolver:
+  `flag_present[]` now detects carried flags and exact dropped Red/Blue flag
+  world items away from base; attackers randomly search or wait near that base,
+  while carriers with a missing home flag search instead of touching the empty
+  capture base. The patch still does not route to the dropped position. SK bots
+  still need collector-aware return paths.
 - Reintroduce hazard/pickup awareness as GRAPH-AWARE routing (route through
   nodes near pickups, around lava) rather than the removed vector-field
   perturbation that pushed the heading into walls.

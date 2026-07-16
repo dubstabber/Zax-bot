@@ -156,6 +156,8 @@ def write_flag_static_table(section, scratch_off, layout, flag_maps, map_name_sl
         layout.write(section, scratch_off, 'flag_table', b'\x00' * layout.field('flag_table').size)
     if layout.has_field('flag_entity'):
         layout.write(section, scratch_off, 'flag_entity', b'\x00' * layout.field('flag_entity').size)
+    if layout.has_field('flag_present'):
+        layout.write(section, scratch_off, 'flag_present', b'\x00' * layout.field('flag_present').size)
 
     map_capacity = 0
     point_capacity = 0

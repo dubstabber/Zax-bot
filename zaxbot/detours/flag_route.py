@@ -27,6 +27,16 @@ per-frame search:
   inactive, no goal base for this team, the current node is unreachable from the
   goal, or the bot already sits on the goal node.
 
+Live flag-base presence is refreshed by ``scan_portal_active`` into
+``flag_present[]``. When an attacker sees the enemy flag missing from its base,
+the bot rolls one temporary policy for that missing-goal episode: either search
+(``route_goal_flag = -1``, so node arrivals fall back to random roaming), or
+wait near the enemy base (keep the goal so BFS moves it toward that home
+anchor). A carrier whose OWN flag is missing must not be driven into the empty
+home base, because capture is illegal until that flag returns; carrier+missing
+home always uses search mode. The policy is cleared when the flag becomes
+present again.
+
 ``is_carrying`` is the engine's own per-character inventory-group test
 (live-verified): ``inv = sub_4267E0(char)``; ``slot = sub_425290(inv, FLAG_GID)``
 where ``FLAG_GID = [MULTIPLAYER_FLAG_GID_VA]`` (==8); carrying iff ``slot != -1``.
@@ -47,7 +57,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         'flag_routing_active', 'route_cur', 'route_carry', 'route_goal_flag',
         'flag_route_node', 'flag_dist', 'bfs_queue', 'bfs_head', 'bfs_tail',
         'bfs_u', 'bfs_du', 'bfs_disti', 'bfr_i', 'flag_table', 'flag_team',
-        'flag_count', 'overlay_vertices', 'overlay_vertex_count',
+        'flag_count', 'flag_present', 'route_missing_policy',
+        'route_missing_goal', 'overlay_vertices', 'overlay_vertex_count',
         'overlay_edges', 'overlay_edge_count', 'wp_scratch', 'bot_slot_tmp',
         'bot_char_tmp', 'bot_team',
     )
@@ -74,6 +85,9 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     flag_table_va     = layout.va('flag_table')
     flag_team_va      = layout.va('flag_team')
     flag_count_va     = layout.va('flag_count')
+    flag_present_va   = layout.va('flag_present')
+    missing_policy_va = layout.va('route_missing_policy')
+    missing_goal_va   = layout.va('route_missing_goal')
     verts_va          = layout.va('overlay_vertices')
     vcount_va         = layout.va('overlay_vertex_count')
     edges_va          = layout.va('overlay_edges')
@@ -248,6 +262,58 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('cpg_pick_enemy')
     a.raw(b'\x89\xD0')                                         # eax = enemy (edx)
     a.label('cpg_store')
+    a.raw(b'\x83\xF8\xFF'); a.jz('cpg_store_goal')             # no goal -> store -1
+    a.raw(b'\x83\x3C\x85' + le32(flag_present_va) + b'\x00')  # cmp flag_present[goal], 0
+    a.jz('cpg_goal_missing')
+    # Goal flag is present at base: clear any missing-flag policy for this bot.
+    a.raw(b'\x8B\x0D' + le32(bot_slot_va))                     # ecx = slot
+    a.raw(b'\xC7\x04\x8D' + le32(missing_policy_va) + le32(0))
+    a.raw(b'\xC7\x04\x8D' + le32(missing_goal_va) + le32(0xFFFFFFFF))
+    a.jmp('cpg_store_goal')
+
+    a.label('cpg_goal_missing')
+    # If we are carrying the enemy flag, the missing goal is our OWN home flag.
+    # Do not route/final-approach to an empty home base: normal CTF forbids a
+    # capture while our flag is away, and the page-flip far-base tick can wake
+    # capture entities that would otherwise stay camera-gated. Search instead.
+    a.raw(b'\x83\x3D' + le32(route_carry_va) + b'\x00')        # carrying?
+    a.jz('cpg_missing_attacker')
+    a.raw(b'\x8B\x0D' + le32(bot_slot_va))                     # ecx = slot
+    a.raw(b'\xC7\x04\x8D' + le32(missing_policy_va) + le32(1)) # policy = search
+    a.raw(b'\x89\x04\x8D' + le32(missing_goal_va))             # missing_goal[slot] = goal
+    a.raw(b'\xB8\xFF\xFF\xFF\xFF')                             # no goal -> random graph roam
+    a.jmp('cpg_store_goal')
+
+    a.label('cpg_missing_attacker')
+    # The target flag is absent from its base. Keep the bot's policy stable
+    # until this same target becomes present again or the bot switches goals.
+    a.raw(b'\x8B\x0D' + le32(bot_slot_va))                     # ecx = slot
+    a.raw(b'\x8B\x14\x8D' + le32(missing_goal_va))             # edx = missing_goal[slot]
+    a.raw(b'\x39\xC2')                                         # cmp edx, eax
+    a.jnz('cpg_missing_roll')                                  # new missing goal -> re-roll
+    a.raw(b'\x83\x3C\x8D' + le32(missing_policy_va) + b'\x00') # cmp missing_policy[slot], 0
+    a.jz('cpg_missing_roll')                                   # unset -> roll
+    a.jmp('cpg_missing_have_policy')
+
+    a.label('cpg_missing_roll')
+    a.raw(b'\x89\x04\x8D' + le32(missing_goal_va))             # missing_goal[slot] = goal
+    a.raw(b'\x6A\x01')                                         # push high=1
+    a.raw(b'\x6A\x00')                                         # push low=0
+    a.raw(b'\xB9' + le32(ax.RNG_OBJ_VA))                       # ecx = RNG
+    a.call_va(ax.RNG_SUB)                                      # eax = 0/1 (callee pops args)
+    a.raw(b'\x40')                                             # policy = eax + 1 (1 search, 2 wait)
+    a.raw(b'\x8B\x0D' + le32(bot_slot_va))                     # ecx = slot
+    a.raw(b'\x89\x04\x8D' + le32(missing_policy_va))           # missing_policy[slot] = policy
+    a.raw(b'\x8B\x04\x8D' + le32(missing_goal_va))             # eax = goal
+
+    a.label('cpg_missing_have_policy')
+    a.raw(b'\x8B\x0D' + le32(bot_slot_va))                     # ecx = slot
+    a.raw(b'\x8B\x14\x8D' + le32(missing_policy_va))           # edx = policy
+    a.raw(b'\x83\xFA\x01')                                     # policy == search?
+    a.jnz('cpg_store_goal')                                    # wait -> keep eax=goal
+    a.raw(b'\xB8\xFF\xFF\xFF\xFF')                             # search -> random graph roam
+
+    a.label('cpg_store_goal')
     a.raw(b'\xA3' + le32(route_goal_va))                       # route_goal_flag = eax (or -1)
     a.label('cpg_done')
     a.raw(b'\xC3')

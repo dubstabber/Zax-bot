@@ -11,10 +11,10 @@ from .build import SectionSpec
 # --- new section parameters (.zaxbot) -------------------------------------
 NEW_SECTION_NAME   = b'.zaxbot\x00'
 NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
-NEW_SECTION_SIZE   = 0xD000        # 22KB code + 30KB scratch (grown for CTF far-base flag ticks)
+NEW_SECTION_SIZE   = 0xD000        # 22.5KB code + 29.5KB scratch (grown for dropped-flag scan)
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
-SCRATCH_OFF        = 0x5800        # writable scratch buffer; 22KB code / 30KB scratch
+SCRATCH_OFF        = 0x5A00        # writable scratch buffer; 22.5KB code / 29.5KB scratch
 
 ZAXBOT_SECTION = SectionSpec(
     name=NEW_SECTION_NAME,
@@ -553,7 +553,16 @@ PORTAL_MAP_NAME_SLOT    = 96  # fixed ASCII bytes per map path, including NUL
 # no heap-wide scanning in-game. The flags themselves are CEntityAnimated
 # entities tracked by the CTF gametype, not cleanly enumerable from the world
 # grid, so the authored spawn anchors are the reliable foundation for CTF bot
-# routing (route to the enemy flag base, return to home base).
+# routing (route to the enemy flag base, return to home base). The periodic
+# scan_portal_active grid walk also matches the expected exact-anchor
+# flag/base entity pair at each anchor; that feeds flag_present[] for the
+# current "is the flag still home?" signal. The scan then clears a team's
+# flag_present[] entry if that team's exact Red/Blue flag item is currently in
+# any live character inventory, or if that exact flag item exists as a dropped
+# world entity away from its home anchor, because base/action entities can
+# remain at the anchor while the actual flag is away. Active bits are
+# deliberately not used for presence because camera-gating can clear them while
+# the flag/base object is still physically at home.
 FLAG_TABLE_MAX        = 8   # live overlay points, float[2] each (2 flags/map)
 FLAG_STATIC_MAP_MAX   = 8   # shipped Data.dat currently has 7 flag maps
 FLAG_STATIC_POINT_MAX = 16  # shipped Data.dat currently has 14 flag points
@@ -572,10 +581,20 @@ CTF_FLAG_HOME_FORCE_TICK_RADIUS_SQ = 64.0 * 64.0
 # steps to the neighbour with the smallest distance to the goal base (strictly
 # decreasing => guaranteed progress). Falls back to the random neighbour pick
 # (wp_advance) whenever routing can't apply (non-CTF, no graph, no flags, goal
-# unreachable from here). v1 routes to the static flag BASE anchors only;
-# chasing a carried/dropped flag is future work. See ctf-flag-detection,
+# unreachable from here). If an attacker sees the enemy flag absent from its
+# base, the bot rolls a stable temporary policy for that missing-flag episode:
+# search by random waypoint roaming, or keep routing toward the missing flag's
+# base to wait/patrol nearby. If a carrier's OWN flag is absent from home, it
+# always searches instead; the far-base force-tick is also gated on
+# flag_present[home] so bots cannot score at an empty home base. Routing to the
+# live dropped-flag position remains future work. See ctf-flag-detection,
 # ctf-flag-carry-detection.
 CTF_FLAG_ROUTING_ENABLED = True
+# Guard the engine score action itself: a map-script capture point award is
+# suppressed when the scoring team's own flag is away from base or carried by a
+# player. This fixes the bot-specific far/base wake path bypassing normal CTF
+# "your flag must be home" scoring behavior.
+CTF_SCORE_GUARD_ENABLED = True
 # Flag bases the BFS distance field is precomputed for (CTF always has 2).
 # flag_dist costs FLAG_ROUTE_MAX * OVERLAY_VERTEX_MAX dwords of scratch.
 FLAG_ROUTE_MAX        = 2

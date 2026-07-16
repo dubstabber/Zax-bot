@@ -355,6 +355,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         flag_table_va             = layout.va('flag_table')
         flag_team_va              = layout.va('flag_team')
         flag_entity_va            = layout.va('flag_entity') if layout.has_field('flag_entity') else 0
+        flag_present_va           = layout.va('flag_present') if layout.has_field('flag_present') else 0
         flag_static_map_count_va  = layout.va('flag_static_map_count')
         flag_static_maps_va       = layout.va('flag_static_maps')
         flag_static_points_va     = layout.va('flag_static_points')
@@ -367,6 +368,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         if flag_entity_va:
             a.raw(b'\xBF' + le32(flag_entity_va))                   # edi = flag_entity
             a.raw(b'\xB9' + le32(cfg.FLAG_TABLE_MAX * cfg.FLAG_ENTITY_SLOTS_PER_FLAG))
+            a.raw(b'\x31\xC0')                                      # eax = 0
+            a.raw(b'\xFC\xF3\xAB')                                  # cld; rep stosd
+        if flag_present_va:
+            a.raw(b'\xBF' + le32(flag_present_va))                  # edi = flag_present
+            a.raw(b'\xB9' + le32(cfg.FLAG_TABLE_MAX))               # ecx = flag slots
             a.raw(b'\x31\xC0')                                      # eax = 0
             a.raw(b'\xFC\xF3\xAB')                                  # cld; rep stosd
         a.raw(b'\xA1' + le32(ax.MAP_NAME_CSTRING_VA))               # eax = [map CString header]
@@ -425,6 +431,13 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xBF' + le32(flag_team_va))                        # edi = live flag_team
         a.raw(b'\x8B\x0D' + le32(flag_count_va))                   # ecx = flag_count (count)
         a.raw(b'\xF3\xA5')                                         # rep movsd
+        if flag_present_va:
+            # Static bases are the optimistic state until scan_portal_active
+            # confirms the live exact-anchor flag/base entity pair.
+            a.raw(b'\xBF' + le32(flag_present_va))                  # edi = flag_present
+            a.raw(b'\x8B\x0D' + le32(flag_count_va))                # ecx = flag_count
+            a.raw(b'\xB8\x01\x00\x00\x00')                          # eax = 1
+            a.raw(b'\xF3\xAB')                                      # rep stosd
 
         a.label('lf_done')
         a.raw(b'\x61')                                              # popad

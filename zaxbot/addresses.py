@@ -116,10 +116,15 @@ SUB_425290_VA              = 0x425290   # __thiscall(inventory, gid) -> slot idx
 # sub_425290(sub_4267E0(char), [MULTIPLAYER_FLAG_GID_VA]) != -1. 0 = not yet
 # resolved (treat as "not carrying" that frame). See ctf-flag-carry-detection.
 MULTIPLAYER_FLAG_GID_VA    = 0x714454
+MULTIPLAYER_FLAG_GID_READY_VA = 0x714460
 SUB_425900_VA              = 0x425900   # __thiscall(inventory, item_def*) -> item; ret 4
 SUB_4DD480_VA              = 0x4DD480   # __thiscall(item_obj) -> inventory item definition*
 SLOT_NAME_REGISTRY_VA      = 0x6C0800   # ECX setup for sub_523DF0 (engine global)
+SUB_591FC0_VA              = 0x591FC0   # __thiscall(registry, char* name, int) -> group id; ret 8
 PRIMARY_STR_VA             = 0x60B780   # ASCII "Primary\0..."
+BLUE_FLAG_STR_VA           = 0x618364   # ASCII "Blue Flag\0"
+RED_FLAG_STR_VA            = 0x618370   # ASCII "Red Flag\0"
+MULTIPLAYER_FLAG_STR_VA    = 0x627068   # ASCII "Multiplayer Flag\0"
 INVENTORY_GET_WEAPON_OFF   = 0x68       # inv.vtable[+0x68](this, item) -> weapon obj
 # The generic inventory item vtable at [weapon + 0x00] is shared by multiple
 # weapon objects, so per-weapon lead-speed dispatch keys off sub_4DD480(wpn).
@@ -328,6 +333,22 @@ HOST_PLAYER_CFG_VA    = 0x6BD2F8    # dword_6BD2F8 — host local config (guard 
 VT_DM_VA  = 0x5F0D54  # CDeathMatchGameType vtable
 VT_CTF_VA = 0x5EF544  # CCaptureTheFlagGameType vtable
 VT_SK_VA  = 0x5FED48  # CSalvageKingGameType vtable
+
+# --- CGiveTeamAPointAction::execute (CTF capture score action) -------------
+# Map scripts use this action at flag bases to award a capture point. The
+# original action only calls the active gametype's vtable[+0x68] and does not
+# itself verify that the scoring team's own flag is home.
+S5A9960_VA       = 0x5A9960
+S5A9960_RESUME   = 0x5A9969
+S5A9960_PROLOGUE = b'\x56\x8B\xF1\x8B\x0D\x14\x3F\x71\x00'
+
+# --- CUseInventoryItemAction::execute (CTF capture flag consume action) ----
+# Flag-base scripts first consume the carried enemy flag through this action,
+# then award the capture point. Guarding only CGiveTeamAPointAction blocks the
+# score but is too late to stop flag removal and success feedback.
+S5B3100_VA       = 0x5B3100
+S5B3100_RESUME   = 0x5B3106
+S5B3100_PROLOGUE = b'\x53\x55\x8B\x6C\x24\x10'
 
 # --- Active-gametype getter (used by detect_mode) --------------------------
 # `sub_59FF90(ecx=mgr)` returns the active CMultiPlayerGameType-derived

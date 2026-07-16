@@ -101,6 +101,23 @@ def build_enabled_patches():
             )
         )
 
+    if cfg.CTF_SCORE_GUARD_ENABLED:
+        # Harden the CTF capture chain while the scoring team's own flag is
+        # away/carried. The inventory-use action is the early consume/feedback
+        # path; the score action remains a late numeric-score fallback.
+        patches.append(
+            RelocationPatch(
+                'sub_5B3100 CTF flag-use home-flag guard', 'jmp', ax.S5B3100_VA,
+                ax.S5B3100_PROLOGUE, 'detour_5B3100_va', 6,
+            )
+        )
+        patches.append(
+            RelocationPatch(
+                'sub_5A9960 CTF score home-flag guard', 'jmp', ax.S5A9960_VA,
+                ax.S5A9960_PROLOGUE, 'detour_5A9960_va', 9,
+            )
+        )
+
     patches.extend([
         # Inline NULL-guard for sub_4FC8A0 (the positional-sound dispatch
         # wrapper). The function does `mov ecx, [ecx+0x48]; call sub_4EA880`

@@ -128,6 +128,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # only CTF (1) routes. Otherwise the gate stays 0 and bots roam randomly.
     if cfg.CTF_FLAG_ROUTING_ENABLED and layout.has_field('flag_routing_active'):
         a.raw(b'\xC7\x05' + le32(layout.va('flag_routing_active')) + le32(0))
+        if layout.has_field('route_missing_policy') and layout.has_field('route_missing_goal'):
+            a.raw(b'\xFC')                                # cld
+            a.raw(b'\xBF' + le32(layout.va('route_missing_policy')))
+            a.raw(b'\xB9' + le32(cfg.MAX_BOT_SLOTS))
+            a.raw(b'\x31\xC0')
+            a.raw(b'\xF3\xAB')                         # route_missing_policy[16] = 0
+            a.raw(b'\xBF' + le32(layout.va('route_missing_goal')))
+            a.raw(b'\xB9' + le32(cfg.MAX_BOT_SLOTS))
+            a.raw(b'\x83\xC8\xFF')
+            a.raw(b'\xF3\xAB')                         # route_missing_goal[16] = -1
         a.call_lbl('detect_mode')                    # eax = 0 DM / 1 CTF / 2 SK
         a.raw(b'\x83\xF8\x01')                        # cmp eax, 1 (CTF)
         a.jnz('df90_no_ctf_routes')

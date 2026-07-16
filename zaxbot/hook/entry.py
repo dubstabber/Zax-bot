@@ -22,6 +22,7 @@ from ..detours import (
     bot_movement,
     bot_perception,
     char_iter,
+    ctf_score_guard,
     df90_match_change,
     dp_poll,
     entity_scan,
@@ -57,6 +58,8 @@ _DETOUR_LABEL_KEYS = {
     'detour_5693A0':           'detour_5693A0_va',
     'detour_53DA40':           'detour_53DA40_va',
     'detour_4C11A0':           'detour_4C11A0_va',
+    'detour_5A9960':           'detour_5A9960_va',
+    'detour_5B3100':           'detour_5B3100_va',
 }
 
 
@@ -143,6 +146,7 @@ def build_hook(section_va_abs):
     portal_register.emit(a, layout)
     entity_scan.emit(a, layout)
     flag_route.emit(a, layout)
+    ctf_score_guard.emit(a, layout)
 
     code = a.link()
     assert len(code) <= cfg.SCRATCH_OFF, (

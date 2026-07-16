@@ -51,6 +51,9 @@ from ..asm import Asm, le32
 from ..layout import ScratchLayout
 
 
+MAX_CHARACTER_SCAN = 32
+
+
 def emit(a: Asm, layout: ScratchLayout) -> None:
     if not layout.has_field('scan_table'):
         # Layout built without the scanner fields — emit inert stubs so the
@@ -250,12 +253,27 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         layout.has_field('flag_count')
         and layout.has_field('flag_table')
         and layout.has_field('flag_entity')
+        and layout.has_field('flag_present')
         and layout.has_field('flag_entity_match_radius_sq')
     )
     flag_count_va   = layout.va('flag_count') if flag_scan_enabled else 0
     flag_table_va   = layout.va('flag_table') if flag_scan_enabled else 0
+    flag_team_va    = layout.va('flag_team') if flag_scan_enabled else 0
     flag_entity_va  = layout.va('flag_entity') if flag_scan_enabled else 0
+    flag_present_va = layout.va('flag_present') if flag_scan_enabled else 0
     flag_match_radius_va = layout.va('flag_entity_match_radius_sq') if flag_scan_enabled else 0
+    flag_carried_enabled = (
+        flag_scan_enabled
+        and layout.has_field('ctf_score_block')
+        and layout.has_field('ctf_score_team')
+        and layout.has_field('ctf_score_target_def')
+        and layout.has_field('ctf_score_gid')
+        and layout.has_field('ctf_score_inv')
+    )
+    ctf_score_block_va = layout.va('ctf_score_block') if flag_carried_enabled else 0
+    ctf_score_team_va = layout.va('ctf_score_team') if flag_carried_enabled else 0
+    ctf_score_target_def_va = layout.va('ctf_score_target_def') if flag_carried_enabled else 0
+    ctf_score_gid_va = layout.va('ctf_score_gid') if flag_carried_enabled else 0
     portal_max      = cfg.PORTAL_TABLE_MAX
     radius_bits     = struct.unpack('<I', struct.pack('<f', cfg.PORTAL_ACTIVE_MATCH_RADIUS_SQ))[0]
 
@@ -293,6 +311,30 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x46')
         a.jmp('spa_flag_init')
         a.label('spa_flag_init_done')
+        a.raw(b'\x31\xF6')                                  # xor esi, esi
+        a.label('spa_flag_present_init')
+        a.raw(b'\x81\xFE' + le32(cfg.FLAG_TABLE_MAX))
+        a.jae('spa_flag_present_init_done')
+        a.raw(b'\xC7\x04\xB5' + le32(flag_present_va) + le32(0))
+        a.raw(b'\x46')
+        a.jmp('spa_flag_present_init')
+        a.label('spa_flag_present_init_done')
+        if flag_carried_enabled:
+            # Reuse ctf_score_gid as this scan's dropped-away bitmask:
+            # bit0 = Blue Flag item seen away from the Blue base;
+            # bit1 = Red Flag item seen away from the Red base. The carried
+            # inventory check below overwrites this diagnostic field later.
+            a.raw(b'\xC7\x05' + le32(ctf_score_gid_va) + le32(0))
+            a.raw(b'\x6A\xFF')                              # push -1
+            a.raw(b'\x68' + le32(ax.BLUE_FLAG_STR_VA))       # push "Blue Flag"
+            a.raw(b'\xB9' + le32(ax.ITEM_DEF_REGISTRY_VA))   # item registry
+            a.call_va(ax.SUB_523DF0_VA)
+            a.raw(b'\xA3' + le32(ctf_score_target_def_va))   # temp: Blue flag def id
+            a.raw(b'\x6A\xFF')                              # push -1
+            a.raw(b'\x68' + le32(ax.RED_FLAG_STR_VA))        # push "Red Flag"
+            a.raw(b'\xB9' + le32(ax.ITEM_DEF_REGISTRY_VA))   # item registry
+            a.call_va(ax.SUB_523DF0_VA)
+            a.raw(b'\xA3' + le32(ctf_score_team_va))         # temp: Red flag def id
 
     # mgr -> layer -> grid (identical chain to scan_entities)
     a.raw(b'\xA1' + le32(ax.MANAGER_GLOBAL_VA))
@@ -336,7 +378,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('spa_cell_loop')
     a.raw(b'\xA1' + le32(cellidx_va))
     a.raw(b'\x3B\x05' + le32(ncells_va))
-    a.jae('spa_done')
+    a.jae('spa_after_grid_scan')
     a.raw(b'\x89\xC2')
     a.raw(b'\xC1\xE2\x04')
     a.raw(b'\x03\x15' + le32(cells_va))
@@ -405,6 +447,62 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
 
     a.label('spa_after_portal_match')
     if flag_scan_enabled:
+        # Do not let a player/bot standing on a flag base count as one of the
+        # home flag/base entities. Live CE caught exactly that: the red carrier
+        # at its red base was cached in flag_entity[red][0], which made
+        # flag_present[red] true while the host was carrying the real red flag.
+        # That both kept routing the carrier into the empty base and let the
+        # far-base force-tick path tick the bot a second time as a "base"
+        # entity. Portal matching above still sees characters; only flag-base
+        # presence ignores them.
+        a.raw(b'\xA1' + le32(ax.MANAGER_GLOBAL_VA))          # eax = [mgr]
+        a.raw(b'\x85\xC0'); a.jz('spa_flag_not_character')
+        a.raw(b'\x3D\x00\x00\x40\x00'); a.jb('spa_flag_not_character')
+        a.raw(b'\x3D\x00\x00\x00\x70'); a.jae('spa_flag_not_character')
+        a.raw(b'\x8B\x98\x94\x02\x00\x00')                   # ebx = [mgr+0x294] char count
+        a.raw(b'\x8B\xB8\x90\x02\x00\x00')                   # edi = [mgr+0x290] char array
+        a.raw(b'\x85\xFF'); a.jz('spa_flag_not_character')
+        a.raw(b'\x81\xFF\x00\x00\x10\x00'); a.jb('spa_flag_not_character')
+        a.raw(b'\x81\xFF\x00\x00\x00\x70'); a.jae('spa_flag_not_character')
+        a.raw(b'\x83\xFB' + bytes([MAX_CHARACTER_SCAN]))
+        a.jbe('spa_flag_char_count_ok')
+        a.raw(b'\xBB' + le32(MAX_CHARACTER_SCAN))
+        a.label('spa_flag_char_count_ok')
+        a.raw(b'\x31\xD2')                                  # edx = char index
+        a.raw(b'\x8B\x0D' + le32(cur_va))                    # ecx = ent
+        a.label('spa_flag_char_loop')
+        a.raw(b'\x39\xDA'); a.jae('spa_flag_not_character')  # idx >= count
+        a.raw(b'\x3B\x0C\x97')                              # cmp ecx, [edi + edx*4]
+        a.jz('spa_ent_next')                                # character -> skip flag match
+        a.raw(b'\x42')                                      # ++idx
+        a.jmp('spa_flag_char_loop')
+
+        a.label('spa_flag_not_character')
+        if flag_carried_enabled:
+            # A dropped CTF flag is a world item entity whose CInventoryItem
+            # definition id lives at +8, the same field the inventory guard
+            # compares after inv.vtable[+0x68]. If that exact Red/Blue flag
+            # item exists away from its own home anchor, subtract it from
+            # flag_present[] after the scan so base action entities cannot make
+            # the team look home while the flag is dropped elsewhere.
+            a.raw(b'\xA1' + le32(cur_va))                   # eax = ent
+            a.raw(b'\x8B\x58\x08')                          # ebx = ent->definition id
+            a.raw(b'\x83\x3D' + le32(ctf_score_target_def_va) + b'\xFF')
+            a.jz('spa_drop_check_red')
+            a.raw(b'\x3B\x1D' + le32(ctf_score_target_def_va))
+            a.jnz('spa_drop_check_red')
+            a.raw(b'\x31\xC9')                              # ecx = team 0 (Blue)
+            a.call_lbl('spa_note_dropped_flag_entity')
+            a.jmp('spa_drop_done')
+            a.label('spa_drop_check_red')
+            a.raw(b'\x83\x3D' + le32(ctf_score_team_va) + b'\xFF')
+            a.jz('spa_drop_done')
+            a.raw(b'\x3B\x1D' + le32(ctf_score_team_va))
+            a.jnz('spa_drop_done')
+            a.raw(b'\xB9\x01\x00\x00\x00')                  # ecx = team 1 (Red)
+            a.call_lbl('spa_note_dropped_flag_entity')
+            a.label('spa_drop_done')
+
         a.raw(b'\x31\xF6')                                  # xor esi, esi (flag i)
         a.label('spa_flag_match')
         a.raw(b'\x3B\x35' + le32(flag_count_va))            # cmp esi, [flag_count]
@@ -427,6 +525,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xDF\xE0\x9E')                              # fnstsw ax; sahf
         a.ja('spa_flag_match_next')                         # d2 > radius -> skip
         # Store the first two distinct entities matched at this flag anchor.
+        # Presence is location/entity-count based, not Active-bit based:
+        # Active is also used by camera-gating, so an off-camera home flag can
+        # be inactive while still present. Seeing the expected second exact-
+        # anchor entity is the current best signal that the flag/base pair is
+        # home.
         a.raw(b'\x8B\x15' + le32(cur_va))                   # edx = ent
         a.raw(b'\x8B\x04\xF5' + le32(flag_entity_va))       # eax = flag_entity[i*2 + 0]
         a.raw(b'\x85\xC0'); a.jz('spa_flag_store0')
@@ -440,6 +543,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.jmp('spa_flag_match_next')
         a.label('spa_flag_store1')
         a.raw(b'\x89\x14\xF5' + le32(flag_entity_va + 4))   # flag_entity[i*2 + 1] = ent
+        a.raw(b'\xC7\x04\xB5' + le32(flag_present_va) + le32(1))  # flag_present[i] = 1
         a.label('spa_flag_match_next')
         a.raw(b'\x46')                                      # inc esi
         a.jmp('spa_flag_match')
@@ -451,6 +555,120 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xFF\x05' + le32(cellidx_va))
     a.jmp('spa_cell_loop')
 
+    a.label('spa_after_grid_scan')
+    if flag_carried_enabled:
+        # Apply the dropped-away subtraction before the carried-inventory
+        # subtraction. This covers "flag is away but no longer carried" after a
+        # carrier death/respawn: home-base action entities may still be matched
+        # at the anchor, but the exact Red/Blue flag world item is elsewhere.
+        a.raw(b'\xA1' + le32(ctf_score_gid_va))              # eax = dropped-away bitmask
+        a.raw(b'\xA9\x01\x00\x00\x00')                      # test eax, 1 (Blue)
+        a.jz('spa_dropped_blue_done')
+        a.raw(b'\x31\xC9')                                  # ecx = team 0
+        a.call_lbl('spa_clear_flag_present_team')
+        a.label('spa_dropped_blue_done')
+        a.raw(b'\xA1' + le32(ctf_score_gid_va))              # eax = dropped-away bitmask
+        a.raw(b'\xA9\x02\x00\x00\x00')                      # test eax, 2 (Red)
+        a.jz('spa_dropped_red_done')
+        a.raw(b'\xB9\x01\x00\x00\x00')                      # ecx = team 1
+        a.call_lbl('spa_clear_flag_present_team')
+        a.label('spa_dropped_red_done')
+
+        # The exact-anchor entity pair can remain present at a base while the
+        # actual Red/Blue flag inventory item is carried. After the entity scan
+        # refreshes flag_present[], subtract the existing guard helper's
+        # stronger "own flag away" check so CTF routing sees carried flags as
+        # absent without adding an inventory scan to the per-frame movement path.
+        a.raw(b'\xC7\x05' + le32(ctf_score_team_va) + le32(0))  # Blue team
+        a.raw(b'\x6A\xFF')                                     # push -1
+        a.raw(b'\x68' + le32(ax.BLUE_FLAG_STR_VA))             # push "Blue Flag"
+        a.raw(b'\xB9' + le32(ax.ITEM_DEF_REGISTRY_VA))         # item registry
+        a.call_va(ax.SUB_523DF0_VA)
+        a.raw(b'\xA3' + le32(ctf_score_target_def_va))
+        a.call_lbl('csg_check_current_team')
+        a.raw(b'\x83\x3D' + le32(ctf_score_block_va) + b'\x00')
+        a.jz('spa_carried_blue_done')
+        a.raw(b'\x31\xC9')                                     # ecx = team 0
+        a.call_lbl('spa_clear_flag_present_team')
+        a.label('spa_carried_blue_done')
+
+        a.raw(b'\xC7\x05' + le32(ctf_score_team_va) + le32(1))  # Red team
+        a.raw(b'\x6A\xFF')                                     # push -1
+        a.raw(b'\x68' + le32(ax.RED_FLAG_STR_VA))              # push "Red Flag"
+        a.raw(b'\xB9' + le32(ax.ITEM_DEF_REGISTRY_VA))         # item registry
+        a.call_va(ax.SUB_523DF0_VA)
+        a.raw(b'\xA3' + le32(ctf_score_target_def_va))
+        a.call_lbl('csg_check_current_team')
+        a.raw(b'\x83\x3D' + le32(ctf_score_block_va) + b'\x00')
+        a.jz('spa_carried_red_done')
+        a.raw(b'\xB9\x01\x00\x00\x00')                         # ecx = team 1
+        a.call_lbl('spa_clear_flag_present_team')
+        a.label('spa_carried_red_done')
+    a.jmp('spa_done')
+
     a.label('spa_done')
     a.raw(b'\x61')                                          # popad
     a.raw(b'\xC3')                                          # ret
+
+    if flag_carried_enabled:
+        # spa_note_dropped_flag_entity(ecx = team): the current grid entity is
+        # the exact Red/Blue flag world item. If its raw position is not at that
+        # team's home flag anchor, OR no matching home anchor exists, set the
+        # corresponding bit in ctf_score_gid. Called only from the coarse scan.
+        a.label('spa_note_dropped_flag_entity')
+        a.raw(b'\x89\x0D' + le32(ctf_score_block_va))        # temp team
+        a.raw(b'\x8B\x1D' + le32(flag_count_va))             # ebx = flag_count
+        a.raw(b'\x83\xFB' + bytes([cfg.FLAG_TABLE_MAX]))
+        a.jbe('spa_ndfe_count_ok')
+        a.raw(b'\xBB' + le32(cfg.FLAG_TABLE_MAX))
+        a.label('spa_ndfe_count_ok')
+        a.raw(b'\x31\xF6')                                   # esi = 0
+        a.label('spa_ndfe_loop')
+        a.raw(b'\x39\xDE'); a.jae('spa_ndfe_away')           # no home match -> away
+        a.raw(b'\x8B\x04\xB5' + le32(flag_team_va))          # eax = flag_team[i]
+        a.raw(b'\x3B\x05' + le32(ctf_score_block_va))
+        a.jnz('spa_ndfe_next')
+        # d2 = (flag[i].x - ent.raw_x)^2 + (flag[i].y - ent.raw_y)^2
+        a.raw(b'\xA1' + le32(cur_va))                        # eax = ent
+        a.raw(b'\xD9\x04\xF5' + le32(flag_table_va))         # fld [flag_table + esi*8]
+        a.raw(b'\xD8\x60\x4C')                               # fsub [ent+0x4C] raw x
+        a.raw(b'\xD8\xC8')                                   # fmul st,st
+        a.raw(b'\xD9\x04\xF5' + le32(flag_table_va + 4))     # fld [flag_table + esi*8 + 4]
+        a.raw(b'\xD8\x60\x50')                               # fsub [ent+0x50] raw y
+        a.raw(b'\xD8\xC8')                                   # fmul st,st
+        a.raw(b'\xDE\xC1')                                   # faddp -> st0 = d2
+        a.raw(b'\xD8\x1D' + le32(flag_match_radius_va))      # fcomp [match_radius] (pop)
+        a.raw(b'\xDF\xE0\x9E')                               # fnstsw ax; sahf
+        a.jbe('spa_ndfe_home')                               # d2 <= radius: flag is home
+        a.label('spa_ndfe_next')
+        a.raw(b'\x46')                                       # ++i
+        a.jmp('spa_ndfe_loop')
+        a.label('spa_ndfe_away')
+        a.raw(b'\xB8\x01\x00\x00\x00')                       # eax = 1
+        a.raw(b'\x8B\x0D' + le32(ctf_score_block_va))        # ecx = team
+        a.raw(b'\xD3\xE0')                                   # shl eax, cl
+        a.raw(b'\x09\x05' + le32(ctf_score_gid_va))          # dropped_mask |= bit(team)
+        a.label('spa_ndfe_home')
+        a.raw(b'\xC3')
+
+        # spa_clear_flag_present_team(ecx = team): clear flag_present[i] for the
+        # live flag-table entry tagged with that team. Called only from the
+        # coarse scan, never from the per-frame movement path.
+        a.label('spa_clear_flag_present_team')
+        a.raw(b'\x8B\x1D' + le32(flag_count_va))             # ebx = flag_count
+        a.raw(b'\x83\xFB' + bytes([cfg.FLAG_TABLE_MAX]))
+        a.jbe('spa_cfpt_count_ok')
+        a.raw(b'\xBB' + le32(cfg.FLAG_TABLE_MAX))
+        a.label('spa_cfpt_count_ok')
+        a.raw(b'\x31\xF6')                                   # esi = 0
+        a.label('spa_cfpt_loop')
+        a.raw(b'\x39\xDE'); a.jae('spa_cfpt_ret')            # i >= count
+        a.raw(b'\x8B\x04\xB5' + le32(flag_team_va))          # eax = flag_team[i]
+        a.raw(b'\x39\xC8')                                   # team?
+        a.jnz('spa_cfpt_next')
+        a.raw(b'\xC7\x04\xB5' + le32(flag_present_va) + le32(0))
+        a.label('spa_cfpt_next')
+        a.raw(b'\x46')                                       # ++i
+        a.jmp('spa_cfpt_loop')
+        a.label('spa_cfpt_ret')
+        a.raw(b'\xC3')

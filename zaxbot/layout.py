@@ -903,6 +903,12 @@ def build_scratch_layout(
             'flag: up to two live entity ptrs matched at each flag anchor',
         ))
         flag_static_base += flag_table_max_capped * 2 * 4
+        overlay_fields.append(ScratchField(
+            'flag_present', flag_static_base,
+            flag_table_max_capped * 4,
+            'flag: 1 iff the expected exact-anchor flag/base entity pair is matched',
+        ))
+        flag_static_base += flag_table_max_capped * 4
     overlay_fields.extend([
         ScratchField('flag_static_map_count', flag_static_base + 0x00, 0x04,
                      'flag: build-time static map table count'),
@@ -962,8 +968,25 @@ def build_scratch_layout(
                          'flag-route: ctf_next_hop carry flag spill (survives sub_4267E0/sub_425290)'),
             ScratchField('route_goal_flag', route_base + 0x24, 0x04,
                          'flag-route: ctf_pick_goal output = goal flag index (home if carrying, else enemy; -1 = none)'),
+            ScratchField('route_missing_policy', route_base + 0x28, MAX_BOT_SLOTS * 4,
+                         'flag-route: per-bot missing-flag policy (0 unset, 1 search, 2 wait/base-route)'),
+            ScratchField('route_missing_goal', route_base + 0x28 + MAX_BOT_SLOTS * 4, MAX_BOT_SLOTS * 4,
+                         'flag-route: per-bot goal index that route_missing_policy applies to'),
         ])
-        route_tail = route_base + 0x28
+        route_tail = route_base + 0x28 + MAX_BOT_SLOTS * 8
+        overlay_fields.extend([
+            ScratchField('ctf_score_block', route_tail + 0x00, 0x04,
+                         'ctf-score: 1 suppresses CGiveTeamAPointAction award'),
+            ScratchField('ctf_score_team', route_tail + 0x04, 0x04,
+                         'ctf-score: score recipient team from CGiveTeamAPointAction+8'),
+            ScratchField('ctf_score_target_def', route_tail + 0x08, 0x04,
+                         'ctf-score: own Red/Blue flag item-definition id for score recipient'),
+            ScratchField('ctf_score_gid', route_tail + 0x0C, 0x04,
+                         'ctf-score: Multiplayer Flag inventory group id'),
+            ScratchField('ctf_score_inv', route_tail + 0x10, 0x04,
+                         'ctf-score: inventory ptr across inventory helper calls'),
+        ])
+        route_tail += 0x14
         overlay_fields.append(ScratchField(
             'flag_route_node', route_tail, flag_route_max_capped * 4,
             'flag-route: nearest graph node to each routed flag base (goal node)',

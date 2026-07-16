@@ -94,6 +94,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     flag_count_va             = layout.va('flag_count') if layout.has_field('flag_count') else 0
     flag_table_va             = layout.va('flag_table') if layout.has_field('flag_table') else 0
     flag_entity_va            = layout.va('flag_entity') if layout.has_field('flag_entity') else 0
+    flag_present_va           = layout.va('flag_present') if layout.has_field('flag_present') else 0
     flag_home_tick_radius_va  = layout.va('flag_home_tick_radius_sq') if layout.has_field('flag_home_tick_radius_sq') else 0
     route_carry_va            = layout.va('route_carry') if layout.has_field('route_carry') else 0
     route_goal_va             = layout.va('route_goal_flag') if layout.has_field('route_goal_flag') else 0
@@ -230,11 +231,13 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # destination. Those entities are also camera-gated by the engine, so a bot
     # standing on its far home base can keep carrying until the host walks close
     # enough to wake that area. scan_portal_active also caches up to two live
-    # entities at each flag_table anchor in flag_entity[]; when a carrying bot is
-    # close to its HOME base, tick those cached entities through the same
-    # sub_57A030 vtable stages used for far bots.
+    # entities at each flag_table anchor in flag_entity[] and marks
+    # flag_present[]. Only tick a carrier's HOME base while that home flag is
+    # present; otherwise this helper can bypass the normal "your flag must be
+    # home to score" CTF rule.
     if (cfg.BOT_FORCE_TICK_ENABLED and flag_entity_va and flag_home_tick_radius_va
-            and route_carry_va and route_goal_va and flag_table_va and flag_count_va):
+            and route_carry_va and route_goal_va and flag_table_va and flag_count_va
+            and flag_present_va):
         bot_indices_va = layout.va('bot_indices')
         bot_slot_tmp_va = layout.va('bot_slot_tmp')
         bot_char_tmp_va = layout.va('bot_char_tmp')
@@ -264,6 +267,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x83\xF8\xFF'); a.jz('ov_ff_next')
         a.raw(b'\x3B\x05' + le32(flag_count_va))              # goal >= flag_count?
         a.jae('ov_ff_next')
+        a.raw(b'\x83\x3C\x85' + le32(flag_present_va) + b'\x00')  # flag_present[goal]?
+        a.jz('ov_ff_next')                                    # home flag away -> no capture tick
         # d2 = (flag[goal] - botchar.pos)^2
         a.raw(b'\xD9\x04\xC5' + le32(flag_table_va))          # fld flag.x
         a.raw(b'\xD8\x67\x4C')                                # fsub [botchar+0x4C]

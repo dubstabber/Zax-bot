@@ -31,7 +31,7 @@ Current values from `zaxbot/config.py`:
 | size | `0xD000` bytes |
 | characteristics | `0xE0000020` (`CODE | EXEC | READ | WRITE`) |
 | code start | `0x71A000` |
-| scratch start | `0x71F800` (`SCRATCH_OFF = 0x5800`) |
+| scratch start | `0x71FA00` (`SCRATCH_OFF = 0x5A00`) |
 
 The IDB is for the original image, so `.zaxbot` bytes must be inspected from
 `Zax.exe` at raw offset `0x231000`.
@@ -66,6 +66,8 @@ image, writes it back, and prints the hook/scratch/detour VAs.
 | `0x5693A0` | waypoint overlay/page-flip hook; also force-ticks far bots and far CTF home flag/base entities |
 | `0x53DA40` | gated pickup self-registration for overlay item markers |
 | `0x4C11A0` | teleport/portal source self-registration |
+| `0x5B3100` | CTF flag-use guard; blocks enemy-flag consumption while own flag is away/carried |
+| `0x5A9960` | CTF score action guard; suppresses capture award while own flag is away/carried |
 | `0x480889` | skip unsafe `sub_480800` name block for synthetic ids |
 | `0x4F5204` | skip NULL entries in a character iterator |
 
