@@ -537,3 +537,15 @@ Older emitted labels or disabled detours are not active unless they appear in
   routing.
 - Populate or hook DirectPlay player data so PC2 sees chosen bot names
   (and team colors in CTF/SK).
+- Door awareness (IN PROGRESS — runtime model fully reverse-engineered, see
+  the `door-runtime-model` memory). Doors are CDoorAI activities (state at
+  `AI+0x14`: 0 Unknown / 1 Closed / 2 Opening / 3 Open); the door ENTITY's
+  flag `0x40000` in `+0x1C` is the SOLID bit (cleared while open — the clean
+  passable/blocked readback). One-way doors (e.g. Hydroplant Bouncefest's
+  four) = an initially-inactive "Dooropening poly" pad armed by a one-side
+  proximity trigger or the other side's wall switch. Next step: detection
+  layer mirroring the portal/flag static pipeline (door/switch/pad positions
+  from Data.dat + periodic-scan state readback + overlay markers), THEN
+  routing integration (treat closed one-way door edges as directional,
+  route to switches). Do NOT blanket-wake door triggers near bots — same
+  hazard class as the checker re-arm bug.
