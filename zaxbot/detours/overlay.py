@@ -54,6 +54,8 @@ For each enabled overlay, the detour:
 9. ``popad``, re-execute displaced ``mov al, byte_6210C0``, jump back.
 """
 
+import struct
+
 from .. import addresses as ax
 from .. import config as cfg
 from ..asm import Asm, le32
@@ -98,6 +100,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     flag_home_tick_radius_va  = layout.va('flag_home_tick_radius_sq') if layout.has_field('flag_home_tick_radius_sq') else 0
     route_carry_va            = layout.va('route_carry') if layout.has_field('route_carry') else 0
     route_goal_va             = layout.va('route_goal_flag') if layout.has_field('route_goal_flag') else 0
+    overlay_door_color_va     = layout.va('overlay_door_color') if layout.has_field('overlay_door_color') else 0
+    door_count_va             = layout.va('door_count') if layout.has_field('door_count') else 0
+    door_table_va             = layout.va('door_table') if layout.has_field('door_table') else 0
+    door_blocked_va           = layout.va('door_blocked') if layout.has_field('door_blocked') else 0
 
     vr, vg, vb, va_ = _split_rgba_static('vertex')
     er, eg, eb, ea  = _split_rgba_static('edge')
@@ -105,6 +111,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     pr, pg, pb, pa  = _split_rgba_static('pickup')
     tr, tg, tb, ta  = _split_rgba_static('portal')
     fr, fg, fb, fa  = _split_rgba_static('flag')
+    dr, dg, db, da  = _split_rgba_static('door')
 
     a.label('detour_5693A0')
     # Per-frame tick — bumped here (the one reliable once-per-frame site, the
@@ -226,6 +233,38 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
               + le32(pa_interval))                            # reset countdown
         a.call_lbl('scan_portal_active')
         a.label('ov_pa_skip')
+    # Per-frame door state refresh + debounced open-route rebuild. The grid
+    # scan above only maintains the door_entity anchor cache; the SOLID bit is
+    # re-read here EVERY frame so door_blocked[] (overlay rings, failed-edge
+    # fast retry, routing) can never go stale with the FPS-dependent scan
+    # interval (live-reported: rings froze while the visible overlay tanked
+    # FPS and 120 scan-frames stretched to many seconds). When any door
+    # flips, door_dirty arms a rebuild of the closed-door-excluding BFS field
+    # (flag_dist_open) — debounced by DOOR_ROUTE_REBUILD_COOLDOWN_FRAMES since
+    # touch-open-door maps flip state constantly.
+    if cfg.DOOR_DETECT_ENABLED and layout.has_field('door_entity'):
+        a.call_lbl('door_refresh_state')
+        if (cfg.DOOR_ROUTE_AWARE_ENABLED
+                and layout.has_field('flag_dist_open')
+                and layout.has_field('door_dirty')
+                and layout.has_field('flag_routing_active')):
+            door_dirty_va      = layout.va('door_dirty')
+            door_rebuild_cd_va = layout.va('door_rebuild_cd')
+            a.raw(b'\xA1' + le32(door_rebuild_cd_va))         # eax = cooldown
+            a.raw(b'\x85\xC0'); a.jz('ov_door_cd0')
+            a.raw(b'\x48')                                    # dec eax
+            a.raw(b'\xA3' + le32(door_rebuild_cd_va))         # store back
+            a.jmp('ov_door_rr_done')
+            a.label('ov_door_cd0')
+            a.raw(b'\x83\x3D' + le32(door_dirty_va) + b'\x00')  # dirty?
+            a.jz('ov_door_rr_done')
+            a.raw(b'\xC7\x05' + le32(door_dirty_va) + le32(0))
+            a.raw(b'\xC7\x05' + le32(door_rebuild_cd_va)
+                  + le32(max(1, cfg.DOOR_ROUTE_REBUILD_COOLDOWN_FRAMES)))
+            a.raw(b'\x83\x3D' + le32(layout.va('flag_routing_active')) + b'\x00')
+            a.jz('ov_door_rr_done')                           # non-CTF: state only
+            a.call_lbl('rebuild_open_routes')
+            a.label('ov_door_rr_done')
     # Far CTF capture support. The bot force-tick above keeps the carrier
     # moving, but capture itself is driven by the base "checker" trigger at the
     # destination. Those entities are also camera-gated by the engine, so a bot
@@ -401,6 +440,15 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xB9' + le32(overlay_flag_color_va))
         a.call_va(ax.SUB_53F010_VA)
 
+    # --- Build door-marker color (consumed by the door pass) --------------
+    if overlay_door_color_va:
+        a.raw(b'\x6A' + bytes([da]))
+        a.raw(b'\x6A' + bytes([db]))
+        a.raw(b'\x6A' + bytes([dg]))
+        a.raw(b'\x6A' + bytes([dr]))
+        a.raw(b'\xB9' + le32(overlay_door_color_va))
+        a.call_va(ax.SUB_53F010_VA)
+
     # --- Draw vertices ----------------------------------------------------
     if overlay_vertices_va:
         a.raw(b'\x31\xF6')                                    # xor esi, esi
@@ -499,6 +547,52 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x8B\x1D' + le32(flag_count_va))             # ebx = count
         a.raw(b'\xB9' + le32(overlay_flag_color_va))         # ecx = color
         a.call_lbl('ov_draw_point_table')
+
+    # --- Draw detected doors ----------------------------------------------
+    # Populated once per match by load_doors from static Data.dat-derived map
+    # data; door_blocked[] is refreshed by the periodic grid scan. Every door
+    # renders as a small oval; a CLOSED (SOLID) door additionally gets a
+    # double-radius ring so open/closed state is verifiable at a glance —
+    # in the 8-bit palettized mode all B=255 markers share one hue, so the
+    # ring, not the color, is the state signal.
+    if door_table_va and door_blocked_va and overlay_door_color_va:
+        door_ring_radius = struct.unpack(
+            '<I', struct.pack('<f', cfg.OVERLAY_VERTEX_RADIUS * 2.0))[0]
+        a.raw(b'\x31\xF6')                                    # esi = door idx
+        a.raw(b'\x8B\x1D' + le32(door_count_va))              # ebx = count
+        a.raw(b'\x85\xDB'); a.jz('ov_after_doors')
+        a.label('ov_door_loop')
+        a.raw(b'\x39\xDE'); a.jae('ov_after_doors')           # idx >= count
+        a.raw(b'\xD9\x04\xF5' + le32(door_table_va))          # fld door.x
+        a.raw(b'\xD8\x25' + le32(overlay_cam_x_va))           # fsub cam.x
+        a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va))          # fstp p1.x
+        a.raw(b'\xD9\x04\xF5' + le32(door_table_va + 4))      # fld door.y
+        a.raw(b'\xD8\x25' + le32(overlay_cam_y_va))           # fsub cam.y
+        a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va + 4))      # fstp p1.y
+        _emit_point_cull(
+            a, overlay_tmp_p1_va,
+            overlay_cull_min_x_va, overlay_cull_max_x_va,
+            overlay_cull_min_y_va, overlay_cull_max_y_va,
+            'ov_door_next',
+        )
+        a.raw(b'\xBA' + le32(overlay_tmp_p1_va))              # edx = &p1
+        a.raw(b'\x68' + le32(overlay_door_color_va))          # push &color
+        a.raw(b'\xFF\x35' + le32(overlay_vertex_aspect_va))   # push aspect
+        a.raw(b'\xFF\x35' + le32(overlay_vertex_radius_va))   # push radius
+        a.raw(b'\x89\xF9')                                    # ecx = renderer
+        a.call_va(ax.SUB_4FCCC0_VA)
+        a.raw(b'\x83\x3C\xB5' + le32(door_blocked_va) + b'\x00')  # closed?
+        a.jz('ov_door_next')
+        a.raw(b'\xBA' + le32(overlay_tmp_p1_va))              # edx = &p1
+        a.raw(b'\x68' + le32(overlay_door_color_va))          # push &color
+        a.raw(b'\xFF\x35' + le32(overlay_vertex_aspect_va))   # push aspect
+        a.raw(b'\x68' + le32(door_ring_radius))               # push 2x radius (imm float bits)
+        a.raw(b'\x89\xF9')                                    # ecx = renderer
+        a.call_va(ax.SUB_4FCCC0_VA)
+        a.label('ov_door_next')
+        a.raw(b'\x46')                                        # ++idx
+        a.jmp('ov_door_loop')
+        a.label('ov_after_doors')
 
     # --- Draw edges -------------------------------------------------------
     if overlay_edges_va and overlay_vertices_va:
@@ -736,6 +830,8 @@ def _split_rgba_static(role):
         src = cfg.OVERLAY_PORTAL_COLOR
     elif role == 'flag':
         src = cfg.OVERLAY_FLAG_COLOR
+    elif role == 'door':
+        src = cfg.OVERLAY_DOOR_COLOR
     else:
         raise ValueError(f'unknown overlay color role: {role!r}')
     return tuple(int(v) & 0xFF for v in src)

@@ -565,6 +565,9 @@ GRID_CELL_LIST_OFF     = 0x04       # [cell + this] -> entity-pointer array
 GRID_CELL_COUNT_OFF    = 0x08       # [cell + this] -> entity count in this cell
 ENTITY_FLAGS_OFF       = 0x1C       # entity flags dword
 ENTITY_ACTIVE_BIT      = 0x800000   # "Active" bit within the flags dword (set by CActivateAction)
+ENTITY_SOLID_BIT       = 0x40000    # SOLID/collidable bit; a CLOSED door carries it, the door
+                                    # open path (CDoorAI update slot 25 / COpenDoorAction apply
+                                    # sub_4BD870) clears it — the clean passable/blocked readback
 ENTITY_VISIT_OFF       = 0x2C       # entity per-scan visit-id (dedup)
 ENTITY_VISIT_COUNTER_VA = 0x622200  # dword_622200: engine global visit-id counter
 

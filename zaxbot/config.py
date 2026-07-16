@@ -11,10 +11,13 @@ from .build import SectionSpec
 # --- new section parameters (.zaxbot) -------------------------------------
 NEW_SECTION_NAME   = b'.zaxbot\x00'
 NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
-NEW_SECTION_SIZE   = 0xD000        # 22.5KB code + 29.5KB scratch (grown for dropped-flag scan)
+NEW_SECTION_SIZE   = 0x11000       # 26KB code + 42KB scratch (grown for the door detection
+                                   # tables, then again for the door-aware routing field)
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
-SCRATCH_OFF        = 0x5A00        # writable scratch buffer; 22.5KB code / 29.5KB scratch
+SCRATCH_OFF        = 0x6800        # writable scratch buffer; 26KB code / 42KB scratch
+                                   # (code/scratch boundary moved from 0x5A00 when the
+                                   # door layer left only ~400 code bytes of headroom)
 
 ZAXBOT_SECTION = SectionSpec(
     name=NEW_SECTION_NAME,
@@ -503,6 +506,11 @@ OVERLAY_SELECTED_COLOR = (255, 0, 255, 255)   # magenta; B=255 -> visible select
 OVERLAY_PICKUP_COLOR   = (0, 255, 255, 255)   # cyan; B=255 -> visible detected pickups
 OVERLAY_PORTAL_COLOR   = (255, 64, 255, 255)  # pink; B=255 -> visible detected teleports
 OVERLAY_FLAG_COLOR     = (0, 0, 255, 255)     # blue; B=255 -> visible detected CTF flags
+# Doors render with the same palette index as every other B=255 marker in the
+# 8-bit mode (see the color quirk above) — a CLOSED door is distinguished by a
+# second, double-radius ring drawn around its marker, an OPEN door by a single
+# small oval. Distinguish door vs flag/portal points by position/count.
+OVERLAY_DOOR_COLOR     = (255, 128, 255, 255) # B=255 -> visible detected doors
 OVERLAY_VERTEX_RADIUS  = 8.0                  # world-space pixels
 OVERLAY_VERTEX_ASPECT  = 1.0                  # y/x ratio (1.0 = round)
 
@@ -583,6 +591,80 @@ CTF_FLAG_HOME_FORCE_TICK_RADIUS_SQ = 64.0 * 64.0
 # Master gate for the CActivateAction/CDeactivateAction apply detours that
 # keep flag_present[] in lockstep with the map script's checker state.
 CTF_FLAG_EVENTS_ENABLED = True
+
+# --- Door detection --------------------------------------------------------
+# Door positions are extracted from Data.dat at patch-build time by parsing
+# each multiplayer .zax map for Level Parts carrying Activity=CDoorAI (see
+# zaxbot/door_data.py and the door-runtime-model notes). load_doors copies the
+# active map's door centers into door_table on match change — identical to the
+# portal/flag pipelines, no heap-wide scanning in-game.
+#
+# Door STATE is PER-FRAME fresh. The periodic grid walk (scan_portal_active,
+# every PORTAL_ACTIVE_SCAN_INTERVAL frames) only maintains a per-anchor entity
+# CACHE (door_entity[], up to DOOR_ENTITY_SLOTS_PER_DOOR non-character
+# entities within sqrt(DOOR_ENTITY_MATCH_RADIUS_SQ) of each door anchor); the
+# page-flip hook then re-reads the cached entities' SOLID flag
+# (entity+0x1C & 0x40000 — set while the door is closed, cleared by the open
+# path) EVERY frame into door_blocked[]. Deriving state from the walk itself
+# was live-tested and rejected: the walk interval is counted in FRAMES, so
+# with the overlay visible (low FPS) 120 frames stretched to many seconds and
+# the door rings looked permanently stale (toggling the overlay off restored
+# FPS, let a scan through, and "fixed" it). Trigger pads / markers cached at
+# the same anchor are non-solid so they never false-positive; live player
+# characters are excluded from the cache exactly like the CTF flag anchor
+# cache (a bot standing in an open doorway is SOLID but is not a door).
+# Consumers:
+# - failed-edge fast retry: a marker set while wedged against a blocked door
+#   clears the moment that door reads passable again, instead of waiting out
+#   the blind WP_ROUTE_BLOCK_RETRY_HITS cadence.
+# - door-aware CTF rerouting (DOOR_ROUTE_AWARE_ENABLED below): a second BFS
+#   field excludes closed-door edges so bots actively route around them.
+# Bots are NOT hard-barred from closed doors — many doors open on approach
+# (proximity trigger / touch-open), so the open-field routing always falls
+# back to the full field when no door-free path exists.
+DOOR_DETECT_ENABLED = True
+# Entities cached per door anchor. The door entity itself plus up to two
+# co-located authored pieces (arming pad / touch trigger); mirrors the
+# FLAG_ENTITY_SLOTS_PER_FLAG eviction rationale.
+DOOR_ENTITY_SLOTS_PER_DOOR = 3
+# Live per-map door table. Curse of the Temple authors 186 CDoorAI doors —
+# the largest shipped MP count — so the cap must sit above that.
+DOOR_TABLE_MAX        = 192
+DOOR_STATIC_MAP_MAX   = 12   # shipped Data.dat has 10 MP door maps
+DOOR_STATIC_POINT_MAX = 384  # shipped Data.dat has 333 MP door points
+DOOR_MAP_NAME_SLOT    = 96   # fixed ASCII bytes per map path, including NUL
+# An entity "sits on" a door anchor when within sqrt() of it. The authored
+# Level Part position IS the entity's raw +0x4C/+0x50, so this only needs to
+# absorb float noise — keep it tight so nearby genuinely-solid scenery can't
+# claim the anchor.
+DOOR_ENTITY_MATCH_RADIUS_SQ = 24.0 * 24.0
+# When the progress watchdog marks a failed edge, the nearest currently-
+# blocked door within sqrt() of the BOT (it is physically pressed against the
+# obstacle at that moment) is recorded alongside the marker. Generous enough
+# to cover door half-width + bot collision radius; a wrong latch is self-
+# correcting (marker just falls back to the blind retry cadence).
+DOOR_WEDGE_MATCH_RADIUS_SQ = 96.0 * 96.0
+
+# --- Door-aware CTF rerouting ----------------------------------------------
+# The single per-match BFS field always funnels a bot down the SHORTEST path,
+# so a bot pinned at closed door A never diverted to an alternative corridor
+# the moment door B opened (live-reported: two blocked ways to the enemy
+# flag; opening the second one did not reroute the bot). With this on,
+# build_flag_routes also computes flag_dist_open — the same per-base BFS but
+# SKIPPING every graph edge that crosses a currently-blocked door — and
+# ctf_next_hop prefers the open field, falling back to the full field
+# whenever the goal is unreachable without passing a closed door (so
+# approach-openable doors — proximity pads, touch-open — still get walked
+# at exactly like before). door_blocked[] changes (per-frame refresh) mark a
+# dirty flag; the page-flip hook then rebuilds ONLY the open field, debounced
+# by DOOR_ROUTE_REBUILD_COOLDOWN_FRAMES (touch-open-door maps flip state
+# constantly; the BFS is integer-cheap but there is no reason to run it every
+# frame). Edge->door adjacency is STATIC per match (doors and the graph don't
+# move): build_edge_doors records, per graph edge, the nearest door within
+# sqrt(DOOR_EDGE_RADIUS_SQ) of the edge SEGMENT (point-segment distance).
+DOOR_ROUTE_AWARE_ENABLED = True
+DOOR_EDGE_RADIUS_SQ = 40.0 * 40.0
+DOOR_ROUTE_REBUILD_COOLDOWN_FRAMES = 30
 
 # --- CTF flag routing (bots navigate the waypoint graph toward flags) ----
 # Master gate. When on and the active match is CTF with a graph + flags, bots

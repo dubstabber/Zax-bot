@@ -68,6 +68,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     if not all(layout.has_field(f) for f in needed):
         # Layout built without routing fields — inert stubs so call_lbl resolves.
         a.label('build_flag_routes'); a.raw(b'\xC3')
+        a.label('rebuild_open_routes'); a.raw(b'\xC3')
         a.label('ctf_pick_goal'); a.raw(b'\xC3')
         a.label('ctf_next_hop'); a.raw(b'\xB8\xFF\xFF\xFF\xFF\xC3')  # mov eax,-1; ret
         return
@@ -105,9 +106,41 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     RMAX  = cfg.FLAG_ROUTE_MAX
     ROW   = VMAX * 4                       # flag_dist row stride (bytes) per base
 
+    # Door-aware rerouting: a SECOND per-base BFS field (flag_dist_open) that
+    # SKIPS every graph edge crossing a currently-blocked door, so bots route
+    # AROUND closed doors when an alternative exists (live-reported gap: two
+    # blocked ways to the enemy flag — opening the second one never diverted
+    # the bot committed to the first). ctf_next_hop prefers the open field and
+    # falls back to the full field whenever the goal is unreachable without
+    # passing a closed door, preserving the old walk-at-the-door behaviour for
+    # proximity/touch-opened doors. edge_door[] (static per match) + live
+    # door_blocked[] make the per-edge test two integer reads.
+    door_route = (
+        cfg.DOOR_ROUTE_AWARE_ENABLED
+        and layout.has_field('flag_dist_open')
+        and layout.has_field('edge_door')
+        and layout.has_field('door_blocked')
+        and layout.has_field('door_count')
+        and layout.has_field('bfs_start')
+        and layout.has_field('bfs_skip')
+        and layout.has_field('route_use_open')
+    )
+    if door_route:
+        flag_dist_open_va = layout.va('flag_dist_open')
+        edge_door_va      = layout.va('edge_door')
+        door_blocked_va   = layout.va('door_blocked')
+        door_count_va     = layout.va('door_count')
+        bfs_start_va      = layout.va('bfs_start')
+        bfs_skip_va       = layout.va('bfs_skip')
+        route_use_open_va = layout.va('route_use_open')
+
     # =====================================================================
-    # build_flag_routes: per-match BFS distance field from each flag base.
+    # build_flag_routes: per-match BFS distance field(s) from each flag base.
     # pushad/popad, no args. Safe to call even with no graph (dist stays INF).
+    # On door-aware builds the BFS body lives in the callable ``bfs_run``
+    # (parametrized through bfs_start / bfs_disti / bfs_skip) so the same code
+    # fills the full field, the open field, and the open-field REBUILDS that
+    # fire when door state changes (rebuild_open_routes).
     # =====================================================================
     a.label('build_flag_routes')
     a.raw(b'\x60')                                              # pushad
@@ -117,6 +150,12 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xB8\xFF\xFF\xFF\xFF')                             # eax = -1
     a.raw(b'\xFC')                                             # cld
     a.raw(b'\xF3\xAB')                                         # rep stosd
+    if door_route:
+        # flag_dist_open[*] = 0xFFFFFFFF
+        a.raw(b'\xBF' + le32(flag_dist_open_va))               # edi = flag_dist_open
+        a.raw(b'\xB9' + le32(RMAX * VMAX))                     # ecx = RMAX*VMAX
+        a.raw(b'\xB8\xFF\xFF\xFF\xFF')                         # eax = -1
+        a.raw(b'\xF3\xAB')                                     # rep stosd
     # flag_route_node[*] = -1
     a.raw(b'\xBF' + le32(route_node_va))                      # edi = flag_route_node
     a.raw(b'\xB9' + le32(RMAX))                                # ecx = RMAX
@@ -147,61 +186,78 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.jz('bfr_next')                                          # no node -> skip base
     a.raw(b'\xA1' + le32(bfr_i_va))                           # eax = i
     a.raw(b'\x89\x1C\x85' + le32(route_node_va))             # flag_route_node[i] = ebx
-    # disti = flag_dist + i*ROW
-    a.raw(b'\x69\xC0' + le32(ROW))                            # imul eax, eax, ROW
-    a.raw(b'\x05' + le32(flag_dist_va))                       # add eax, flag_dist
-    a.raw(b'\xA3' + le32(bfs_disti_va))                       # bfs_disti = eax
-    # BFS init: disti[nearest]=0; queue[0]=nearest; head=0; tail=1
-    a.raw(b'\x8B\x0D' + le32(bfs_disti_va))                  # ecx = disti
-    a.raw(b'\xC7\x04\x99\x00\x00\x00\x00')                   # mov [ecx + ebx*4], 0
-    a.raw(b'\x89\x1D' + le32(bfs_queue_va))                  # queue[0] = ebx
-    a.raw(b'\xC7\x05' + le32(bfs_head_va) + le32(0))         # head = 0
-    a.raw(b'\xC7\x05' + le32(bfs_tail_va) + le32(1))         # tail = 1
+    if door_route:
+        a.raw(b'\x89\x1D' + le32(bfs_start_va))               # bfs_start = nearest
+        # FULL field: disti = flag_dist + i*ROW, no edge skipping.
+        a.raw(b'\x69\xC0' + le32(ROW))                        # imul eax, eax, ROW
+        a.raw(b'\x05' + le32(flag_dist_va))                   # add eax, flag_dist
+        a.raw(b'\xA3' + le32(bfs_disti_va))                   # bfs_disti = eax
+        a.raw(b'\xC7\x05' + le32(bfs_skip_va) + le32(0))      # bfs_skip = 0
+        a.call_lbl('bfs_run')
+        # OPEN field: disti = flag_dist_open + i*ROW, skip blocked-door edges.
+        a.raw(b'\xA1' + le32(bfr_i_va))                       # eax = i
+        a.raw(b'\x69\xC0' + le32(ROW))                        # imul eax, eax, ROW
+        a.raw(b'\x05' + le32(flag_dist_open_va))              # add eax, flag_dist_open
+        a.raw(b'\xA3' + le32(bfs_disti_va))                   # bfs_disti = eax
+        a.raw(b'\xC7\x05' + le32(bfs_skip_va) + le32(1))      # bfs_skip = 1
+        a.call_lbl('bfs_run')
+        a.jmp('bfr_next')
+    else:
+        # disti = flag_dist + i*ROW
+        a.raw(b'\x69\xC0' + le32(ROW))                        # imul eax, eax, ROW
+        a.raw(b'\x05' + le32(flag_dist_va))                   # add eax, flag_dist
+        a.raw(b'\xA3' + le32(bfs_disti_va))                   # bfs_disti = eax
+        # BFS init: disti[nearest]=0; queue[0]=nearest; head=0; tail=1
+        a.raw(b'\x8B\x0D' + le32(bfs_disti_va))              # ecx = disti
+        a.raw(b'\xC7\x04\x99\x00\x00\x00\x00')               # mov [ecx + ebx*4], 0
+        a.raw(b'\x89\x1D' + le32(bfs_queue_va))              # queue[0] = ebx
+        a.raw(b'\xC7\x05' + le32(bfs_head_va) + le32(0))     # head = 0
+        a.raw(b'\xC7\x05' + le32(bfs_tail_va) + le32(1))     # tail = 1
 
-    a.label('bfr_bfs_loop')
-    a.raw(b'\xA1' + le32(bfs_head_va))                        # eax = head
-    a.raw(b'\x3B\x05' + le32(bfs_tail_va))                   # cmp eax, tail
-    a.jae('bfr_bfs_done')
-    a.raw(b'\x8B\x0C\x85' + le32(bfs_queue_va))             # ecx = queue[head]
-    a.raw(b'\x89\x0D' + le32(bfs_u_va))                      # bfs_u = u
-    a.raw(b'\xFF\x05' + le32(bfs_head_va))                  # head++
-    a.raw(b'\x8B\x15' + le32(bfs_disti_va))                 # edx = disti
-    a.raw(b'\x8B\x04\x8A')                                   # eax = [edx + ecx*4] (disti[u] = du)
-    a.raw(b'\x89\x05' + le32(bfs_du_va))                    # bfs_du = du
-    a.raw(b'\x31\xF6')                                       # esi = 0 (edge idx)
+        a.label('bfr_bfs_loop')
+        a.raw(b'\xA1' + le32(bfs_head_va))                    # eax = head
+        a.raw(b'\x3B\x05' + le32(bfs_tail_va))               # cmp eax, tail
+        a.jae('bfr_bfs_done')
+        a.raw(b'\x8B\x0C\x85' + le32(bfs_queue_va))         # ecx = queue[head]
+        a.raw(b'\x89\x0D' + le32(bfs_u_va))                  # bfs_u = u
+        a.raw(b'\xFF\x05' + le32(bfs_head_va))              # head++
+        a.raw(b'\x8B\x15' + le32(bfs_disti_va))             # edx = disti
+        a.raw(b'\x8B\x04\x8A')                               # eax = [edx + ecx*4] (disti[u] = du)
+        a.raw(b'\x89\x05' + le32(bfs_du_va))                # bfs_du = du
+        a.raw(b'\x31\xF6')                                   # esi = 0 (edge idx)
 
-    a.label('bfr_edge_loop')
-    a.raw(b'\x3B\x35' + le32(ecount_va))                    # cmp esi, edge_count
-    a.jae('bfr_bfs_loop')                                   # edges done -> next BFS node
-    a.raw(b'\x8B\x04\xB5' + le32(edges_va))                # eax = edges[esi]
-    a.raw(b'\x0F\xB7\xD8')                                  # movzx ebx, ax (i)
-    a.raw(b'\xC1\xE8\x10')                                  # shr eax, 16   (j)
-    a.raw(b'\x8B\x0D' + le32(bfs_u_va))                    # ecx = u
-    a.raw(b'\x39\xCB')                                      # cmp ebx, ecx (i == u?)
-    a.jz('bfr_edge_v_j')                                    # i==u -> v = j (eax)
-    a.raw(b'\x39\xC8')                                      # cmp eax, ecx (j == u?)
-    a.jz('bfr_edge_v_i')                                    # j==u -> v = i (ebx)
-    a.jmp('bfr_edge_next')
-    a.label('bfr_edge_v_i')
-    a.raw(b'\x89\xD8')                                      # eax = ebx (v = i)
-    a.label('bfr_edge_v_j')                                # v in eax
-    a.raw(b'\x3B\x05' + le32(vcount_va))                   # cmp eax, vertex_count
-    a.jae('bfr_edge_next')                                 # out of range
-    a.raw(b'\x8B\x15' + le32(bfs_disti_va))               # edx = disti
-    a.raw(b'\x8B\x0C\x82')                                 # ecx = [edx + eax*4] (disti[v])
-    a.raw(b'\x83\xF9\xFF')                                 # cmp ecx, -1 (visited?)
-    a.jnz('bfr_edge_next')
-    a.raw(b'\x8B\x0D' + le32(bfs_du_va))                  # ecx = du
-    a.raw(b'\x41')                                         # inc ecx (du+1)
-    a.raw(b'\x89\x0C\x82')                                # [edx + eax*4] = ecx (disti[v] = du+1)
-    a.raw(b'\x8B\x0D' + le32(bfs_tail_va))               # ecx = tail
-    a.raw(b'\x89\x04\x8D' + le32(bfs_queue_va))          # queue[tail] = v (eax)
-    a.raw(b'\xFF\x05' + le32(bfs_tail_va))               # tail++
-    a.label('bfr_edge_next')
-    a.raw(b'\x46')                                        # inc esi
-    a.jmp('bfr_edge_loop')
+        a.label('bfr_edge_loop')
+        a.raw(b'\x3B\x35' + le32(ecount_va))                # cmp esi, edge_count
+        a.jae('bfr_bfs_loop')                               # edges done -> next BFS node
+        a.raw(b'\x8B\x04\xB5' + le32(edges_va))            # eax = edges[esi]
+        a.raw(b'\x0F\xB7\xD8')                              # movzx ebx, ax (i)
+        a.raw(b'\xC1\xE8\x10')                              # shr eax, 16   (j)
+        a.raw(b'\x8B\x0D' + le32(bfs_u_va))                # ecx = u
+        a.raw(b'\x39\xCB')                                  # cmp ebx, ecx (i == u?)
+        a.jz('bfr_edge_v_j')                                # i==u -> v = j (eax)
+        a.raw(b'\x39\xC8')                                  # cmp eax, ecx (j == u?)
+        a.jz('bfr_edge_v_i')                                # j==u -> v = i (ebx)
+        a.jmp('bfr_edge_next')
+        a.label('bfr_edge_v_i')
+        a.raw(b'\x89\xD8')                                  # eax = ebx (v = i)
+        a.label('bfr_edge_v_j')                            # v in eax
+        a.raw(b'\x3B\x05' + le32(vcount_va))               # cmp eax, vertex_count
+        a.jae('bfr_edge_next')                             # out of range
+        a.raw(b'\x8B\x15' + le32(bfs_disti_va))           # edx = disti
+        a.raw(b'\x8B\x0C\x82')                             # ecx = [edx + eax*4] (disti[v])
+        a.raw(b'\x83\xF9\xFF')                             # cmp ecx, -1 (visited?)
+        a.jnz('bfr_edge_next')
+        a.raw(b'\x8B\x0D' + le32(bfs_du_va))              # ecx = du
+        a.raw(b'\x41')                                     # inc ecx (du+1)
+        a.raw(b'\x89\x0C\x82')                            # [edx + eax*4] = ecx (disti[v] = du+1)
+        a.raw(b'\x8B\x0D' + le32(bfs_tail_va))           # ecx = tail
+        a.raw(b'\x89\x04\x8D' + le32(bfs_queue_va))      # queue[tail] = v (eax)
+        a.raw(b'\xFF\x05' + le32(bfs_tail_va))           # tail++
+        a.label('bfr_edge_next')
+        a.raw(b'\x46')                                    # inc esi
+        a.jmp('bfr_edge_loop')
 
-    a.label('bfr_bfs_done')
+        a.label('bfr_bfs_done')
     a.label('bfr_next')
     a.raw(b'\xFF\x05' + le32(bfr_i_va))                  # i++
     a.jmp('bfr_loop')
@@ -209,6 +265,120 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('bfr_done')
     a.raw(b'\x61')                                        # popad
     a.raw(b'\xC3')
+
+    if door_route:
+        # =================================================================
+        # bfs_run: one BFS pass. Inputs (scratch): bfs_start (seed node),
+        # bfs_disti (distance-row base, pre-cleared to -1), bfs_skip (1 =
+        # skip edges crossing currently-blocked doors). Clobbers GPRs.
+        # =================================================================
+        a.label('bfs_run')
+        a.raw(b'\x8B\x1D' + le32(bfs_start_va))              # ebx = start node
+        a.raw(b'\x8B\x0D' + le32(bfs_disti_va))              # ecx = disti
+        a.raw(b'\xC7\x04\x99\x00\x00\x00\x00')               # disti[start] = 0
+        a.raw(b'\x89\x1D' + le32(bfs_queue_va))              # queue[0] = start
+        a.raw(b'\xC7\x05' + le32(bfs_head_va) + le32(0))     # head = 0
+        a.raw(b'\xC7\x05' + le32(bfs_tail_va) + le32(1))     # tail = 1
+
+        a.label('bfsr_loop')
+        a.raw(b'\xA1' + le32(bfs_head_va))                    # eax = head
+        a.raw(b'\x3B\x05' + le32(bfs_tail_va))               # cmp eax, tail
+        a.jae('bfsr_done')
+        a.raw(b'\x8B\x0C\x85' + le32(bfs_queue_va))         # ecx = queue[head]
+        a.raw(b'\x89\x0D' + le32(bfs_u_va))                  # bfs_u = u
+        a.raw(b'\xFF\x05' + le32(bfs_head_va))              # head++
+        a.raw(b'\x8B\x15' + le32(bfs_disti_va))             # edx = disti
+        a.raw(b'\x8B\x04\x8A')                               # eax = disti[u] (du)
+        a.raw(b'\x89\x05' + le32(bfs_du_va))                # bfs_du = du
+        a.raw(b'\x31\xF6')                                   # esi = 0 (edge idx)
+
+        a.label('bfsr_edge_loop')
+        a.raw(b'\x3B\x35' + le32(ecount_va))                # cmp esi, edge_count
+        a.jae('bfsr_loop')                                  # edges done -> next BFS node
+        a.raw(b'\x83\x3D' + le32(bfs_skip_va) + b'\x00')    # skipping blocked edges?
+        a.jz('bfsr_no_skip')
+        a.raw(b'\x8B\x04\xB5' + le32(edge_door_va))         # eax = edge_door[e]
+        a.raw(b'\x83\xF8\xFF')                              # no door on this edge?
+        a.jz('bfsr_no_skip')
+        a.raw(b'\x3B\x05' + le32(door_count_va))            # stale idx safety
+        a.jae('bfsr_no_skip')
+        a.raw(b'\x83\x3C\x85' + le32(door_blocked_va) + b'\x00')  # door closed?
+        a.jnz('bfsr_edge_next')                             # yes -> edge unusable
+        a.label('bfsr_no_skip')
+        a.raw(b'\x8B\x04\xB5' + le32(edges_va))            # eax = edges[esi]
+        a.raw(b'\x0F\xB7\xD8')                              # movzx ebx, ax (i)
+        a.raw(b'\xC1\xE8\x10')                              # shr eax, 16   (j)
+        a.raw(b'\x8B\x0D' + le32(bfs_u_va))                # ecx = u
+        a.raw(b'\x39\xCB')                                  # cmp ebx, ecx (i == u?)
+        a.jz('bfsr_edge_v_j')                               # i==u -> v = j (eax)
+        a.raw(b'\x39\xC8')                                  # cmp eax, ecx (j == u?)
+        a.jz('bfsr_edge_v_i')                               # j==u -> v = i (ebx)
+        a.jmp('bfsr_edge_next')
+        a.label('bfsr_edge_v_i')
+        a.raw(b'\x89\xD8')                                  # eax = ebx (v = i)
+        a.label('bfsr_edge_v_j')                           # v in eax
+        a.raw(b'\x3B\x05' + le32(vcount_va))               # cmp eax, vertex_count
+        a.jae('bfsr_edge_next')                            # out of range
+        a.raw(b'\x8B\x15' + le32(bfs_disti_va))           # edx = disti
+        a.raw(b'\x8B\x0C\x82')                             # ecx = disti[v]
+        a.raw(b'\x83\xF9\xFF')                             # visited?
+        a.jnz('bfsr_edge_next')
+        a.raw(b'\x8B\x0D' + le32(bfs_du_va))              # ecx = du
+        a.raw(b'\x41')                                     # inc ecx (du+1)
+        a.raw(b'\x89\x0C\x82')                            # disti[v] = du+1
+        a.raw(b'\x8B\x0D' + le32(bfs_tail_va))           # ecx = tail
+        a.raw(b'\x89\x04\x8D' + le32(bfs_queue_va))      # queue[tail] = v (eax)
+        a.raw(b'\xFF\x05' + le32(bfs_tail_va))           # tail++
+        a.label('bfsr_edge_next')
+        a.raw(b'\x46')                                    # inc esi
+        a.jmp('bfsr_edge_loop')
+
+        a.label('bfsr_done')
+        a.raw(b'\xC3')
+
+        # =================================================================
+        # rebuild_open_routes: refresh ONLY flag_dist_open after door state
+        # changed. The route nodes and the full field are static per match.
+        # Called from the page-flip hook (door_dirty, debounced), so it must
+        # be pushad/popad self-contained. Reuses bfr_i — single main thread,
+        # never interleaved with the match-change build.
+        # =================================================================
+        a.label('rebuild_open_routes')
+        a.raw(b'\x60')                                        # pushad
+        a.raw(b'\xBF' + le32(flag_dist_open_va))              # edi = flag_dist_open
+        a.raw(b'\xB9' + le32(RMAX * VMAX))                    # ecx = RMAX*VMAX
+        a.raw(b'\xB8\xFF\xFF\xFF\xFF')                        # eax = -1
+        a.raw(b'\xFC\xF3\xAB')                                # cld; rep stosd
+        a.raw(b'\xA1' + le32(vcount_va))                      # eax = vertex_count
+        a.raw(b'\x85\xC0'); a.jz('ror_done')
+        a.raw(b'\xC7\x05' + le32(bfs_skip_va) + le32(1))      # skip blocked edges
+        a.raw(b'\xC7\x05' + le32(bfr_i_va) + le32(0))         # i = 0
+        a.label('ror_loop')
+        a.raw(b'\x8B\x0D' + le32(flag_count_va))              # ecx = flag_count
+        a.raw(b'\x83\xF9' + bytes([RMAX]))                    # cmp ecx, RMAX
+        a.jbe('ror_nb_ok')
+        a.raw(b'\xB9' + le32(RMAX))
+        a.label('ror_nb_ok')
+        a.raw(b'\xA1' + le32(bfr_i_va))                       # eax = i
+        a.raw(b'\x39\xC8')                                    # cmp eax, ecx
+        a.jae('ror_done')
+        a.raw(b'\x8B\x1C\x85' + le32(route_node_va))          # ebx = flag_route_node[i]
+        a.raw(b'\x83\xFB\xFF')                                # no node?
+        a.jz('ror_next')
+        a.raw(b'\x89\x1D' + le32(bfs_start_va))               # bfs_start = node
+        a.raw(b'\x69\xC0' + le32(ROW))                        # imul eax, eax, ROW
+        a.raw(b'\x05' + le32(flag_dist_open_va))              # add eax, flag_dist_open
+        a.raw(b'\xA3' + le32(bfs_disti_va))                   # bfs_disti = eax
+        a.call_lbl('bfs_run')
+        a.label('ror_next')
+        a.raw(b'\xFF\x05' + le32(bfr_i_va))                   # i++
+        a.jmp('ror_loop')
+        a.label('ror_done')
+        a.raw(b'\x61')                                        # popad
+        a.raw(b'\xC3')
+    else:
+        a.label('rebuild_open_routes')
+        a.raw(b'\xC3')
 
     # =====================================================================
     # ctf_pick_goal: set route_goal_flag = this bot's goal flag index (the HOME
@@ -348,21 +518,55 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xA1' + le32(route_goal_va))                  # eax = goal flag idx
     a.raw(b'\x83\xF8\xFF'); a.jz('cnh_fail')             # no goal base
 
-    # disti = flag_dist + goal*ROW -> EBP
     a.raw(b'\x69\xC0' + le32(ROW))                       # imul eax, eax, ROW
-    a.raw(b'\x05' + le32(flag_dist_va))                 # add eax, flag_dist
-    a.raw(b'\x89\xC5')                                   # ebp = disti
-    # cur -> EBX; cur_d = disti[cur] -> ECX (best-distance threshold)
-    a.raw(b'\x8B\x1D' + le32(route_cur_va))             # ebx = cur
-    a.raw(b'\x8B\x4C\x9D\x00')                           # ecx = [ebp + ebx*4] (cur_d)
-    a.raw(b'\x83\xF9\xFF')                               # cmp ecx, -1 (cur unreachable?)
-    a.jz('cnh_fail')
+    if door_route:
+        # Prefer the OPEN field (blocked-door edges excluded) so the bot
+        # routes AROUND closed doors whenever a door-free path exists. If the
+        # current node cannot reach the goal without passing a closed door
+        # (open dist == -1), fall back to the FULL field — the old behaviour:
+        # walk at the door and let the wedge machinery / approach-open work.
+        a.raw(b'\x89\xC7')                               # edi = row offset (saved)
+        a.raw(b'\xC7\x05' + le32(route_use_open_va) + le32(1))
+        a.raw(b'\x8D\xA8' + le32(flag_dist_open_va))     # lea ebp, [eax + flag_dist_open]
+        a.raw(b'\x8B\x1D' + le32(route_cur_va))          # ebx = cur
+        a.raw(b'\x8B\x4C\x9D\x00')                        # ecx = open_dist[cur]
+        a.raw(b'\x83\xF9\xFF')                            # reachable without doors?
+        a.jnz('cnh_field_ok')
+        a.raw(b'\xC7\x05' + le32(route_use_open_va) + le32(0))
+        a.raw(b'\x8D\xAF' + le32(flag_dist_va))          # lea ebp, [edi + flag_dist]
+        a.raw(b'\x8B\x4C\x9D\x00')                        # ecx = full_dist[cur]
+        a.raw(b'\x83\xF9\xFF')                            # cmp ecx, -1 (cur unreachable?)
+        a.jz('cnh_fail')
+        a.label('cnh_field_ok')
+    else:
+        # disti = flag_dist + goal*ROW -> EBP
+        a.raw(b'\x05' + le32(flag_dist_va))             # add eax, flag_dist
+        a.raw(b'\x89\xC5')                               # ebp = disti
+        # cur -> EBX; cur_d = disti[cur] -> ECX (best-distance threshold)
+        a.raw(b'\x8B\x1D' + le32(route_cur_va))         # ebx = cur
+        a.raw(b'\x8B\x4C\x9D\x00')                       # ecx = [ebp + ebx*4] (cur_d)
+        a.raw(b'\x83\xF9\xFF')                           # cmp ecx, -1 (cur unreachable?)
+        a.jz('cnh_fail')
     a.raw(b'\xBA\xFF\xFF\xFF\xFF')                       # edx = -1 (best)
     a.raw(b'\x31\xF6')                                   # esi = 0 (edge idx)
 
     a.label('cnh_scan_loop')
     a.raw(b'\x3B\x35' + le32(ecount_va))                # cmp esi, edge_count
     a.jae('cnh_scan_done')
+    if door_route:
+        # While scanning the OPEN field, never step across a blocked-door
+        # edge: a neighbour can carry a smaller open-distance via ANOTHER
+        # path while the direct cur->nb edge is the closed door itself.
+        a.raw(b'\x83\x3D' + le32(route_use_open_va) + b'\x00')
+        a.jz('cnh_no_door_skip')
+        a.raw(b'\x8B\x04\xB5' + le32(edge_door_va))      # eax = edge_door[e]
+        a.raw(b'\x83\xF8\xFF')                           # door on this edge?
+        a.jz('cnh_no_door_skip')
+        a.raw(b'\x3B\x05' + le32(door_count_va))         # stale idx safety
+        a.jae('cnh_no_door_skip')
+        a.raw(b'\x83\x3C\x85' + le32(door_blocked_va) + b'\x00')
+        a.jnz('cnh_scan_next')                           # closed -> unusable edge
+        a.label('cnh_no_door_skip')
     a.raw(b'\x8B\x04\xB5' + le32(edges_va))            # eax = edges[esi]
     a.raw(b'\x0F\xB7\xF8')                              # movzx edi, ax (i)
     a.raw(b'\xC1\xE8\x10')                              # shr eax, 16   (j)

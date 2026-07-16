@@ -58,10 +58,13 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 
 - WM_KEYDOWN hook at `0x599A1A` redirects `call sub_599580` to
   `.zaxbot:hook_entry`, then tail-jumps back to `sub_599580`.
-- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0xD000`, RWX (grown from
+- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x11000`, RWX (grown from
   `0xA000` for the CTF flag static tables, then to `0xC000` for the CTF routing
-  BFS distance field, then to `0xD000` for far-base CTF flag entity force-ticks).
-- Scratch starts at `0x71FA00` (`SCRATCH_OFF = 0x5A00`).
+  BFS distance field, then to `0xD000` for far-base CTF flag entity force-ticks,
+  then to `0xF000` for the door detection static tables, then to `0x11000` for
+  the door-aware routing field + anchor-entity cache).
+- Scratch starts at `0x720800` (`SCRATCH_OFF = 0x6800`; the code/scratch
+  boundary moved from `0x5A00` when the door layer left only ~400 code bytes).
 - B opens the bot menu via `sub_59B260`; R writes a runtime snapshot.
 - Digit selection calls `do_spawn_with_team`.
 - Spawn injects a synthetic DirectPlay "player added" queue entry at
@@ -368,6 +371,65 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   flags were out (a common CTF state) — and a blocked capture chain is not
   clean anyway (the canned object's enemy-flag re-create runs BEFORE the use
   action, so blocking mid-chain duplicates flags).
+- Doors are DETECTED and their open/closed state tracked live
+  (`cfg.DOOR_DETECT_ENABLED`; static pipeline mirror of portals/flags):
+  - **Static positions** (`door_data.py` → `world_scan.py:load_doors`, per
+    match): the build-time Data.dat parse extracts every MP map's Level Parts
+    carrying `Activity=CDoorAI` (10 maps / 333 doors; per-map counts pinned in
+    tests against the IDA census — Curse of the Temple alone has 186, hence
+    `DOOR_TABLE_MAX = 192` and the section growth). `load_doors` copies the
+    active map's centers into `door_table` on match change and resets
+    `door_blocked[]` + the per-bot `route_block_door[]` latches.
+  - **State readback — PER-FRAME, not scan-coupled.** The periodic
+    `scan_portal_active` grid walk only maintains `door_entity[]` (up to
+    `DOOR_ENTITY_SLOTS_PER_DOOR`=3 non-character entities within
+    `DOOR_ENTITY_MATCH_RADIUS_SQ` of each anchor, raw `+0x4C/+0x50` match like
+    flags, cached REGARDLESS of solid state so an open door can be seen to
+    re-close). The page-flip hook (`door_refresh_state`) then re-reads the
+    cached entities' SOLID bit (`entity+0x1C & 0x40000` — set while closed,
+    cleared by the open path) EVERY frame into `door_blocked[]`, flagging
+    `door_dirty` on any change. Deriving state inside the walk was
+    live-tested and REJECTED: the walk interval counts FRAMES, so with the
+    overlay visible (low FPS) 120 frames stretched to many seconds and the
+    rings looked permanently stale (toggling the overlay off restored FPS,
+    let a scan through, and "fixed" it). Characters are excluded from the
+    cache by the same shield as the flag-anchor cache (a bot standing in an
+    OPEN doorway is SOLID but is not a door).
+  - **Overlay markers**: every door draws as a small oval in the door color;
+    a CLOSED door gets a second double-radius ring (in 8-bit palettized mode
+    all B=255 markers share a hue, so the ring — not the color — signals state).
+  - **Routing consumer 1 — door-aware failed-edge fast retry**: when the
+    progress watchdog marks a failed edge, `door_capture_wedge` latches the
+    nearest currently-blocked door within `DOOR_WEDGE_MATCH_RADIUS_SQ` of the
+    wedged bot into `route_block_door[slot]`; the follower then clears the
+    marker (and the ping-pong retry budget) the moment that door reads
+    passable again, instead of waiting out the blind
+    `WP_ROUTE_BLOCK_RETRY_HITS` cadence — the exact residual grind loop seen
+    live on Hydroplant Bouncefest. The latch resets wherever the marker
+    resets (cold-acquire, reacquire, suspension expiry, blind retry, respawn,
+    match change).
+  - **Routing consumer 2 — door-aware CTF rerouting**
+    (`cfg.DOOR_ROUTE_AWARE_ENABLED`): the single BFS field always funnels a
+    bot down the shortest path, so a bot pinned at closed door A never
+    diverted when door B (an alternative route) opened — live-reported. Now
+    `build_edge_doors` (once per match from `detour_df90`; doors and graph
+    are static) records per graph edge the nearest door within
+    `DOOR_EDGE_RADIUS_SQ` of the edge SEGMENT (true point-segment distance)
+    into `edge_door[]`, and `build_flag_routes` fills a SECOND field
+    `flag_dist_open` via the shared `bfs_run` body with `bfs_skip=1` —
+    skipping every edge whose door is currently blocked. `ctf_next_hop`
+    prefers the open field (also refusing to step across a blocked edge
+    directly — a neighbour can carry a smaller open-dist via another path);
+    when the current node cannot reach the goal door-free
+    (`flag_dist_open[cur] == -1`) it falls back to the FULL field, i.e. the
+    old walk-at-the-door behaviour, so approach-openable doors (proximity
+    pads, touch-open — Torture Chamber's 43) still work. `door_dirty` from
+    the per-frame refresh triggers `rebuild_open_routes` (open field only;
+    route nodes/full field are static) from the page-flip hook, debounced by
+    `DOOR_ROUTE_REBUILD_COOLDOWN_FRAMES` because touch-open maps flip door
+    state constantly. Bots are deliberately NOT hard-barred from closed
+    doors. No new patch sites — the whole layer rides the existing
+    match-change, page-flip, and movement detours.
 - General world-entity enumeration (`detours/entity_scan.py:scan_entities`,
   gated by `cfg.SCAN_ENTITIES_ENABLED`). The long-standing blocker for object
   detection was that there is no flat entity list: `mgr+0x290` is players,
@@ -537,15 +599,15 @@ Older emitted labels or disabled detours are not active unless they appear in
   routing.
 - Populate or hook DirectPlay player data so PC2 sees chosen bot names
   (and team colors in CTF/SK).
-- Door awareness (IN PROGRESS — runtime model fully reverse-engineered, see
-  the `door-runtime-model` memory). Doors are CDoorAI activities (state at
-  `AI+0x14`: 0 Unknown / 1 Closed / 2 Opening / 3 Open); the door ENTITY's
-  flag `0x40000` in `+0x1C` is the SOLID bit (cleared while open — the clean
-  passable/blocked readback). One-way doors (e.g. Hydroplant Bouncefest's
-  four) = an initially-inactive "Dooropening poly" pad armed by a one-side
-  proximity trigger or the other side's wall switch. Next step: detection
-  layer mirroring the portal/flag static pipeline (door/switch/pad positions
-  from Data.dat + periodic-scan state readback + overlay markers), THEN
-  routing integration (treat closed one-way door edges as directional,
-  route to switches). Do NOT blanket-wake door triggers near bots — same
-  hazard class as the checker re-arm bug.
+- Door awareness — DETECTION + REROUTING DONE (see the door bullet in
+  "Current state" and the `door-runtime-model` memory): static positions from
+  Data.dat, per-frame open/closed via the cached-entity SOLID readback,
+  overlay markers, failed-edge fast retry, and door-aware CTF rerouting
+  (open-field BFS with full-field fallback). Remaining: SWITCH detection and
+  switch-seeking (arming-side topology: "Dooropening poly" pads, one-side
+  proximity triggers, wall switches — authoring pattern documented in the
+  memory, parse deliberately deferred), directional one-way door edges, and
+  finding the built-in touch-open message SENDER (Torture Chamber's 43
+  CDoorAIs have zero door actions) before any "bots open far doors" work.
+  Do NOT blanket-wake door triggers near bots — same hazard class as the
+  checker re-arm bug.

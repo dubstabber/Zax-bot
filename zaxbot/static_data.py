@@ -214,6 +214,87 @@ def write_flag_static_table(section, scratch_off, layout, flag_maps, map_name_sl
         layout.write(section, scratch_off, 'flag_static_team', bytes(packed_team))
 
 
+def write_door_static_table(section, scratch_off, layout, door_maps, map_name_slot):
+    """Pack build-time door map records and point coordinates into scratch.
+
+    Mirror of ``write_portal_static_table`` for the door detection block.
+    Also zeroes the live tables and seeds the per-bot wedge-door latch to -1.
+    """
+    if not layout.has_field('door_static_map_count'):
+        return
+
+    door_maps = tuple(door_maps or ())
+    if not layout.has_field('door_static_maps') and door_maps:
+        raise ValueError('door map data present but layout has no door_static_maps field')
+    if not layout.has_field('door_static_points') and any(points for _, points in door_maps):
+        raise ValueError('door point data present but layout has no door_static_points field')
+
+    layout.write(section, scratch_off, 'door_count', struct.pack('<I', 0))
+    if layout.has_field('door_table'):
+        layout.write(section, scratch_off, 'door_table', b'\x00' * layout.field('door_table').size)
+    if layout.has_field('door_blocked'):
+        layout.write(section, scratch_off, 'door_blocked', b'\x00' * layout.field('door_blocked').size)
+    if layout.has_field('door_entity'):
+        layout.write(section, scratch_off, 'door_entity', b'\x00' * layout.field('door_entity').size)
+    if layout.has_field('route_block_door'):
+        # -1 = "no door latched to this bot's failed-edge marker".
+        field = layout.field('route_block_door')
+        layout.write(section, scratch_off, 'route_block_door', b'\xFF' * field.size)
+    if layout.has_field('edge_door'):
+        # -1 = "no door near this graph edge" (build_edge_doors re-inits per match).
+        layout.write(section, scratch_off, 'edge_door', b'\xFF' * layout.field('edge_door').size)
+    if layout.has_field('flag_dist_open'):
+        # -1 = unreachable, same sentinel as flag_dist.
+        layout.write(section, scratch_off, 'flag_dist_open', b'\xFF' * layout.field('flag_dist_open').size)
+
+    map_capacity = 0
+    point_capacity = 0
+    if layout.has_field('door_static_maps'):
+        map_capacity = layout.field('door_static_maps').size // (map_name_slot + 8)
+    if layout.has_field('door_static_points'):
+        point_capacity = layout.field('door_static_points').size // 8
+
+    if len(door_maps) > map_capacity:
+        raise ValueError(
+            f'door map table has {len(door_maps)} rows but scratch holds {map_capacity}'
+        )
+
+    total_points = sum(len(points) for _, points in door_maps)
+    if total_points > point_capacity:
+        raise ValueError(
+            f'door point table has {total_points} rows but scratch holds {point_capacity}'
+        )
+
+    map_stride = map_name_slot + 8
+    packed_maps = bytearray(map_capacity * map_stride)
+    packed_points = bytearray(point_capacity * 8)
+    point_index = 0
+    for map_idx, (map_name, points) in enumerate(door_maps):
+        name_bytes = map_name.encode('latin1')
+        if b'\x00' in name_bytes:
+            raise ValueError(f'door map name contains NUL: {map_name!r}')
+        if len(name_bytes) + 1 > map_name_slot:
+            raise ValueError(
+                f'door map name too long for {map_name_slot}-byte slot: {map_name!r}'
+            )
+        rec_off = map_idx * map_stride
+        packed_maps[rec_off:rec_off + len(name_bytes)] = name_bytes
+        count_off = rec_off + map_name_slot
+        packed_maps[count_off:count_off + 8] = struct.pack('<II', len(points), point_index)
+        for x, y in points:
+            struct.pack_into('<ff', packed_points, point_index * 8, float(x), float(y))
+            point_index += 1
+
+    layout.write(section, scratch_off, 'door_static_map_count',
+                 struct.pack('<I', len(door_maps)))
+    layout.write(section, scratch_off, 'door_static_point_count',
+                 struct.pack('<I', total_points))
+    if layout.has_field('door_static_maps'):
+        layout.write(section, scratch_off, 'door_static_maps', bytes(packed_maps))
+    if layout.has_field('door_static_points'):
+        layout.write(section, scratch_off, 'door_static_points', bytes(packed_points))
+
+
 _FORCE_MODE_TABLE = {None: 0xFFFFFFFF, 'dm': 0, 'ctf': 1, 'sk': 2}
 
 
@@ -302,6 +383,12 @@ def write_static_scratch_data(
     portal_map_name_slot=0,
     flag_maps=(),
     flag_map_name_slot=0,
+    door_maps=(),
+    door_map_name_slot=0,
+    overlay_door_color=(255, 128, 255, 255),
+    door_entity_match_radius_sq=576.0,
+    door_wedge_match_radius_sq=9216.0,
+    door_edge_radius_sq=1600.0,
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
     # meaningful — "spawn one bot"); CTF is the only team mode and accepts
@@ -506,6 +593,17 @@ def write_static_scratch_data(
     if layout.has_field('overlay_flag_color'):
         layout.write(section, scratch_off, 'overlay_flag_color',
                      _pack_color(overlay_flag_color))
+    if layout.has_field('overlay_door_color'):
+        layout.write(section, scratch_off, 'overlay_door_color',
+                     _pack_color(overlay_door_color))
+    if layout.has_field('door_match_radius_sq'):
+        layout.write(section, scratch_off, 'door_match_radius_sq',
+                     struct.pack('<f', door_entity_match_radius_sq))
+        layout.write(section, scratch_off, 'door_wedge_radius_sq',
+                     struct.pack('<f', door_wedge_match_radius_sq))
+    if layout.has_field('door_edge_radius_sq'):
+        layout.write(section, scratch_off, 'door_edge_radius_sq',
+                     struct.pack('<f', door_edge_radius_sq))
     if layout.has_field('flag_entity_match_radius_sq'):
         layout.write(section, scratch_off, 'flag_entity_match_radius_sq',
                      struct.pack('<f', ctf_flag_entity_match_radius_sq))
@@ -527,6 +625,14 @@ def write_static_scratch_data(
             layout,
             flag_maps,
             flag_map_name_slot,
+        )
+    if layout.has_field('door_static_map_count'):
+        write_door_static_table(
+            section,
+            scratch_off,
+            layout,
+            door_maps,
+            door_map_name_slot,
         )
     # Pickup self-registration master switch (per-frame CPickupAI detour).
     if layout.has_field('pickup_register_enabled'):

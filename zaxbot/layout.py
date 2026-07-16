@@ -180,6 +180,11 @@ def build_scratch_layout(
     flag_map_name_slot=0,
     flag_route_max=0,
     flag_entity_slots=2,
+    door_table_max=0,
+    door_static_map_max=0,
+    door_static_point_max=0,
+    door_map_name_slot=0,
+    door_entity_slots=3,
 ):
     BOT_STATE_BASE = 0x180
     MAX_BOT_SLOTS = 16
@@ -1014,6 +1019,129 @@ def build_scratch_layout(
             'flag-route: BFS FIFO of node indices (load-time transient)',
         ))
         route_tail += overlay_vertex_max_capped * 4
+        flag_static_base = route_tail
+
+    # --- Door detection tables ---------------------------------------------
+    # Mirrors the portal/flag static-table blocks. The live door_table is
+    # populated once per match by load_doors from the compact build-time
+    # static table (parsed from Data.dat); door_blocked[] is refreshed by the
+    # periodic grid walk (scan_portal_active) reading each anchored entity's
+    # SOLID flag. Placed at the very tail so no existing scratch offset shifts.
+    door_table_max_capped = max(0, door_table_max)
+    door_static_map_max_capped = max(0, door_static_map_max)
+    door_static_point_max_capped = max(0, door_static_point_max)
+    door_name_slot_capped = max(0, door_map_name_slot)
+    door_map_stride = door_name_slot_capped + 8
+    if door_table_max_capped > 0:
+        door_base = flag_static_base
+        overlay_fields.extend([
+            ScratchField('door_count', door_base + 0x00, 0x04,
+                         'door: live entries in door_table for active map'),
+            ScratchField('overlay_door_color', door_base + 0x04, overlay_color_size,
+                         'overlay: detected-door CColor (rebuilt per-frame)'),
+            ScratchField('door_match_radius_sq', door_base + 0x14, 0x04,
+                         'door: max d^2 for matching a grid entity to a door anchor'),
+            ScratchField('door_wedge_radius_sq', door_base + 0x18, 0x04,
+                         'door: max d^2 bot-to-door when latching a wedge to a blocked door'),
+            ScratchField('door_tmp_d2', door_base + 0x1C, 0x04,
+                         'door: per-call d^2 temp (door_capture_wedge)'),
+            ScratchField('door_tmp_best', door_base + 0x20, 0x04,
+                         'door: per-call best-d^2 tracker (door_capture_wedge)'),
+            ScratchField('door_table', door_base + 0x24,
+                         door_table_max_capped * 8,
+                         'door: float[2] per door center (world coords, active map)'),
+            ScratchField('door_blocked', door_base + 0x24 + door_table_max_capped * 8,
+                         door_table_max_capped * 4,
+                         'door: 1 = a SOLID entity sits on this anchor (door closed)'),
+            ScratchField('route_block_door',
+                         door_base + 0x24 + door_table_max_capped * 12,
+                         MAX_BOT_SLOTS * 4,
+                         'door: per-bot door idx the failed-edge marker wedged against (-1 none)'),
+        ])
+        door_static_base = door_base + 0x24 + door_table_max_capped * 12 + MAX_BOT_SLOTS * 4
+        overlay_fields.extend([
+            ScratchField('door_static_map_count', door_static_base + 0x00, 0x04,
+                         'door: build-time static map table count'),
+            ScratchField('door_static_point_count', door_static_base + 0x04, 0x04,
+                         'door: build-time static point table count'),
+        ])
+        door_static_base += 0x08
+        if door_static_map_max_capped > 0 and door_map_stride > 8:
+            overlay_fields.append(ScratchField(
+                'door_static_maps', door_static_base,
+                door_static_map_max_capped * door_map_stride,
+                'door: static map records (name/count/first point)',
+            ))
+            door_static_base += door_static_map_max_capped * door_map_stride
+        if door_static_point_max_capped > 0:
+            overlay_fields.append(ScratchField(
+                'door_static_points', door_static_base,
+                door_static_point_max_capped * 8,
+                'door: static float[2] point table parsed from Data.dat',
+            ))
+            door_static_base += door_static_point_max_capped * 8
+
+        # --- Per-frame door state + door-aware routing -------------------
+        # door_entity[] is the anchor-entity cache maintained by the periodic
+        # grid walk; door_refresh_state re-reads the cached entities' SOLID
+        # bit every frame (state must not be coupled to the FPS-dependent
+        # scan interval). edge_door[] is the static per-match edge->door
+        # adjacency; flag_dist_open is the second BFS field that skips
+        # closed-door edges (rebuilt on door_dirty, debounced).
+        door_entity_slots_capped = max(1, door_entity_slots)
+        door_dyn_base = door_static_base
+        overlay_fields.extend([
+            ScratchField('door_entity', door_dyn_base,
+                         door_table_max_capped * door_entity_slots_capped * 4,
+                         'door: cached non-character entity ptrs at each door anchor'),
+            ScratchField('door_dirty',
+                         door_dyn_base + door_table_max_capped * door_entity_slots_capped * 4,
+                         0x04, 'door: 1 = door_blocked[] changed since last open-field rebuild'),
+            ScratchField('door_rebuild_cd',
+                         door_dyn_base + door_table_max_capped * door_entity_slots_capped * 4 + 0x04,
+                         0x04, 'door: frames until the next open-field rebuild is allowed'),
+            ScratchField('route_use_open',
+                         door_dyn_base + door_table_max_capped * door_entity_slots_capped * 4 + 0x08,
+                         0x04, 'door: 1 = ctf_next_hop scanning the open field (skip blocked edges)'),
+            ScratchField('bfs_start',
+                         door_dyn_base + door_table_max_capped * door_entity_slots_capped * 4 + 0x0C,
+                         0x04, 'door: BFS start node spill (bfs_run input)'),
+            ScratchField('bfs_skip',
+                         door_dyn_base + door_table_max_capped * door_entity_slots_capped * 4 + 0x10,
+                         0x04, 'door: 1 = bfs_run skips edges crossing blocked doors'),
+            ScratchField('bed_len2',
+                         door_dyn_base + door_table_max_capped * door_entity_slots_capped * 4 + 0x14,
+                         0x04, 'door: build_edge_doors |seg|^2 temp'),
+            ScratchField('bed_rx',
+                         door_dyn_base + door_table_max_capped * door_entity_slots_capped * 4 + 0x18,
+                         0x04, 'door: build_edge_doors (door - P).x temp'),
+            ScratchField('bed_ry',
+                         door_dyn_base + door_table_max_capped * door_entity_slots_capped * 4 + 0x1C,
+                         0x04, 'door: build_edge_doors (door - P).y temp'),
+            ScratchField('bed_d2',
+                         door_dyn_base + door_table_max_capped * door_entity_slots_capped * 4 + 0x20,
+                         0x04, 'door: build_edge_doors point-segment d^2 temp'),
+            ScratchField('bed_best',
+                         door_dyn_base + door_table_max_capped * door_entity_slots_capped * 4 + 0x24,
+                         0x04, 'door: build_edge_doors best-d^2 tracker'),
+            ScratchField('door_edge_radius_sq',
+                         door_dyn_base + door_table_max_capped * door_entity_slots_capped * 4 + 0x28,
+                         0x04, 'door: max d^2 door-to-edge-segment for edge_door adjacency'),
+        ])
+        door_dyn_base += door_table_max_capped * door_entity_slots_capped * 4 + 0x2C
+        if overlay_edge_max_capped > 0:
+            overlay_fields.append(ScratchField(
+                'edge_door', door_dyn_base, overlay_edge_max_capped * 4,
+                'door: per-edge nearest door idx within DOOR_EDGE_RADIUS (-1 = none)',
+            ))
+            door_dyn_base += overlay_edge_max_capped * 4
+        if flag_route_max_capped > 0 and overlay_vertex_max_capped > 0:
+            overlay_fields.append(ScratchField(
+                'flag_dist_open', door_dyn_base,
+                flag_route_max_capped * overlay_vertex_max_capped * 4,
+                'door: BFS hop-distance field skipping closed-door edges',
+            ))
+            door_dyn_base += flag_route_max_capped * overlay_vertex_max_capped * 4
 
     fields.extend(overlay_fields)
     return ScratchLayout(base_va, scratch_size, fields)

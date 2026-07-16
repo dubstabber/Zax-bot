@@ -122,6 +122,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # flag_table (overlay markers + future CTF bot routing). Same cheap bounded
     # static-table copy as load_portals; inert stub on non-flag builds.
     a.call_lbl('load_flags')
+    # Copy this map's build-time parsed door centers into the live door_table
+    # and reset the live door state (anchor-entity cache, door_blocked[],
+    # per-bot wedge latches, dirty/cooldown). Inert stub on non-door builds.
+    # The periodic grid scan (seeded below) fills the entity cache within ~1
+    # frame; the page-flip per-frame refresh derives door_blocked[] from it.
+    a.call_lbl('load_doors')
+    # Static edge->door adjacency for the door-aware routing field. Doors and
+    # the graph never move mid-match, so the point-segment sweep runs once
+    # here (wp_load above loaded the graph; load_doors filled door_table).
+    a.call_lbl('build_edge_doors')
     # CTF flag routing: when the active match is CTF with a graph + flags,
     # precompute the per-base BFS distance field (build_flag_routes) and arm the
     # runtime gate (flag_routing_active). detect_mode returns 0/1/2 (DM/CTF/SK);

@@ -14,6 +14,7 @@ from ..asm import Asm
 from ..layout import build_scratch_layout
 from ..portal_data import resolve_portal_data
 from ..flag_data import resolve_flag_data
+from ..door_data import resolve_door_data
 from ..static_data import write_static_scratch_data
 from . import aim_lead, apply_colors, detect_mode, dispatcher, snapshot, spawn, waypoint_diag, waypoint_edit, weapon_speed
 from .helpers import emit_logc_body, emit_wbuf_body
@@ -100,6 +101,11 @@ def build_hook(section_va_abs):
         flag_map_name_slot=cfg.FLAG_MAP_NAME_SLOT,
         flag_route_max=cfg.FLAG_ROUTE_MAX,
         flag_entity_slots=cfg.FLAG_ENTITY_SLOTS_PER_FLAG,
+        door_table_max=cfg.DOOR_TABLE_MAX if cfg.DOOR_DETECT_ENABLED else 0,
+        door_static_map_max=cfg.DOOR_STATIC_MAP_MAX if cfg.DOOR_DETECT_ENABLED else 0,
+        door_static_point_max=cfg.DOOR_STATIC_POINT_MAX if cfg.DOOR_DETECT_ENABLED else 0,
+        door_map_name_slot=cfg.DOOR_MAP_NAME_SLOT if cfg.DOOR_DETECT_ENABLED else 0,
+        door_entity_slots=cfg.DOOR_ENTITY_SLOTS_PER_DOOR,
     )
 
     a = Asm(section_va_abs + cfg.HOOK_ENTRY_OFF)
@@ -160,6 +166,7 @@ def build_hook(section_va_abs):
     overlay_waypoints, overlay_edges = cfg.resolve_overlay_data()
     portal_maps = resolve_portal_data()
     flag_maps = resolve_flag_data()
+    door_maps = resolve_door_data() if cfg.DOOR_DETECT_ENABLED else ()
 
     section = bytearray(cfg.NEW_SECTION_SIZE)
     section[cfg.HOOK_ENTRY_OFF:cfg.HOOK_ENTRY_OFF + len(code)] = code
@@ -251,6 +258,12 @@ def build_hook(section_va_abs):
         portal_map_name_slot=cfg.PORTAL_MAP_NAME_SLOT,
         flag_maps=flag_maps,
         flag_map_name_slot=cfg.FLAG_MAP_NAME_SLOT,
+        door_maps=door_maps,
+        door_map_name_slot=cfg.DOOR_MAP_NAME_SLOT,
+        overlay_door_color=cfg.OVERLAY_DOOR_COLOR,
+        door_entity_match_radius_sq=cfg.DOOR_ENTITY_MATCH_RADIUS_SQ,
+        door_wedge_match_radius_sq=cfg.DOOR_WEDGE_MATCH_RADIUS_SQ,
+        door_edge_radius_sq=cfg.DOOR_EDGE_RADIUS_SQ,
     )
 
     info = {

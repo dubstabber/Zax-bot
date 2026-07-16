@@ -265,6 +265,27 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     flag_entity_va  = layout.va('flag_entity') if flag_scan_enabled else 0
     flag_match_radius_va = layout.va('flag_entity_match_radius_sq') if flag_scan_enabled else 0
     flag_entity_slots = max(1, cfg.FLAG_ENTITY_SLOTS_PER_FLAG)
+    # Door detection piggybacks the same walk, but the walk only maintains the
+    # door_entity CACHE: every non-character entity sitting on a door_table
+    # anchor (raw +0x4C/+0x50 match, like flags) is recorded — REGARDLESS of
+    # its current SOLID state, because an OPEN door must stay cached so the
+    # per-frame door_refresh_state (page-flip hook) can see it re-close.
+    # door_blocked[] itself is owned by door_refresh_state, which re-reads the
+    # cached entities' SOLID bit every frame; deriving state here was
+    # live-tested and rejected (frame-counted scan interval => stale state
+    # whenever FPS drops, e.g. with the overlay visible).
+    door_scan_enabled = (
+        cfg.DOOR_DETECT_ENABLED
+        and layout.has_field('door_count')
+        and layout.has_field('door_table')
+        and layout.has_field('door_entity')
+        and layout.has_field('door_match_radius_sq')
+    )
+    door_count_va         = layout.va('door_count') if door_scan_enabled else 0
+    door_table_va         = layout.va('door_table') if door_scan_enabled else 0
+    door_entity_va        = layout.va('door_entity') if door_scan_enabled else 0
+    door_match_radius_va  = layout.va('door_match_radius_sq') if door_scan_enabled else 0
+    door_entity_slots     = max(1, cfg.DOOR_ENTITY_SLOTS_PER_DOOR)
     portal_max      = cfg.PORTAL_TABLE_MAX
     radius_bits     = struct.unpack('<I', struct.pack('<f', cfg.PORTAL_ACTIVE_MATCH_RADIUS_SQ))[0]
 
@@ -274,9 +295,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.jnz('spa_has_work')
     if flag_scan_enabled:
         a.raw(b'\x83\x3D' + le32(flag_count_va) + b'\x00')  # cmp [flag_count], 0
-        a.jz('spa_done')
-    else:
-        a.jz('spa_done')
+        a.jnz('spa_has_work')
+    if door_scan_enabled:
+        a.raw(b'\x83\x3D' + le32(door_count_va) + b'\x00')  # cmp [door_count], 0
+        a.jnz('spa_has_work')
+    a.jmp('spa_done')
     a.label('spa_has_work')
 
     # Init: portal_active[i] = 0, portal_best_dist[i] = match radius^2 (only an
@@ -302,6 +325,15 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x46')
         a.jmp('spa_flag_init')
         a.label('spa_flag_init_done')
+    if door_scan_enabled:
+        # The anchor-entity cache restarts empty each scan; the walk below
+        # re-records every entity still sitting on a door anchor. The scan is
+        # synchronous within this frame, so the per-frame refresh never sees a
+        # half-built cache.
+        a.raw(b'\xBF' + le32(door_entity_va))               # edi = door_entity
+        a.raw(b'\xB9' + le32(cfg.DOOR_TABLE_MAX * door_entity_slots))
+        a.raw(b'\x31\xC0')                                  # eax = 0
+        a.raw(b'\xFC\xF3\xAB')                              # cld; rep stosd
 
     # mgr -> layer -> grid (identical chain to scan_entities)
     a.raw(b'\xA1' + le32(ax.MANAGER_GLOBAL_VA))
@@ -413,7 +445,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.jmp('spa_match')
 
     a.label('spa_after_portal_match')
-    if flag_scan_enabled:
+    if flag_scan_enabled or door_scan_enabled:
         # Do not let a player/bot standing on a flag base count as one of the
         # home flag/base entities. Live CE caught exactly that: the red carrier
         # at its red base was cached in flag_entity[red][0], which made
@@ -421,7 +453,9 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         # That both kept routing the carrier into the empty base and let the
         # far-base force-tick path tick the bot a second time as a "base"
         # entity. Portal matching above still sees characters; only flag-base
-        # presence ignores them.
+        # presence ignores them. The DOOR match below needs the same shield:
+        # a character is SOLID, so one standing in an OPEN doorway would
+        # otherwise mark that door blocked for a scan interval.
         a.raw(b'\xA1' + le32(ax.MANAGER_GLOBAL_VA))          # eax = [mgr]
         a.raw(b'\x85\xC0'); a.jz('spa_flag_not_character')
         a.raw(b'\x3D\x00\x00\x40\x00'); a.jb('spa_flag_not_character')
@@ -445,10 +479,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.jmp('spa_flag_char_loop')
 
         a.label('spa_flag_not_character')
+    if flag_scan_enabled:
         a.raw(b'\x31\xF6')                                  # xor esi, esi (flag i)
         a.label('spa_flag_match')
         a.raw(b'\x3B\x35' + le32(flag_count_va))            # cmp esi, [flag_count]
-        a.jae('spa_ent_next')
+        a.jae('spa_after_flag_match')
         # d2 = (flag[i].x - ent.raw_x)^2 + (flag[i].y - ent.raw_y)^2.
         # The generic position getter is right for portal pads, but for CTF
         # flag bases it can alias nearby visual/base pieces to the same anchor.
@@ -494,6 +529,49 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.label('spa_flag_match_next')
         a.raw(b'\x46')                                      # inc esi
         a.jmp('spa_flag_match')
+        a.label('spa_after_flag_match')
+
+    if door_scan_enabled:
+        # Door anchor-entity caching. Characters never reach here (the
+        # exclusion above jumps them to spa_ent_next), so a bot/player
+        # standing in a doorway is never cached as a door piece. Entities are
+        # cached regardless of SOLID state — the per-frame refresh needs the
+        # OPEN door entity too, to see it close again.
+        a.raw(b'\x31\xF6')                                  # xor esi, esi (door i)
+        a.label('spa_door_match')
+        a.raw(b'\x3B\x35' + le32(door_count_va))            # cmp esi, [door_count]
+        a.jae('spa_ent_next')
+        # d2 = (door[i].x - ent.raw_x)^2 + (door[i].y - ent.raw_y)^2 — raw
+        # entity coordinates, same rationale as the flag anchors: the authored
+        # Level Part position IS the door entity's +0x4C/+0x50.
+        a.raw(b'\xA1' + le32(cur_va))                       # eax = ent
+        a.raw(b'\xD9\x04\xF5' + le32(door_table_va))        # fld [door_table + esi*8]
+        a.raw(b'\xD8\x60\x4C')                              # fsub [ent+0x4C] raw x
+        a.raw(b'\xD8\xC8')                                  # fmul st,st
+        a.raw(b'\xD9\x04\xF5' + le32(door_table_va + 4))    # fld [door_table + esi*8 + 4]
+        a.raw(b'\xD8\x60\x50')                              # fsub [ent+0x50] raw y
+        a.raw(b'\xD8\xC8')                                  # fmul st,st
+        a.raw(b'\xDE\xC1')                                  # faddp -> st0 = d2
+        a.raw(b'\xD8\x1D' + le32(door_match_radius_va))     # fcomp [match_radius] (pops)
+        a.raw(b'\xDF\xE0\x9E')                              # fnstsw ax; sahf
+        a.ja('spa_door_next')                               # d2 > radius -> not this door
+        # Cache each distinct entity at this anchor (same claim/dedup shape as
+        # the flag-anchor slots; stride = DOOR_ENTITY_SLOTS_PER_DOOR).
+        assert door_entity_slots == 3, 'door cache unrolled store expects 3 slots'
+        a.raw(b'\x8B\x15' + le32(cur_va))                   # edx = ent
+        a.raw(b'\x8D\x0C\x76')                              # lea ecx, [esi + esi*2]
+        for k in range(door_entity_slots):
+            a.raw(b'\x8B\x04\x8D' + le32(door_entity_va + 4 * k))
+            a.raw(b'\x85\xC0'); a.jz(f'spa_door_store{k}')  # empty slot -> claim
+            a.raw(b'\x39\xD0'); a.jz('spa_door_next')       # already cached
+        a.jmp('spa_door_next')                              # all slots occupied
+        for k in range(door_entity_slots):
+            a.label(f'spa_door_store{k}')
+            a.raw(b'\x89\x14\x8D' + le32(door_entity_va + 4 * k))
+            a.jmp('spa_door_next')
+        a.label('spa_door_next')
+        a.raw(b'\x46')                                      # inc esi
+        a.jmp('spa_door_match')
 
     a.label('spa_ent_next')
     a.raw(b'\xFF\x05' + le32(k_va))

@@ -565,11 +565,50 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         route_suspend_va   = layout.va('bot_route_suspend')
         route_block_hits_va = layout.va('route_block_hits')
 
+    # Door-aware failed-edge handling (detection layer consumer). When the
+    # progress watchdog marks a failed edge, door_capture_wedge latches the
+    # nearest currently-blocked door to the wedged bot; the fast-retry check
+    # below then clears the marker the moment that door reads passable again
+    # (periodic grid scan), instead of waiting out the blind
+    # WP_ROUTE_BLOCK_RETRY_HITS cadence — the exact residual grind loop seen
+    # live on Hydroplant Bouncefest (marker held long after the door opened).
+    door_gate = (cfg.DOOR_DETECT_ENABLED
+                 and layout.has_field('route_block_door')
+                 and layout.has_field('door_blocked')
+                 and layout.has_field('door_count'))
+    if door_gate:
+        route_block_door_va = layout.va('route_block_door')
+        door_blocked_va     = layout.va('door_blocked')
+        door_count_va       = layout.va('door_count')
+
     # === Waypoint following =============================================
     a.raw(b'\x83\x3D' + le32(wp_follow_enabled_va) + b'\x00')
     a.jz('s542360_fallback_zero')
     a.raw(b'\x83\x3D' + le32(overlay_vertex_count_va) + b'\x00')
     a.jz('s542360_fallback_zero')
+
+    if door_gate:
+        # Fast retry: marker set + a door latched + that door now passable
+        # -> clear the marker (and the ping-pong budget) so the next arrival
+        # retries the edge immediately. A stale latch (map changed under it)
+        # only resets the latch; the marker keeps its blind-retry cadence.
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
+        a.raw(b'\x83\x3C\x8D' + le32(failed_edge_va) + b'\x00')  # marker set?
+        a.jz('s542360_door_fc_done')
+        a.raw(b'\x8B\x04\x8D' + le32(route_block_door_va))    # eax = latched door idx
+        a.raw(b'\x83\xF8\xFF')                                # -1 = none
+        a.jz('s542360_door_fc_done')
+        a.raw(b'\x3B\x05' + le32(door_count_va))              # stale idx?
+        a.jae('s542360_door_fc_stale')
+        a.raw(b'\x83\x3C\x85' + le32(door_blocked_va) + b'\x00')  # door still closed?
+        a.jnz('s542360_door_fc_done')                         # yes -> keep marker
+        a.raw(b'\xC7\x04\x8D' + le32(failed_edge_va) + le32(0))   # door opened: retry edge
+        if routing:
+            a.raw(b'\xC7\x04\x8D' + le32(route_block_hits_va) + le32(0))
+        a.label('s542360_door_fc_stale')
+        a.raw(b'\xC7\x04\x8D' + le32(route_block_door_va)
+              + b'\xFF\xFF\xFF\xFF')                          # drop the latch
+        a.label('s542360_door_fc_done')
 
     # Ensure current_wp is a valid index, else cold-acquire the nearest node.
     a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
@@ -594,6 +633,8 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # best_dsq = FLT_MAX
     a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))               # wp_try = 0
     a.raw(b'\xC7\x04\x8D' + le32(failed_edge_va) + le32(0))          # failed_edge_marker = 0
+    if door_gate:
+        a.raw(b'\xC7\x04\x8D' + le32(route_block_door_va) + b'\xFF\xFF\xFF\xFF')
     # fall through to wp_have_cur
 
     a.label('s542360_wp_have_cur')
@@ -621,6 +662,8 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         # retries it fresh (a door may have opened in the meantime).
         a.raw(b'\xC7\x04\x8D' + le32(failed_edge_va) + le32(0))
         a.raw(b'\xC7\x04\x8D' + le32(route_block_hits_va) + le32(0))
+        if door_gate:
+            a.raw(b'\xC7\x04\x8D' + le32(route_block_door_va) + b'\xFF\xFF\xFF\xFF')
         a.label('s542360_rs_dec_done')
         a.call_lbl('ctf_pick_goal')                       # route_goal_flag for this bot
         a.raw(b'\xA1' + le32(route_goal_flag_va))         # eax = goal flag idx
@@ -871,6 +914,8 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     if routing:
         a.raw(b'\xC7\x04\x8D' + le32(route_block_hits_va) + le32(0))  # fresh retry budget
     a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))           # slide_turn = 0
+    if door_gate:
+        a.call_lbl('door_capture_wedge')                  # latch nearest blocked door (pushad-safe)
     a.jmp('s542360_wp_steer')
 
     # No alternate: swap cur <-> prev (old behavior).
@@ -897,6 +942,8 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     if routing:
         a.raw(b'\xC7\x04\x8D' + le32(route_block_hits_va) + le32(0))  # fresh retry budget
     a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))           # slide_turn = 0
+    if door_gate:
+        a.call_lbl('door_capture_wedge')                  # latch nearest blocked door (pushad-safe)
     a.jmp('s542360_wp_steer')
 
     a.label('s542360_wp_reacq_nearest')
@@ -917,6 +964,8 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(failed_edge_va) + le32(0))          # failed_edge_marker = 0
     if routing:
         a.raw(b'\xC7\x04\x8D' + le32(route_block_hits_va) + le32(0))
+    if door_gate:
+        a.raw(b'\xC7\x04\x8D' + le32(route_block_door_va) + b'\xFF\xFF\xFF\xFF')
     a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))           # slide_turn = 0
     a.jmp('s542360_wp_steer')
 
@@ -989,6 +1038,8 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.jb('s542360_wp_bad_edge_go')
         a.raw(b'\xC7\x04\xB5' + le32(failed_edge_va) + le32(0))       # retry the edge
         a.raw(b'\xC7\x04\xB5' + le32(route_block_hits_va) + le32(0))
+        if door_gate:
+            a.raw(b'\xC7\x04\xB5' + le32(route_block_door_va) + b'\xFF\xFF\xFF\xFF')
         a.label('s542360_wp_bad_edge_go')
         a.raw(b'\x89\xC2')                               # edx = blocked route_next
         a.call_lbl('wp_advance')                         # fallback excluding the blocked edge
@@ -1333,6 +1384,7 @@ def _emit_dead_and_zero_return(a: Asm, layout: ScratchLayout) -> None:
     wp_best_dsq_va  = layout.va('bot_pickup_y_cache')     # min dsq-to-node
     failed_edge_va  = layout.va('bot_pickup_valid')       # packed failed-edge marker
     slide_turn_va   = layout.va('bot_flee_ticks')         # wall-slide ramp
+    door_gate       = cfg.DOOR_DETECT_ENABLED and layout.has_field('route_block_door')
 
     # --- Bot dead this frame (char slot NULL). Reset nav so it cold-acquires
     # on respawn, then emit zero (no live char this frame).
@@ -1344,6 +1396,9 @@ def _emit_dead_and_zero_return(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))    # best_dsq = FLT_MAX
     a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))                # wp_try = 0
     a.raw(b'\xC7\x04\x8D' + le32(failed_edge_va) + le32(0))           # failed_edge_marker = 0
+    if door_gate:
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('route_block_door'))
+              + b'\xFF\xFF\xFF\xFF')                                  # wedge-door latch = -1
     # fall through to zero-vector return.
 
     # --- Zero-vector return (panic / NULL char / degenerate normalize) ---

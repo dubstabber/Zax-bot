@@ -271,6 +271,36 @@ class PortalDataTests(unittest.TestCase):
         for points in maps.values():
             self.assertEqual(sorted(team for _, _, team in points), [0, 1])
 
+    def test_door_positions_are_extracted_from_data_dat(self):
+        # Doors are Level Part=CEntityAnimated blocks carrying Activity=CDoorAI.
+        # Pin the per-map counts against the IDA-side census (door-runtime-model
+        # notes, 2026-07-16) so a parser regression that starts over- or
+        # under-matching blocks is caught immediately.
+        from zaxbot.door_data import resolve_door_data
+
+        maps = dict(resolve_door_data())
+        expected_counts = {
+            'Levels/Multiplayer/CTF/Battle on the Ice.zax': 2,
+            'Levels/Multiplayer/CTF/Curse of the Temple.zax': 186,
+            'Levels/Multiplayer/CTF/Doom ship.zax': 29,
+            'Levels/Multiplayer/CTF/Temple Melee.zax': 17,
+            'Levels/Multiplayer/CTF/Torture Chamber.zax': 43,
+            'Levels/Multiplayer/DeathMatch/Hydroplant Bouncefest.zax': 4,
+            'Levels/Multiplayer/DeathMatch/Jungle Ruins.zax': 6,
+            'Levels/Multiplayer/DeathMatch/Temple Deathgrip.zax': 26,
+            'Levels/Multiplayer/Greed/Corridor of Suffering.zax': 16,
+            'Levels/Multiplayer/Greed/The Foundry.zax': 4,
+        }
+        self.assertEqual({name: len(points) for name, points in maps.items()},
+                         expected_counts)
+        self.assertTrue(all('/Multiplayer/' in name for name in maps))
+        # Static scratch capacity must cover the shipped data with headroom.
+        self.assertLessEqual(len(maps), cfg.DOOR_STATIC_MAP_MAX)
+        self.assertLessEqual(sum(len(p) for p in maps.values()),
+                             cfg.DOOR_STATIC_POINT_MAX)
+        self.assertLessEqual(max(len(p) for p in maps.values()),
+                             cfg.DOOR_TABLE_MAX)
+
 
 class PatcherTests(unittest.TestCase):
     def test_patch_manifest_names_and_targets_are_valid(self):
@@ -392,8 +422,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = 'cd1f3ffb3937e789357e7392c236c4d559f7d497244a03967c0f459934d7e208'
-    HOOK_ENTRY_SIZE = 22639
+    SECTION_SHA256 = 'cf0774c0e53b600ed9d6710400d2d3e6079e370c914d63287e841ef79dabb28a'
+    HOOK_ENTRY_SIZE = 24752
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

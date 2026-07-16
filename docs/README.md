@@ -135,6 +135,24 @@ Current limitations:
   `cfg.PORTAL_REGISTER_ENABLED`) also self-registers the source pad of any
   `CTeleportAction` warp the moment it fires. Both are detection only for now;
   routing bots into portals is future work.
+- Doors are detected the same static way (`door_data.py` extracts every MP
+  map's `Activity=CDoorAI` Level Parts — 10 maps / 333 doors — and
+  `load_doors` copies the active map's centers in per match). Live open/closed
+  state is PER-FRAME fresh: the periodic grid scan only caches the entities
+  sitting on each door anchor, and the page-flip hook re-reads their SOLID bit
+  (`entity+0x1C & 0x40000`) every frame — the original scan-derived state was
+  live-tested and rejected because the frame-counted scan interval stretched
+  to many seconds whenever the visible overlay lowered FPS, leaving rings
+  stale until the overlay was toggled. The overlay draws every door as a small
+  oval and rings closed ones at double radius. Two routing consumers ship on
+  top: (1) a failed-edge marker set while wedged against a blocked door is
+  cleared the moment that door reads passable again; (2) door-aware CTF
+  rerouting — a second BFS field excludes edges crossing currently-closed
+  doors (static per-match edge->door adjacency + a debounced rebuild whenever
+  a door flips), so a bot pinned at one closed path actively reroutes when an
+  alternative door opens, while falling back to the full field (walk at the
+  door) whenever no door-free path exists — which keeps proximity/touch-opened
+  doors working. Switch detection and switch-seeking remain future work.
 - Bots can fire/aim at the host within range and line of sight via `detour_5436F0`.
   `zaxbot/config.py` can force newly spawned bots to equip a selected debug
   inventory item name so projectile lead tuning can be tested without bot movement.

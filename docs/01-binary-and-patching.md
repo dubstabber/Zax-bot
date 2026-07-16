@@ -28,10 +28,10 @@ Current values from `zaxbot/config.py`:
 | name | `.zaxbot` |
 | RVA / VA | `0x31A000` / `0x71A000` |
 | raw file offset | `0x231000` |
-| size | `0xD000` bytes |
+| size | `0x11000` bytes |
 | characteristics | `0xE0000020` (`CODE | EXEC | READ | WRITE`) |
 | code start | `0x71A000` |
-| scratch start | `0x71FA00` (`SCRATCH_OFF = 0x5A00`) |
+| scratch start | `0x720800` (`SCRATCH_OFF = 0x6800`) |
 
 The IDB is for the original image, so `.zaxbot` bytes must be inspected from
 `Zax.exe` at raw offset `0x231000`.
