@@ -614,6 +614,16 @@ CTF_SCORE_GUARD_ENABLED = True
 # Flag bases the BFS distance field is precomputed for (CTF always has 2).
 # flag_dist costs FLAG_ROUTE_MAX * OVERLAY_VERTEX_MAX dwords of scratch.
 FLAG_ROUTE_MAX        = 2
+# Per-bot routing suspension. BFS routing is deterministic, so a bot whose
+# shortest path is physically blocked (closed door the camera-gated engine
+# never opens, geometry pinch the slide can't clear) would be funnelled back
+# into the same blocked segment forever — visible as a carrier pinned at
+# "certain waypoints" until the goal changes. After a routed progress-timeout
+# (including the CTF final approach to the flag itself), the bot gives up
+# routing for this many frames and roams the graph randomly (the same
+# behavior that visibly un-sticks it when the flag state changes), then
+# routing resumes automatically.
+WP_ROUTE_SUSPEND_FRAMES = 240
 
 # --- Keep bots simulated when far from the host's camera -----------------
 # The engine advances an entity's components (incl. the bot walking-controller

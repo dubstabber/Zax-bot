@@ -91,6 +91,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     flag_present_va   = layout.va('flag_present')
     missing_policy_va = layout.va('route_missing_policy')
     missing_goal_va   = layout.va('route_missing_goal')
+    route_suspend_va  = layout.va('bot_route_suspend')
     verts_va          = layout.va('overlay_vertices')
     vcount_va         = layout.va('overlay_vertex_count')
     edges_va          = layout.va('overlay_edges')
@@ -220,6 +221,18 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x05' + le32(route_goal_va) + le32(0xFFFFFFFF))  # route_goal_flag = -1
     a.raw(b'\x83\x3D' + le32(routing_active_va) + b'\x00')       # routing active?
     a.jz('cpg_done')
+    # Per-bot routing suspension: after a routed progress-timeout the follower
+    # parks BFS routing for WP_ROUTE_SUSPEND_FRAMES (see bot_movement.py) so
+    # the bot roams instead of being funnelled back into a blocked segment.
+    # Reporting "no goal" here suspends the next-hop bias, the final approach
+    # AND the far-base force-tick in one place. The counter is decremented
+    # once per think by the follower; this is a pure read.
+    a.raw(b'\x8B\x0D' + le32(bot_slot_va))                      # ecx = slot
+    a.raw(b'\x83\x3C\x8D' + le32(route_suspend_va) + b'\x00')   # suspended?
+    a.jz('cpg_not_suspended')
+    a.raw(b'\xC7\x05' + le32(route_carry_va) + le32(0))         # keep global fresh
+    a.jmp('cpg_done')
+    a.label('cpg_not_suspended')
     # carrying? -> route_carry (live-verified inventory-group test)
     a.raw(b'\xC7\x05' + le32(route_carry_va) + le32(0))         # route_carry = 0
     a.raw(b'\x8B\x0D' + le32(bot_char_va))                      # ecx = bot char

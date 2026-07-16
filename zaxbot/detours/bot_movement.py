@@ -216,6 +216,7 @@ def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(pickup_cd_va) + le32(0))             # clear divert cooldown
     a.raw(b'\xC7\x04\x8D' + le32(bot_last_damage_va) + le32(0))        # reset cur_damage tracker
     a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_wander_ticks')) + le32(0))  # reset lava-flee countdown
+    a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_route_suspend')) + le32(0))  # respawn = fresh routing
     a.raw(b'\x89\x14\x8D' + le32(bot_last_char_va))       # bot_last_char[slot] = edx
     a.label('s542360_char_same')
 
@@ -551,11 +552,14 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     routing = (cfg.CTF_FLAG_ROUTING_ENABLED
                and layout.has_field('route_goal_flag')
                and layout.has_field('flag_route_node')
-               and layout.has_field('flag_table'))
+               and layout.has_field('flag_table')
+               and layout.has_field('flag_routing_active'))
     if routing:
         route_goal_flag_va = layout.va('route_goal_flag')
         flag_route_node_va = layout.va('flag_route_node')
         flag_table_va      = layout.va('flag_table')
+        routing_active_va  = layout.va('flag_routing_active')
+        route_suspend_va   = layout.va('bot_route_suspend')
 
     # === Waypoint following =============================================
     a.raw(b'\x83\x3D' + le32(wp_follow_enabled_va) + b'\x00')
@@ -600,6 +604,15 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     # the instant the bot grabs the flag the goal flips to home and this branch
     # stops firing (cur != home goal node) -> normal routing resumes.
     if routing:
+        # Tick down this bot's routing suspension exactly once per think (the
+        # other ctf_pick_goal callers — ctf_next_hop, the page-flip force-tick
+        # loop — only READ it).
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8B\x04\x8D' + le32(route_suspend_va))   # eax = route_suspend[slot]
+        a.raw(b'\x85\xC0'); a.jz('s542360_rs_dec_done')
+        a.raw(b'\x48')                                    # dec eax
+        a.raw(b'\x89\x04\x8D' + le32(route_suspend_va))   # route_suspend[slot] = eax
+        a.label('s542360_rs_dec_done')
         a.call_lbl('ctf_pick_goal')                       # route_goal_flag for this bot
         a.raw(b'\xA1' + le32(route_goal_flag_va))         # eax = goal flag idx
         a.raw(b'\x83\xF8\xFF'); a.jz('s542360_wp_not_final')  # no goal -> normal
@@ -614,7 +627,46 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xD9\x04\xC5' + le32(flag_table_va + 4))  # fld [flag_table + eax*8 + 4] (flag.y)
         a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))         # fsub bot.y
         a.raw(b'\xD9\x1D' + le32(dy_accum_va))            # fstp dy_accum
+        # --- Final-approach watchdog. This branch used to jump straight to the
+        # emit, bypassing the arrival/progress machinery entirely — a carrier
+        # whose straight line to the base was blocked (door, pinch) steered
+        # into it FOREVER with no slide escalation and no timeout, until the
+        # goal changed (e.g. its flag got stolen again). Mirror the node
+        # watchdog here with the FLAG as the target: strict dsq improvement
+        # resets wp_try (and wp_best_dsq/wp_try are freshly reset by every
+        # path that assigns current_wp, so entering final approach starts
+        # clean); no progress ramps wp_try, which drives the wall-slide sweep
+        # at the emit; a full progress-timeout gives up on routing for
+        # WP_ROUTE_SUSPEND_FRAMES (random graph roam — the same recovery the
+        # goal change provided by luck) and falls into the normal node logic.
+        a.raw(b'\xD9\x05' + le32(dx_accum_va))            # fld dx
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xD9\x05' + le32(dy_accum_va))            # fld dy
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xDE\xC1')                                # faddp -> ST0 = dsq(bot, flag)
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8B\x04\x8D' + le32(stuck_count_va))     # eax = stuck_count[slot]
+        a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES]))
+        a.jae('s542360_fa_no_progress')                   # physically pinned
+        a.raw(b'\xD9\x04\x8D' + le32(wp_best_dsq_va))     # fld best (ST0=best, ST1=dsq)
+        a.raw(b'\xDF\xF1')                                # fcomip st0,st1 (best:dsq, pop)
+        a.jbe('s542360_fa_no_progress')                   # best <= dsq -> no improvement
+        a.raw(b'\xD9\x1C\x8D' + le32(wp_best_dsq_va))     # best = dsq (pop)
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
         a.jmp('s542360_emit')
+        a.label('s542360_fa_no_progress')
+        a.raw(b'\xDD\xD8')                                # fstp st(0) (drop dsq)
+        a.raw(b'\xFF\x04\x8D' + le32(wp_try_va))          # ++wp_try[slot]
+        a.raw(b'\x8B\x04\x8D' + le32(wp_try_va))          # eax = wp_try
+        a.raw(b'\x3B\x05' + le32(wp_progress_timeout_va)) # cmp eax, [progress_timeout]
+        a.jb('s542360_emit')                              # keep steering; slide sweeps
+        a.raw(b'\xC7\x04\x8D' + le32(route_suspend_va)
+              + le32(cfg.WP_ROUTE_SUSPEND_FRAMES))        # give up routing for a while
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))
+        # fall through to the normal node logic: the bot is within reach of the
+        # goal node, arrives, and ctf_next_hop (whose ctf_pick_goal now reads
+        # the suspension) hands it to the random wp_advance.
         a.label('s542360_wp_not_final')
     # Arrival test: dsq(bot, vertices[cur]) < wp_reached_radius_sq ?
     # If the bot is wedged and already near the node, accept a larger "stuck
@@ -738,6 +790,25 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     # fall through: wedged off-graph too long -> re-acquire nearest
 
     a.label('s542360_wp_reacquire')
+    if routing:
+        # A hard wedge while actively ROUTING (goal set this frame by the
+        # have_cur ctf_pick_goal call): BFS is deterministic, so after the
+        # local alternate/retreat below the next arrivals would funnel the bot
+        # straight back into the same blocked segment (classic case: a door
+        # the camera-gated engine never opens, with routing re-selecting the
+        # door edge from every direction — the single failed_edge_marker can't
+        # hold more than one blocked edge). Suspend routing so the bot roams
+        # the graph randomly for a while instead of ping-ponging, then routing
+        # resumes automatically.
+        a.raw(b'\x83\x3D' + le32(routing_active_va) + b'\x00')
+        a.jz('s542360_wp_reacq_no_suspend')
+        a.raw(b'\xA1' + le32(route_goal_flag_va))         # eax = this bot's goal
+        a.raw(b'\x83\xF8\xFF')
+        a.jz('s542360_wp_reacq_no_suspend')               # roaming wedge -> no suspend
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\xC7\x04\x8D' + le32(route_suspend_va)
+              + le32(cfg.WP_ROUTE_SUSPEND_FRAMES))
+        a.label('s542360_wp_reacq_no_suspend')
     # Couldn't reach cur for WP_PROGRESS_TIMEOUT frames (a wall blocks the
     # straight edge, or the node is otherwise unreachable from here). If LATCHED,
     # try to route AROUND the failed edge immediately: pick an alternate

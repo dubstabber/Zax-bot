@@ -220,7 +220,17 @@ CTF bots now use the waypoint graph for objective routing:
 - When the current waypoint is already the goal base's nearest node, the
   movement detour steers directly at `flag_table[goal]`. This final approach is
   required to physically touch the flag or home capture object; without it the
-  bot bounces between graph nodes around the base.
+  bot bounces between graph nodes around the base. The final approach carries
+  its own progress watchdog (target = the flag position, reusing
+  `wp_best_dsq`/`wp_try`): it used to jump straight to the emit with no
+  arrival/progress machinery at all, so a blocked line to the base (a door)
+  pinned the carrier forever.
+- Routed wedges suspend routing per bot (`bot_route_suspend[slot]`,
+  `WP_ROUTE_SUSPEND_FRAMES`): after any routed progress-timeout the bot roams
+  the graph randomly for a few seconds instead of letting deterministic BFS
+  funnel it back into the same blocked segment, then routing resumes.
+  `ctf_pick_goal` reports "no goal" while suspended, which also parks the
+  final approach and the far-base force-tick for that bot.
 
 Far from the host camera, two things must be forced awake. The page-flip detour
 already force-ticks skipped bot characters through the same three entity stages

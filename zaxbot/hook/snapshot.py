@@ -102,13 +102,13 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     weapon_info_src_va = layout.va('current_weapon_obj')
 
     # Bot-movement scratch dump regions:
-    #   ai_move: bot_wander_x through bot_prev_wp (14 contiguous parallel
-    #            u32 arrays × 16 bot slots × 4 bytes = 0x380 bytes). Exposes the
-    #            wander target, last-position cache, stuck counter, item-scan
-    #            stagger, pickup cache, last_damage/flee_ticks, and the two
-    #            waypoint-follow nav fields (current_wp idx12, prev_wp idx13)
-    #            per slot. prev_wp != 0xFFFFFFFF ⇒ the bot is latched onto the
-    #            graph and following an edge.
+    #   ai_move: the AI_PERBOT_FIELD_COUNT contiguous parallel u32 arrays × 16
+    #            bot slots × 4 bytes. Exposes the wander/diag mirror,
+    #            last-position cache, stuck counter, item-scan stagger, pickup
+    #            cache, last_damage/flee_ticks, and the waypoint-follow nav
+    #            fields (current_wp idx12, prev_wp idx13) per slot. prev_wp !=
+    #            0xFFFFFFFF ⇒ the bot is latched onto the graph and following
+    #            an edge.
     #   hazard:  hazard_count + hazard_table (4 + 32*12 = 388 bytes). Inspect
     #            after pressing R to verify the proactive scan picked up
     #            damage zones on the current map.
@@ -180,8 +180,9 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # waypoint-follow nav fields: current_wp idx12 (off 0x300), prev_wp idx13
     # (off 0x340), wp_try idx14 (off 0x380, frames since last node arrival).
     # prev_wp != 0xFFFFFFFF ⇒ the bot has latched onto the graph and is
-    # following an edge. Size is derived from the layout constant so it tracks
-    # the field list automatically. hazard covers hazard_count + hazard_table.
+    # following an edge. (bot_route_suspend lives in the flag-route block, not
+    # here.) Size is derived from the layout constant so it tracks the field
+    # list automatically. hazard covers hazard_count + hazard_table.
     ai_move_dump_bytes = AI_PERBOT_FIELD_COUNT * cfg.MAX_BOT_SLOTS * 4
     emit_chunk(tag_ai_move_va,   b'\xB8' + le32(ai_move_src_va),  ai_move_dump_bytes, 'snap_skip_ai_move')
     emit_chunk(tag_hazard_va,    b'\xB8' + le32(hazard_src_va),         0x190, 'snap_skip_hazard')

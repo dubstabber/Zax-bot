@@ -250,6 +250,25 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     always use search mode; do not route/final-approach a carrier into an empty
     home base. The policy clears when the flag becomes present again or the bot
     switches goals. Do NOT add BFS/pathfinding for an unknown flag location.
+  - **Blocked-route suspension** (`bot_route_suspend[slot]`, flag-route block;
+    `cfg.WP_ROUTE_SUSPEND_FRAMES`): BFS routing is deterministic, so a bot
+    whose shortest path is physically blocked (classic case: a door the
+    camera-gated engine never opens for far bots) used to be funnelled back
+    into the same blocked segment from every direction — a carrier pinned at
+    "certain waypoints" until its goal changed. Now any routed
+    progress-timeout (the `s542360_wp_reacquire` watchdog while
+    `route_goal_flag != -1`) suspends routing for that bot: `ctf_pick_goal`
+    reports no goal while the per-bot countdown runs, so next-hops, the final
+    approach AND the far-base force-tick all fall back to random graph roaming
+    (exactly the behavior that empirically un-sticks such bots), then routing
+    resumes. The follower decrements the counter once per think; respawn
+    clears it. The CTF **final approach also has its own watchdog** now — it
+    used to jump straight to the emit, bypassing arrival/progress machinery
+    entirely, so a carrier with a blocked straight line from the goal node to
+    the base steered into the obstacle forever. It now mirrors the node
+    watchdog with the FLAG as the target: no strict `dsq` improvement ramps
+    `wp_try` (which drives the wall-slide sweep), and a full progress-timeout
+    triggers the same routing suspension.
 - Bots are kept SIMULATED when far from the host's camera
   (`cfg.BOT_FORCE_ACTIVE_ENABLED`). The engine deactivates entities far from the
   local camera, and the per-entity component advance `sub_4FADC0` gates ALL

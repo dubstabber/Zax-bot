@@ -68,6 +68,9 @@ AI_PERBOT_FIELDS = (
     ('bot_flee_ticks',      'follow: slide_turn (wall-slide deflection ramp)'),
     # --- Waypoint-following per-bot nav state. MUST stay the last three
     # entries (see INVARIANT above). ai_move dump indices 12/13/14.
+    # NOTE: bot_route_suspend (per-bot, flag-route block) lives with
+    # route_missing_policy/goal, NOT here — growing this block would push the
+    # ai_off-relative tail into the overlay region anchored at 0x2080.
     ('bot_current_wp',      'follow: current target vertex idx, -1 = none (idx12)'),
     ('bot_prev_wp',         'follow: previous vertex idx, -1 = not latched (idx13)'),
     ('bot_wp_try',          'follow: frames since last node arrival; escape past WP_TRY (idx14)'),
@@ -976,8 +979,10 @@ def build_scratch_layout(
                          'flag-route: per-bot missing-flag policy (0 unset, 1 search, 2 wait/base-route)'),
             ScratchField('route_missing_goal', route_base + 0x28 + MAX_BOT_SLOTS * 4, MAX_BOT_SLOTS * 4,
                          'flag-route: per-bot goal index that route_missing_policy applies to'),
+            ScratchField('bot_route_suspend', route_base + 0x28 + MAX_BOT_SLOTS * 8, MAX_BOT_SLOTS * 4,
+                         'flag-route: per-bot frames of routing suspension (roam after a routed wedge)'),
         ])
-        route_tail = route_base + 0x28 + MAX_BOT_SLOTS * 8
+        route_tail = route_base + 0x28 + MAX_BOT_SLOTS * 12
         overlay_fields.extend([
             ScratchField('ctf_score_block', route_tail + 0x00, 0x04,
                          'ctf-score: 1 suppresses CGiveTeamAPointAction award'),
