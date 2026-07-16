@@ -624,6 +624,18 @@ FLAG_ROUTE_MAX        = 2
 # behavior that visibly un-sticks it when the flag state changes), then
 # routing resumes automatically.
 WP_ROUTE_SUSPEND_FRAMES = 240
+# The failed-edge marker must be RETRIED, not kept forever. Live CE analysis
+# of the reported "carrier stuck near a door" showed the exact loop: the
+# marker held the door edge (15,17) long after the door became passable;
+# routing wanted 17->15 every arrival, the marker forced the random fallback,
+# and node 17's only other neighbour bounced the bot straight back — an
+# arrival-level ping-pong with zero timeouts, so the suspension never fired.
+# Manually clearing the marker in CE made the bot walk through and capture
+# within seconds. After this many consecutive routed hops forced off the
+# marked edge, the marker is cleared so the edge is retried: if it is open the
+# bot simply passes; if it is still blocked the wedge timeout re-marks it and
+# the roam suspension takes over.
+WP_ROUTE_BLOCK_RETRY_HITS = 3
 
 # --- Keep bots simulated when far from the host's camera -----------------
 # The engine advances an entity's components (incl. the bot walking-controller

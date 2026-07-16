@@ -981,8 +981,10 @@ def build_scratch_layout(
                          'flag-route: per-bot goal index that route_missing_policy applies to'),
             ScratchField('bot_route_suspend', route_base + 0x28 + MAX_BOT_SLOTS * 8, MAX_BOT_SLOTS * 4,
                          'flag-route: per-bot frames of routing suspension (roam after a routed wedge)'),
+            ScratchField('route_block_hits', route_base + 0x28 + MAX_BOT_SLOTS * 12, MAX_BOT_SLOTS * 4,
+                         'flag-route: per-bot count of routed hops forced off the marked failed edge'),
         ])
-        route_tail = route_base + 0x28 + MAX_BOT_SLOTS * 12
+        route_tail = route_base + 0x28 + MAX_BOT_SLOTS * 16
         overlay_fields.extend([
             ScratchField('ctf_score_block', route_tail + 0x00, 0x04,
                          'ctf-score: 1 suppresses CGiveTeamAPointAction award'),

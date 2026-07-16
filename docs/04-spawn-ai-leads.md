@@ -231,6 +231,15 @@ CTF bots now use the waypoint graph for objective routing:
   funnel it back into the same blocked segment, then routing resumes.
   `ctf_pick_goal` reports "no goal" while suspended, which also parks the
   final approach and the far-base force-tick for that bot.
+- The failed-edge marker is retried, not permanent (`route_block_hits[slot]`,
+  `WP_ROUTE_BLOCK_RETRY_HITS`). Live CE caught the residual stuck loop: with
+  the door edge marked and on the only shortest path, every arrival re-chose
+  it, the forced fallback bounced the bot between the two nodes flanking the
+  door (both inside the arrival radius, so `wp_try` stayed 0 — no timeout, no
+  suspension), and the marker never expired even after the door became
+  passable. After N forced fallbacks the marker is cleared so the edge is
+  retried; a still-blocked edge re-marks itself through the wedge timeout.
+  The marker also clears when a roam suspension expires.
 
 Far from the host camera, two things must be forced awake. The page-flip detour
 already force-ticks skipped bot characters through the same three entity stages

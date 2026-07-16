@@ -269,6 +269,22 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     watchdog with the FLAG as the target: no strict `dsq` improvement ramps
     `wp_try` (which drives the wall-slide sweep), and a full progress-timeout
     triggers the same routing suspension.
+  - **Failed-edge marker RETRY** (`route_block_hits[slot]`;
+    `cfg.WP_ROUTE_BLOCK_RETRY_HITS`): the marker alone is NOT enough — live CE
+    on Hydroplant Bouncefest caught the exact residual loop: marker held the
+    door edge (17,15) on the only shortest path home; every arrival at 17
+    routing demanded 15, the marker forced the random fallback, and 17's only
+    other neighbour bounced the bot back to 18 — cur flipped 17↔18 with
+    `wp_try` pinned at 0 (both nodes inside the 64px arrival radius), so no
+    timeout ever fired and the marker never expired, even with the door long
+    since passable. Manually clearing the marker made the bot walk through
+    and capture within seconds. So: each routed arrival that is forced off
+    the marked edge increments `route_block_hits`; after
+    `WP_ROUTE_BLOCK_RETRY_HITS` the marker is cleared and the edge RETRIED
+    (open → walks through; still blocked → the 30-frame wedge re-marks it,
+    resets the budget, and the roam suspension engages). The marker is also
+    cleared when a suspension expires. Hits reset on clean routed hops,
+    marker re-set, reacquire, and respawn.
 - Bots are kept SIMULATED when far from the host's camera
   (`cfg.BOT_FORCE_ACTIVE_ENABLED`). The engine deactivates entities far from the
   local camera, and the per-entity component advance `sub_4FADC0` gates ALL

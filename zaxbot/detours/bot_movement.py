@@ -216,7 +216,10 @@ def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(pickup_cd_va) + le32(0))             # clear divert cooldown
     a.raw(b'\xC7\x04\x8D' + le32(bot_last_damage_va) + le32(0))        # reset cur_damage tracker
     a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_wander_ticks')) + le32(0))  # reset lava-flee countdown
-    a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_route_suspend')) + le32(0))  # respawn = fresh routing
+    if layout.has_field('bot_route_suspend'):
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_route_suspend')) + le32(0))  # respawn = fresh routing
+    if layout.has_field('route_block_hits'):
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('route_block_hits')) + le32(0))  # reset blocked-edge retry count
     a.raw(b'\x89\x14\x8D' + le32(bot_last_char_va))       # bot_last_char[slot] = edx
     a.label('s542360_char_same')
 
@@ -560,6 +563,7 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         flag_table_va      = layout.va('flag_table')
         routing_active_va  = layout.va('flag_routing_active')
         route_suspend_va   = layout.va('bot_route_suspend')
+        route_block_hits_va = layout.va('route_block_hits')
 
     # === Waypoint following =============================================
     a.raw(b'\x83\x3D' + le32(wp_follow_enabled_va) + b'\x00')
@@ -612,6 +616,11 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x85\xC0'); a.jz('s542360_rs_dec_done')
         a.raw(b'\x48')                                    # dec eax
         a.raw(b'\x89\x04\x8D' + le32(route_suspend_va))   # route_suspend[slot] = eax
+        a.jnz('s542360_rs_dec_done')                      # still suspended
+        # Suspension just expired: forget the blocked edge so resumed routing
+        # retries it fresh (a door may have opened in the meantime).
+        a.raw(b'\xC7\x04\x8D' + le32(failed_edge_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(route_block_hits_va) + le32(0))
         a.label('s542360_rs_dec_done')
         a.call_lbl('ctf_pick_goal')                       # route_goal_flag for this bot
         a.raw(b'\xA1' + le32(route_goal_flag_va))         # eax = goal flag idx
@@ -859,6 +868,8 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC1\xE0\x10')                                # shl eax, 16
     a.raw(b'\x09\xC2')                                    # or edx, eax
     a.raw(b'\x89\x14\x8D' + le32(failed_edge_va))         # failed_edge_marker[slot] = edx
+    if routing:
+        a.raw(b'\xC7\x04\x8D' + le32(route_block_hits_va) + le32(0))  # fresh retry budget
     a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))           # slide_turn = 0
     a.jmp('s542360_wp_steer')
 
@@ -883,6 +894,8 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC1\xE0\x10')                                # shl eax, 16
     a.raw(b'\x09\xC2')                                    # or edx, eax
     a.raw(b'\x89\x14\x8D' + le32(failed_edge_va))         # failed_edge_marker[slot] = edx
+    if routing:
+        a.raw(b'\xC7\x04\x8D' + le32(route_block_hits_va) + le32(0))  # fresh retry budget
     a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))           # slide_turn = 0
     a.jmp('s542360_wp_steer')
 
@@ -902,6 +915,8 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # best_dsq = FLT_MAX
     a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))               # wp_try = 0
     a.raw(b'\xC7\x04\x8D' + le32(failed_edge_va) + le32(0))          # failed_edge_marker = 0
+    if routing:
+        a.raw(b'\xC7\x04\x8D' + le32(route_block_hits_va) + le32(0))
     a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))           # slide_turn = 0
     a.jmp('s542360_wp_steer')
 
@@ -951,8 +966,30 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC1\xE7\x10')                           # shl edi, 16
         a.raw(b'\x09\xFE')                               # or esi, edi
         a.raw(b'\x39\xDE')                               # cmp esi, ebx
-        a.jnz('s542360_wp_have_next')
+        a.jz('s542360_wp_bad_edge_fallback')
+        # Clean routed hop while a marker exists: routing is progressing on a
+        # different edge, so the ping-pong counter starts over.
+        a.raw(b'\x8B\x35' + le32(bot_slot_tmp_va))       # esi = slot
+        a.raw(b'\xC7\x04\xB5' + le32(route_block_hits_va) + le32(0))
+        a.jmp('s542360_wp_have_next')
         a.label('s542360_wp_bad_edge_fallback')
+        # Routing insists on the marked edge (it IS the shortest path). Count
+        # the forced fallbacks: on a graph like door nodes with one alternate
+        # neighbour, routing bounces the bot right back here every hop — an
+        # arrival-level ping-pong that never trips the wedge timeout (live CE:
+        # cur flipped 17<->18 with wp_try pinned at 0). After
+        # WP_ROUTE_BLOCK_RETRY_HITS forced fallbacks, clear the marker so the
+        # next arrival RETRIES the edge: if the way is open now (doors open
+        # when their area is awake) the bot just walks through; if it is still
+        # blocked the wedge timeout re-marks it and arms the roam suspension.
+        a.raw(b'\x8B\x35' + le32(bot_slot_tmp_va))       # esi = slot
+        a.raw(b'\xFF\x04\xB5' + le32(route_block_hits_va))  # ++hits[slot]
+        a.raw(b'\x83\x3C\xB5' + le32(route_block_hits_va)
+              + bytes([cfg.WP_ROUTE_BLOCK_RETRY_HITS]))  # hits >= retry threshold?
+        a.jb('s542360_wp_bad_edge_go')
+        a.raw(b'\xC7\x04\xB5' + le32(failed_edge_va) + le32(0))       # retry the edge
+        a.raw(b'\xC7\x04\xB5' + le32(route_block_hits_va) + le32(0))
+        a.label('s542360_wp_bad_edge_go')
         a.raw(b'\x89\xC2')                               # edx = blocked route_next
         a.call_lbl('wp_advance')                         # fallback excluding the blocked edge
         a.jmp('s542360_wp_have_next')
