@@ -451,6 +451,22 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     and open to 28/29 when one gate is switched open (the live-reported
     reroute scenario); Doom ship's team doors split by team. No new patch
     sites.
+  - **Mid-life reroute epoch** (`route_epoch` global + `bot_route_epoch[slot]`;
+    flag-route block): `ctf_next_hop` only runs on node ARRIVAL, so a bot
+    committed to a full-field walk-at-the-door path (open field couldn't reach
+    the goal when it last routed) never re-evaluated when a DIFFERENT door
+    opened mid-edge — it stayed pinned on the old route until it died and
+    respawned (live-reported on Torture Chamber; the R-snapshot showed a
+    team-1 bot at node 28 with `route_use_open=0` and `current_wp=18` steering
+    into the closed pillar gate while the just-opened blue gate made node 28's
+    open distance finite). Fix: `rebuild_open_routes` increments `route_epoch`;
+    the follower, when a routed bot's `bot_route_epoch[slot]` lags, syncs it and
+    sets `current_wp=-1` so the existing cold-acquire re-runs `ctf_next_hop`
+    against the freshly rebuilt open field THAT think. Both epochs reset to 0 on
+    match change (`detour_df90`) so bots do not force-acquire at match start;
+    debounced by the rebuild cooldown, gated on `flag_routing_active`. This is
+    the deterministic complement to the per-bot suspension (whose progress
+    timeout can be starved by wall-slide micro-progress at a sealed door).
 - General world-entity enumeration (`detours/entity_scan.py:scan_entities`,
   gated by `cfg.SCAN_ENTITIES_ENABLED`). The long-standing blocker for object
   detection was that there is no flat entity list: `mgr+0x290` is players,

@@ -993,6 +993,13 @@ def build_scratch_layout(
         ])
         route_tail = route_base + 0x28 + MAX_BOT_SLOTS * 16
         overlay_fields.extend([
+            ScratchField('route_epoch', route_tail + 0x00, 0x04,
+                         'flag-route: bumped when the open-door BFS field is rebuilt; a routed bot whose stored epoch differs re-acquires so ctf_next_hop re-runs against the new field'),
+            ScratchField('bot_route_epoch', route_tail + 0x04, MAX_BOT_SLOTS * 4,
+                         'flag-route: per-bot last route_epoch re-evaluated under (mid-life door-change reroute trigger)'),
+        ])
+        route_tail += 0x04 + MAX_BOT_SLOTS * 4
+        overlay_fields.extend([
             ScratchField('ctf_score_block', route_tail + 0x00, 0x04,
                          'ctf-score: 1 suppresses CGiveTeamAPointAction award'),
             ScratchField('ctf_score_team', route_tail + 0x04, 0x04,

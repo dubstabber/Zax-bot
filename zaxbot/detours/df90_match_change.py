@@ -148,6 +148,17 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
             a.raw(b'\xB9' + le32(cfg.MAX_BOT_SLOTS))
             a.raw(b'\x83\xC8\xFF')
             a.raw(b'\xF3\xAB')                         # route_missing_goal[16] = -1
+        # Reset the door-change route-epoch. Both the global and every bot's
+        # stored epoch start at 0 so bots do NOT force a re-acquire at match
+        # start (0 == 0); the first mid-life door rebuild bumps the global and
+        # the mismatch drives a one-shot re-acquire per bot.
+        if layout.has_field('route_epoch') and layout.has_field('bot_route_epoch'):
+            a.raw(b'\xC7\x05' + le32(layout.va('route_epoch')) + le32(0))
+            a.raw(b'\xFC')                            # cld
+            a.raw(b'\xBF' + le32(layout.va('bot_route_epoch')))
+            a.raw(b'\xB9' + le32(cfg.MAX_BOT_SLOTS))
+            a.raw(b'\x31\xC0')
+            a.raw(b'\xF3\xAB')                         # bot_route_epoch[16] = 0
         a.call_lbl('detect_mode')                    # eax = 0 DM / 1 CTF / 2 SK
         a.raw(b'\x83\xF8\x01')                        # cmp eax, 1 (CTF)
         a.jnz('df90_no_ctf_routes')

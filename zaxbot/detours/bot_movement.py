@@ -610,6 +610,30 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
               + b'\xFF\xFF\xFF\xFF')                          # drop the latch
         a.label('s542360_door_fc_done')
 
+    # Door-state reroute trigger. rebuild_open_routes bumps route_epoch each
+    # time a door open/close rebuilds the open-field BFS. Routing otherwise
+    # only re-evaluates on node ARRIVAL (ctf_next_hop fires at s542360_wp_
+    # arrived), so a bot steering across a door that opens mid-edge stays
+    # committed to the old, now-suboptimal path until it dies and respawns (a
+    # bot pressed against a still-closed door never arrives at a node to
+    # re-route). When this bot's stored epoch lags the global, invalidate
+    # current_wp so the cold-acquire below re-runs THIS think and ctf_next_hop
+    # picks the newly-opened route. Gated on active CTF routing; debounced to
+    # at most once per DOOR_ROUTE_REBUILD_COOLDOWN_FRAMES by the rebuild itself.
+    if routing and layout.has_field('route_epoch') and layout.has_field('bot_route_epoch'):
+        route_epoch_va = layout.va('route_epoch')
+        bot_route_epoch_va = layout.va('bot_route_epoch')
+        a.raw(b'\x83\x3D' + le32(routing_active_va) + b'\x00')  # routing active?
+        a.jz('s542360_epoch_done')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))             # ecx = slot
+        a.raw(b'\xA1' + le32(route_epoch_va))                  # eax = route_epoch
+        a.raw(b'\x3B\x04\x8D' + le32(bot_route_epoch_va))      # cmp eax, bot_route_epoch[slot]
+        a.jz('s542360_epoch_done')
+        a.raw(b'\x89\x04\x8D' + le32(bot_route_epoch_va))      # bot_route_epoch[slot] = epoch
+        a.raw(b'\xC7\x04\x8D' + le32(current_wp_va)
+              + b'\xFF\xFF\xFF\xFF')                           # invalidate -> cold re-acquire
+        a.label('s542360_epoch_done')
+
     # Ensure current_wp is a valid index, else cold-acquire the nearest node.
     a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
     a.raw(b'\x8B\x04\x8D' + le32(current_wp_va))          # eax = current_wp[slot]

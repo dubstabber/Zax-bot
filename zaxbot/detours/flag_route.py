@@ -422,6 +422,13 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xFF\x05' + le32(bfr_i_va))                   # i++
         a.jmp('ror_loop')
         a.label('ror_done')
+        # Bump the route epoch so every routed bot re-acquires its node on the
+        # next think and re-runs ctf_next_hop against the freshly rebuilt open
+        # field. Without this, routing only re-evaluates on node arrival, so a
+        # door that opens mid-edge is invisible until the bot dies and respawns
+        # (a bot steering across a still-closed door never arrives at a node).
+        if layout.has_field('route_epoch'):
+            a.raw(b'\xFF\x05' + le32(layout.va('route_epoch')))  # ++route_epoch
         a.raw(b'\x61')                                        # popad
         a.raw(b'\xC3')
     else:
