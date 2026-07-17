@@ -147,12 +147,18 @@ Current limitations:
   oval and rings closed ones at double radius. Two routing consumers ship on
   top: (1) a failed-edge marker set while wedged against a blocked door is
   cleared the moment that door reads passable again; (2) door-aware CTF
-  rerouting — a second BFS field excludes edges crossing currently-closed
-  doors (static per-match edge->door adjacency + a debounced rebuild whenever
-  a door flips), so a bot pinned at one closed path actively reroutes when an
-  alternative door opens, while falling back to the full field (walk at the
-  door) whenever no door-free path exists — which keeps proximity/touch-opened
-  doors working. Switch detection and switch-seeking remain future work.
+  rerouting with DIRECTIONAL, PER-TEAM passability — per-team BFS fields
+  treat a closed-door edge as traversable only from a side that team's bot
+  could open the door from (parsed opener topology: walk-in triggers,
+  self-trigger walk-up doors incl. same-team-conditional ones, Hydroplant-
+  style arming volumes; open+toggle actions with '#a-b#' template-name
+  expansion; doors with no authored opener are engine bump-open and pass
+  both ways; switch/spawn/timer-only doors — e.g. the Torture Chamber pillar
+  walls — are impassable while closed). The fields rebuild (debounced)
+  whenever any door flips state, so a bot pinned at one closed path actively
+  reroutes the moment an alternative opens, and falls back to the full field
+  (walk at the door) when the goal is unreachable otherwise. Switch-seeking
+  (using CollideTriggerAI wall switches) remains future work.
 - Bots can fire/aim at the host within range and line of sight via `detour_5436F0`.
   `zaxbot/config.py` can force newly spawned bots to equip a selected debug
   inventory item name so projectile lead tuning can be tested without bot movement.

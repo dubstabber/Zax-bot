@@ -14,7 +14,7 @@ from ..asm import Asm
 from ..layout import build_scratch_layout
 from ..portal_data import resolve_portal_data
 from ..flag_data import resolve_flag_data
-from ..door_data import resolve_door_data
+from ..door_data import resolve_door_topology
 from ..static_data import write_static_scratch_data
 from . import aim_lead, apply_colors, detect_mode, dispatcher, snapshot, spawn, waypoint_diag, waypoint_edit, weapon_speed
 from .helpers import emit_logc_body, emit_wbuf_body
@@ -106,6 +106,8 @@ def build_hook(section_va_abs):
         door_static_point_max=cfg.DOOR_STATIC_POINT_MAX if cfg.DOOR_DETECT_ENABLED else 0,
         door_map_name_slot=cfg.DOOR_MAP_NAME_SLOT if cfg.DOOR_DETECT_ENABLED else 0,
         door_entity_slots=cfg.DOOR_ENTITY_SLOTS_PER_DOOR,
+        door_opener_table_max=cfg.DOOR_OPENER_TABLE_MAX if cfg.DOOR_DETECT_ENABLED else 0,
+        door_opener_static_max=cfg.DOOR_OPENER_STATIC_MAX if cfg.DOOR_DETECT_ENABLED else 0,
     )
 
     a = Asm(section_va_abs + cfg.HOOK_ENTRY_OFF)
@@ -166,7 +168,7 @@ def build_hook(section_va_abs):
     overlay_waypoints, overlay_edges = cfg.resolve_overlay_data()
     portal_maps = resolve_portal_data()
     flag_maps = resolve_flag_data()
-    door_maps = resolve_door_data() if cfg.DOOR_DETECT_ENABLED else ()
+    door_maps = resolve_door_topology() if cfg.DOOR_DETECT_ENABLED else ()
 
     section = bytearray(cfg.NEW_SECTION_SIZE)
     section[cfg.HOOK_ENTRY_OFF:cfg.HOOK_ENTRY_OFF + len(code)] = code

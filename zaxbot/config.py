@@ -11,8 +11,8 @@ from .build import SectionSpec
 # --- new section parameters (.zaxbot) -------------------------------------
 NEW_SECTION_NAME   = b'.zaxbot\x00'
 NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
-NEW_SECTION_SIZE   = 0x11000       # 26KB code + 42KB scratch (grown for the door detection
-                                   # tables, then again for the door-aware routing field)
+NEW_SECTION_SIZE   = 0x12000       # 26KB code + 46KB scratch (grown for the door detection
+                                   # tables, the door-aware routing field, then its per-team split)
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
 SCRATCH_OFF        = 0x6800        # writable scratch buffer; 26KB code / 42KB scratch
@@ -665,6 +665,24 @@ DOOR_WEDGE_MATCH_RADIUS_SQ = 96.0 * 96.0
 DOOR_ROUTE_AWARE_ENABLED = True
 DOOR_EDGE_RADIUS_SQ = 40.0 * 40.0
 DOOR_ROUTE_REBUILD_COOLDOWN_FRAMES = 30
+# Directional passability. A CLOSED door edge is traversable from side S iff
+# a bot-usable opener (walk-in trigger — touching/pass-through volumes the
+# bot fires just by moving; NOT collide switches / spawn triggers / relays /
+# timers) sits on side S of the door, where side is the sign of
+# dot(opener - door, node_S - door) with a +1.0 bias so an opener exactly ON
+# the door (self-trigger walk-up doors) grants BOTH sides. Doors with no
+# authored opener of any kind are engine bump-open => both sides. Doors with
+# only non-bot-usable openers are impassable while closed — live state flips
+# them the moment something opens them (spawn doors, switch doors, timer
+# jaws). Team-gated self-trigger doors (Doom ship) are treated optimistically
+# as openable — a wrong-team bot falls back to the wedge machinery.
+# Openers per map are small (Curse of the Temple peaks at ~22); the static
+# table holds every MP map's bindings (53 shipped). Each record is
+# (x f32, y f32, door_idx u32, team_mask u32) — the mask restricts same-team-
+# conditional walk-up doors (Doom ship / Battle on the Ice / Curse) to their
+# own team; unconditional openers carry mask 3.
+DOOR_OPENER_TABLE_MAX  = 48   # live per-map opener records
+DOOR_OPENER_STATIC_MAX = 96   # build-time records across all MP maps
 
 # --- CTF flag routing (bots navigate the waypoint graph toward flags) ----
 # Master gate. When on and the active match is CTF with a graph + flags, bots

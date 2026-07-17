@@ -408,28 +408,49 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     live on Hydroplant Bouncefest. The latch resets wherever the marker
     resets (cold-acquire, reacquire, suspension expiry, blind retry, respawn,
     match change).
-  - **Routing consumer 2 — door-aware CTF rerouting**
-    (`cfg.DOOR_ROUTE_AWARE_ENABLED`): the single BFS field always funnels a
-    bot down the shortest path, so a bot pinned at closed door A never
-    diverted when door B (an alternative route) opened — live-reported. Now
-    `build_edge_doors` (once per match from `detour_df90`; doors and graph
-    are static) records per graph edge the nearest door within
-    `DOOR_EDGE_RADIUS_SQ` of the edge SEGMENT (true point-segment distance)
-    into `edge_door[]`, and `build_flag_routes` fills a SECOND field
-    `flag_dist_open` via the shared `bfs_run` body with `bfs_skip=1` —
-    skipping every edge whose door is currently blocked. `ctf_next_hop`
-    prefers the open field (also refusing to step across a blocked edge
-    directly — a neighbour can carry a smaller open-dist via another path);
-    when the current node cannot reach the goal door-free
-    (`flag_dist_open[cur] == -1`) it falls back to the FULL field, i.e. the
-    old walk-at-the-door behaviour, so approach-openable doors (proximity
-    pads, touch-open — Torture Chamber's 43) still work. `door_dirty` from
-    the per-frame refresh triggers `rebuild_open_routes` (open field only;
-    route nodes/full field are static) from the page-flip hook, debounced by
-    `DOOR_ROUTE_REBUILD_COOLDOWN_FRAMES` because touch-open maps flip door
-    state constantly. Bots are deliberately NOT hard-barred from closed
-    doors. No new patch sites — the whole layer rides the existing
-    match-change, page-flip, and movement detours.
+  - **Routing consumer 2 — door-aware CTF rerouting with DIRECTIONAL
+    passability** (`cfg.DOOR_ROUTE_AWARE_ENABLED`): the single BFS field
+    always funnels a bot down the shortest path, so a bot pinned at closed
+    door A never diverted when door B (an alternative route) opened —
+    live-reported. `build_edge_doors` (once per match from `detour_df90`;
+    doors, openers and graph are static) records per graph edge the nearest
+    door within `DOOR_EDGE_RADIUS_SQ` of the edge SEGMENT into `edge_door[]`
+    AND computes `edge_pass[]` — per-edge, PER-TEAM from-i/from-j bits
+    (bits0-1 team0, bits2-3 team1) saying whether that team's bot could OPEN
+    the door when closed. The bits come from the parsed opener topology
+    (`door_data.py`): a closed door is traversable from side S for team T
+    iff a BOT-USABLE opener usable by T (walk-in touching/pass-through
+    trigger, authored active — self-trigger walk-up doors, one-side
+    proximity volumes, arming triggers that CActivateAction the "Dooropening
+    poly" pads; NOT collide switches / spawn triggers / relays / timers)
+    lies on side S (sign of `dot(opener-door, node-door) + 1.0`; the bias
+    makes an opener ON the door grant both sides). Opener actions are
+    `COpenDoorAction` AND `CToggleDoorAction` (the Torture Chamber pillar
+    walls and Doom ship light walls are switch-TOGGLED); `#a-b#` template
+    targets (`lights #1-13#`) expand to the numbered door instances; openers
+    wrapped in a same-team conditional (CConditionalAction whose Try is
+    CIsOnSameTeamAction) are restricted to the part's `Team Number` — Doom
+    ship's team doors are openable only by their own team. Doors with NO
+    authored opener of any kind are engine bump-open ⇒ both sides, both
+    teams; doors with only non-bot-usable openers (switch-toggled pillar
+    walls, spawn doors, timer jaws) are impassable while closed until live
+    state flips them. `build_flag_routes` fills TWO open fields (team-major
+    `flag_dist_open`, row = team*FLAG_ROUTE_MAX + base) via the shared
+    `bfs_run` body — traversing a closed-door edge only in directions that
+    team can open (BFS expands u→v = bot walks v→u, so the gate tests side
+    v's bit through `door_mask_i/j = 1/2 << team*2`). `ctf_next_hop` selects
+    the field and masks by `bot_team[slot]` and applies the same directional
+    gate on the direct step (from = cur); when the current node cannot reach
+    the goal at all it falls back to the FULL field, i.e. the old
+    walk-at-the-door behaviour. `door_dirty` from the per-frame refresh
+    triggers `rebuild_open_routes` (both team fields; route nodes/full field
+    are static) from the page-flip hook, debounced by
+    `DOOR_ROUTE_REBUILD_COOLDOWN_FRAMES`. Offline-simulated on the shipped
+    graphs: Hydroplant's four one-way doors classify inside-passable only;
+    Torture Chamber's bases seal at 12-16/29 nodes with the pillars closed
+    and open to 28/29 when one gate is switched open (the live-reported
+    reroute scenario); Doom ship's team doors split by team. No new patch
+    sites.
 - General world-entity enumeration (`detours/entity_scan.py:scan_entities`,
   gated by `cfg.SCAN_ENTITIES_ENABLED`). The long-standing blocker for object
   detection was that there is no flat entity list: `mgr+0x290` is players,
@@ -561,6 +582,14 @@ Older emitted labels or disabled detours are not active unless they appear in
 4. Never modify `Zax.exe.bak`.
 5. The IDB does not contain `.zaxbot`; inspect built hook bytes from
    `Zax.exe` at raw offset `0x231000`.
+6. `fnstsw ax` OVERWRITES AX. In any FPU-compare loop (`fcomp` +
+   `fnstsw ax; sahf`), EAX must be dead or saved around the readout —
+   `build_edge_doors` once kept the vertex pointer in EAX through it, so
+   every door after the first was measured against a corrupted pointer and
+   only 1 of 8 Torture Chamber gate edges bound (bots ignored door state;
+   found via the `door_*`/`edge_*` R-snapshot chunks, fixed with
+   `push eax / fnstsw ax; sahf / pop eax` — pop preserves EFLAGS). Prefer
+   `fcomip` (sets EFLAGS directly, no AX) when the stack order allows.
 
 ## Open work
 
@@ -599,15 +628,16 @@ Older emitted labels or disabled detours are not active unless they appear in
   routing.
 - Populate or hook DirectPlay player data so PC2 sees chosen bot names
   (and team colors in CTF/SK).
-- Door awareness — DETECTION + REROUTING DONE (see the door bullet in
-  "Current state" and the `door-runtime-model` memory): static positions from
-  Data.dat, per-frame open/closed via the cached-entity SOLID readback,
-  overlay markers, failed-edge fast retry, and door-aware CTF rerouting
-  (open-field BFS with full-field fallback). Remaining: SWITCH detection and
-  switch-seeking (arming-side topology: "Dooropening poly" pads, one-side
-  proximity triggers, wall switches — authoring pattern documented in the
-  memory, parse deliberately deferred), directional one-way door edges, and
-  finding the built-in touch-open message SENDER (Torture Chamber's 43
-  CDoorAIs have zero door actions) before any "bots open far doors" work.
-  Do NOT blanket-wake door triggers near bots — same hazard class as the
-  checker re-arm bug.
+- Door awareness — DETECTION + DIRECTIONAL REROUTING DONE (see the door
+  bullet in "Current state" and the `door-runtime-model` memory): static
+  positions + opener topology from Data.dat, per-frame open/closed via the
+  cached-entity SOLID readback, overlay markers, failed-edge fast retry, and
+  door-aware CTF rerouting (directional open-field BFS with full-field
+  fallback; one-way doors traversable only from their opener side).
+  Remaining: SWITCH-SEEKING (walk to a CollideTriggerAI wall switch and
+  trigger it — switches are parsed but deliberately not counted as
+  bot-usable openers; on switch-only maps like Torture Chamber a bot sealed
+  in with the flag still has no self-serve exit), and finding the built-in
+  touch-open message SENDER before any "bots open far doors" work. Do NOT
+  blanket-wake door triggers near bots — same hazard class as the checker
+  re-arm bug.

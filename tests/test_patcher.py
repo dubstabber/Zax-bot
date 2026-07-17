@@ -301,6 +301,50 @@ class PortalDataTests(unittest.TestCase):
         self.assertLessEqual(max(len(p) for p in maps.values()),
                              cfg.DOOR_TABLE_MAX)
 
+    def test_door_opener_topology_is_extracted(self):
+        # Openers drive DIRECTIONAL closed-door passability: bot-usable
+        # walk-in triggers only (touching/pass-through, authored active;
+        # collide switches / spawn triggers / relays / timers excluded).
+        from zaxbot.door_data import (
+            resolve_door_topology, DOOR_FLAG_HAS_ANY_OPENER,
+        )
+
+        topo = {m.map_name: m for m in resolve_door_topology()}
+        # Hydroplant's one-way doors: exactly one arming walk-in trigger per
+        # door (the "Inside get out poly" volumes, both teams); every door has
+        # SOME authored opener so none is treated as bump-open.
+        hydro = topo['Levels/Multiplayer/DeathMatch/Hydroplant Bouncefest.zax']
+        self.assertEqual(len(hydro.doors), 4)
+        self.assertEqual(sorted(o[2] for o in hydro.openers), [0, 1, 2, 3])
+        self.assertTrue(all(o[3] == 0x3 for o in hydro.openers))
+        self.assertTrue(all(f & DOOR_FLAG_HAS_ANY_OPENER for f in hydro.flags))
+        # Torture Chamber's pillar walls are toggled by CollideTriggerAI wall
+        # switches (CToggleDoorAction) — every door HAS an authored opener,
+        # none of them bot-usable: impassable while closed, no bump-open.
+        torture = topo['Levels/Multiplayer/CTF/Torture Chamber.zax']
+        self.assertEqual(len(torture.doors), 43)
+        self.assertEqual(torture.openers, ())
+        self.assertTrue(all(f & DOOR_FLAG_HAS_ANY_OPENER for f in torture.flags))
+        # Doom ship doors are their own walk-up triggers (Door Name=$trigger)
+        # wrapped in a same-team conditional: each self-opener binds to its own
+        # door instance and is restricted to one team. The 'lights #1-13#'
+        # template targets must expand so the light walls are NOT bump-open.
+        doom = topo['Levels/Multiplayer/CTF/Doom ship.zax']
+        self.assertEqual(len(doom.openers), 4)
+        for (ox, oy, di, mask) in doom.openers:
+            self.assertEqual((ox, oy), doom.doors[di])
+            self.assertIn(mask, (0x1, 0x2))
+        self.assertTrue(all(f & DOOR_FLAG_HAS_ANY_OPENER for f in doom.flags))
+        # Temple Deathgrip's timer-cycled spikes use '#1-6#' templates too.
+        grip = topo['Levels/Multiplayer/DeathMatch/Temple Deathgrip.zax']
+        self.assertTrue(all(f & DOOR_FLAG_HAS_ANY_OPENER for f in grip.flags))
+        self.assertEqual(grip.openers, ())
+        # Capacity guards for the static scratch tables.
+        self.assertLessEqual(sum(len(m.openers) for m in topo.values()),
+                             cfg.DOOR_OPENER_STATIC_MAX)
+        self.assertLessEqual(max(len(m.openers) for m in topo.values()),
+                             cfg.DOOR_OPENER_TABLE_MAX)
+
 
 class PatcherTests(unittest.TestCase):
     def test_patch_manifest_names_and_targets_are_valid(self):
@@ -422,8 +466,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = 'cf0774c0e53b600ed9d6710400d2d3e6079e370c914d63287e841ef79dabb28a'
-    HOOK_ENTRY_SIZE = 24752
+    SECTION_SHA256 = 'cdc55fae84f2511a484097951af38f06bc37e27908e09fbfde2914d94465c35b'
+    HOOK_ENTRY_SIZE = 26037
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

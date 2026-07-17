@@ -470,6 +470,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         and layout.has_field('route_block_door')
         and layout.has_field('door_static_maps')
         and layout.has_field('door_static_points')
+        and layout.has_field('door_static_flags')
+        and layout.has_field('door_static_openers')
+        and layout.has_field('door_flags')
+        and layout.has_field('door_opener')
+        and layout.has_field('door_opener_count')
     ):
         a.label('load_doors')
         a.raw(b'\xC3')
@@ -488,18 +493,25 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         door_static_map_count_va  = layout.va('door_static_map_count')
         door_static_maps_va       = layout.va('door_static_maps')
         door_static_points_va     = layout.va('door_static_points')
+        door_static_flags_va      = layout.va('door_static_flags')
+        door_static_openers_va    = layout.va('door_static_openers')
+        door_flags_va             = layout.va('door_flags')
+        door_opener_va            = layout.va('door_opener')
+        door_opener_count_va      = layout.va('door_opener_count')
         door_wedge_radius_va      = layout.va('door_wedge_radius_sq')
         door_tmp_d2_va            = layout.va('door_tmp_d2')
         door_tmp_best_va          = layout.va('door_tmp_best')
         door_dirty_va             = layout.va('door_dirty')
         door_rebuild_cd_va        = layout.va('door_rebuild_cd')
         bot_slot_tmp2_va          = layout.va('bot_slot_tmp')
-        door_map_stride           = cfg.DOOR_MAP_NAME_SLOT + 8
+        # Map records carry two (count, first) pairs: points then openers.
+        door_map_stride           = cfg.DOOR_MAP_NAME_SLOT + 16
         door_slots                = max(1, cfg.DOOR_ENTITY_SLOTS_PER_DOOR)
 
         a.label('load_doors')
         a.raw(b'\x60')                                              # pushad
         a.raw(b'\xC7\x05' + le32(door_count_va) + le32(0))          # door_count = 0
+        a.raw(b'\xC7\x05' + le32(door_opener_count_va) + le32(0))   # opener_count = 0
         a.raw(b'\xC7\x05' + le32(door_dirty_va) + le32(0))          # door_dirty = 0
         a.raw(b'\xC7\x05' + le32(door_rebuild_cd_va) + le32(0))     # rebuild cooldown = 0
         a.raw(b'\xBF' + le32(door_blocked_va))                      # edi = door_blocked
@@ -510,6 +522,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xB9' + le32(cfg.DOOR_TABLE_MAX * door_slots))      # ecx = cache slots
         a.raw(b'\x31\xC0')                                          # eax = 0
         a.raw(b'\xF3\xAB')                                          # rep stosd
+        a.raw(b'\xBF' + le32(door_flags_va))                        # edi = door_flags (bytes)
+        a.raw(b'\xB9' + le32(cfg.DOOR_TABLE_MAX))                   # ecx = live cap
+        a.raw(b'\x31\xC0')                                          # eax = 0
+        a.raw(b'\xF3\xAA')                                          # rep stosb
         a.raw(b'\xBF' + le32(route_block_door_va))                  # edi = route_block_door
         a.raw(b'\xB9' + le32(cfg.MAX_BOT_SLOTS))                    # ecx = bot slots
         a.raw(b'\x83\xC8\xFF')                                      # or eax, -1
@@ -551,6 +567,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.label('ldo_match')
         # DOOR_TABLE_MAX (192) exceeds a sign-extended imm8, so the live cap
         # compare must use the imm32 form (81 /7), unlike the portal/flag caps.
+        a.raw(b'\x89\xFD')                                          # ebp = map record (name done)
         a.raw(b'\x8B\x4F' + bytes([cfg.DOOR_MAP_NAME_SLOT]))        # ecx = point count
         a.raw(b'\x81\xF9' + le32(cfg.DOOR_TABLE_MAX))               # cmp ecx, live cap
         a.jbe('ldo_count_ok')
@@ -558,12 +575,31 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.label('ldo_count_ok')
         a.raw(b'\x89\x0D' + le32(door_count_va))                    # door_count = ecx
         a.raw(b'\x85\xC9'); a.jz('ldo_done')
-        a.raw(b'\x8B\x77' + bytes([cfg.DOOR_MAP_NAME_SLOT + 4]))    # esi = first point idx
-        a.raw(b'\xC1\xE6\x03')                                      # esi *= 8
-        a.raw(b'\x81\xC6' + le32(door_static_points_va))            # esi = &static_points[first]
+        a.raw(b'\x8B\x5D' + bytes([cfg.DOOR_MAP_NAME_SLOT + 4]))    # ebx = first point idx
+        # Points: src = &static_points[first*8], n = count*2 dwords.
+        a.raw(b'\x8D\x34\xDD' + le32(door_static_points_va))        # lea esi, [ebx*8 + points]
         a.raw(b'\xBF' + le32(door_table_va))                        # edi = live door_table
         a.raw(b'\xD1\xE1')                                          # ecx *= 2 dwords per point
         a.raw(b'\xFC\xF3\xA5')                                      # cld; rep movsd
+        # Flags: src = &static_flags[first], n = door_count bytes.
+        a.raw(b'\x8B\x0D' + le32(door_count_va))                    # ecx = door_count
+        a.raw(b'\x8D\xB3' + le32(door_static_flags_va))             # lea esi, [ebx + flags]
+        a.raw(b'\xBF' + le32(door_flags_va))                        # edi = live door_flags
+        a.raw(b'\xF3\xA4')                                          # rep movsb
+        # Openers: count/first from the second record pair.
+        a.raw(b'\x8B\x4D' + bytes([cfg.DOOR_MAP_NAME_SLOT + 8]))    # ecx = opener count
+        a.raw(b'\x83\xF9' + bytes([cfg.DOOR_OPENER_TABLE_MAX]))     # cmp ecx, live cap
+        a.jbe('ldo_op_count_ok')
+        a.raw(b'\xB9' + le32(cfg.DOOR_OPENER_TABLE_MAX))            # cap live count
+        a.label('ldo_op_count_ok')
+        a.raw(b'\x89\x0D' + le32(door_opener_count_va))             # opener_count = ecx
+        a.raw(b'\x85\xC9'); a.jz('ldo_done')
+        a.raw(b'\x8B\x5D' + bytes([cfg.DOOR_MAP_NAME_SLOT + 12]))   # ebx = first opener idx
+        a.raw(b'\xC1\xE3\x04')                                      # ebx *= 16 (record stride)
+        a.raw(b'\x8D\xB3' + le32(door_static_openers_va))           # lea esi, [ebx + openers]
+        a.raw(b'\xBF' + le32(door_opener_va))                       # edi = live door_opener
+        a.raw(b'\xC1\xE1\x02')                                      # ecx = count*4 dwords
+        a.raw(b'\xF3\xA5')                                          # rep movsd
 
         a.label('ldo_done')
         a.raw(b'\x61')                                              # popad
@@ -688,12 +724,17 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
             bed_best_va    = layout.va('bed_best')
             edge_radius_va = layout.va('door_edge_radius_sq')
 
+            edge_pass_va = layout.va('edge_pass')
             a.label('build_edge_doors')
             a.raw(b'\x60')                                          # pushad
             a.raw(b'\xBF' + le32(edge_door_va))                     # edi = edge_door
             a.raw(b'\xB9' + le32(cfg.OVERLAY_EDGE_MAX))             # ecx = edge cap
             a.raw(b'\x83\xC8\xFF')                                  # or eax, -1
             a.raw(b'\xFC\xF3\xAB')                                  # cld; rep stosd
+            a.raw(b'\xBF' + le32(edge_pass_va))                     # edi = edge_pass (bytes)
+            a.raw(b'\xB9' + le32(cfg.OVERLAY_EDGE_MAX))             # ecx = edge cap
+            a.raw(b'\xB0\x0F')                                      # al = 0x0F (both ways, both teams)
+            a.raw(b'\xF3\xAA')                                      # rep stosb
             a.raw(b'\x83\x3D' + le32(door_count_va) + b'\x00')      # any doors?
             a.jz('bed_done')
             a.raw(b'\x83\x3D' + le32(ecount_va) + b'\x00')          # any edges?
@@ -766,7 +807,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
             a.raw(b'\xD9\x15' + le32(bed_d2_va))                    # fst d2 (keep)
             a.raw(b'\xD8\x1D' + le32(bed_best_va))                  # fcomp best (pop d2)
             a.raw(b'\xDD\xD8')                                      # fstp st0 (drop t)
+            # EAX (= &verts[i], the P pointer) must survive this compare:
+            # fnstsw overwrites AX, so every door AFTER the first was measured
+            # against a corrupted P — live dump on Torture Chamber showed only
+            # ONE bound edge (to door 0, the sole iteration with a valid P)
+            # instead of the expected eight, which made the open-field BFS gate
+            # nothing and bots ignore door state entirely. pop does not touch
+            # EFLAGS, so the jae still sees sahf's comparison bits.
+            a.raw(b'\x50')                                          # push eax (save P)
             a.raw(b'\xDF\xE0\x9E')                                  # fnstsw ax; sahf
+            a.raw(b'\x58')                                          # pop eax (restore P)
             a.jae('bed_door_next')                                  # d2 >= best
             a.raw(b'\x8B\x0D' + le32(bed_d2_va))                    # best = d2
             a.raw(b'\x89\x0D' + le32(bed_best_va))
@@ -778,6 +828,85 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
             a.raw(b'\x83\xFB\xFF')                                  # any door bound?
             a.jz('bed_edge_next')
             a.raw(b'\x89\x1C\xB5' + le32(edge_door_va))             # edge_door[e] = ebx
+            # --- Directional per-team pass bits for the bound door --------
+            # No authored opener at all -> engine bump-open -> both sides,
+            # both teams (0x0F). Otherwise: bits0-1 = team 0 from-i/from-j,
+            # bits2-3 = team 1 — a bot-usable opener usable by that team lies
+            # on that node's side of the door (sign of dot(o-D, node-D) + 1.0;
+            # the bias makes an opener exactly ON the door — self-trigger
+            # walk-up doors — grant both sides). Openers only cover walk-in
+            # triggers, so a switch/spawn/timer-only door yields 0 = fully
+            # blocked while closed (the Torture Chamber pillar walls).
+            # EAX = &verts[i], EDX = &verts[j] are still live from the
+            # segment math; EBP is a free pushad temp.
+            a.raw(b'\xF6\x83' + le32(door_flags_va) + bytes([0x01]))  # test byte [door_flags+ebx], HAS_ANY
+            a.jz('bed_pass_both')
+            a.raw(b'\x31\xC9')                                      # ecx = pass bits = 0
+            a.raw(b'\x31\xFF')                                      # edi = opener idx
+            a.label('bed_op_loop')
+            a.raw(b'\x3B\x3D' + le32(door_opener_count_va))         # cmp edi, [opener_count]
+            a.jae('bed_pass_store')
+            a.raw(b'\x89\xFD')                                      # ebp = edi
+            a.raw(b'\xC1\xE5\x04')                                  # ebp *= 16 (record stride)
+            a.raw(b'\x39\x9D' + le32(door_opener_va + 8))           # opener.door == ebx?
+            a.jnz('bed_op_next')
+            # s_i = dot(o - D, verts[i] - D) + 1.0 ; sign clear -> i side
+            a.raw(b'\xD9\x85' + le32(door_opener_va))               # fld o.x
+            a.raw(b'\xD8\x24\xDD' + le32(door_table_va))            # fsub D.x
+            a.raw(b'\xD9\x00')                                      # fld [eax] (i.x)
+            a.raw(b'\xD8\x24\xDD' + le32(door_table_va))            # fsub D.x
+            a.raw(b'\xDE\xC9')                                      # fmulp
+            a.raw(b'\xD9\x85' + le32(door_opener_va + 4))           # fld o.y
+            a.raw(b'\xD8\x24\xDD' + le32(door_table_va + 4))        # fsub D.y
+            a.raw(b'\xD9\x40\x04')                                  # fld [eax+4] (i.y)
+            a.raw(b'\xD8\x24\xDD' + le32(door_table_va + 4))        # fsub D.y
+            a.raw(b'\xDE\xC9')                                      # fmulp
+            a.raw(b'\xDE\xC1')                                      # faddp -> dot
+            a.raw(b'\xD9\xE8'); a.raw(b'\xDE\xC1')                  # fld1; faddp (+1.0 bias)
+            a.raw(b'\xD9\x1D' + le32(bed_d2_va))                    # fstp s_i
+            a.raw(b'\xF7\x05' + le32(bed_d2_va) + le32(0x80000000)) # sign set?
+            a.jnz('bed_op_no_i')
+            a.raw(b'\xF6\x85' + le32(door_opener_va + 12) + b'\x01')  # opener usable by team0?
+            a.jz('bed_op_i_t1')
+            a.raw(b'\x83\xC9\x01')                                  # pass |= team0 from-i
+            a.label('bed_op_i_t1')
+            a.raw(b'\xF6\x85' + le32(door_opener_va + 12) + b'\x02')  # opener usable by team1?
+            a.jz('bed_op_no_i')
+            a.raw(b'\x83\xC9\x04')                                  # pass |= team1 from-i
+            a.label('bed_op_no_i')
+            # s_j with verts[j] (EDX)
+            a.raw(b'\xD9\x85' + le32(door_opener_va))               # fld o.x
+            a.raw(b'\xD8\x24\xDD' + le32(door_table_va))            # fsub D.x
+            a.raw(b'\xD9\x02')                                      # fld [edx] (j.x)
+            a.raw(b'\xD8\x24\xDD' + le32(door_table_va))            # fsub D.x
+            a.raw(b'\xDE\xC9')                                      # fmulp
+            a.raw(b'\xD9\x85' + le32(door_opener_va + 4))           # fld o.y
+            a.raw(b'\xD8\x24\xDD' + le32(door_table_va + 4))        # fsub D.y
+            a.raw(b'\xD9\x42\x04')                                  # fld [edx+4] (j.y)
+            a.raw(b'\xD8\x24\xDD' + le32(door_table_va + 4))        # fsub D.y
+            a.raw(b'\xDE\xC9')                                      # fmulp
+            a.raw(b'\xDE\xC1')                                      # faddp -> dot
+            a.raw(b'\xD9\xE8'); a.raw(b'\xDE\xC1')                  # fld1; faddp
+            a.raw(b'\xD9\x1D' + le32(bed_d2_va))                    # fstp s_j
+            a.raw(b'\xF7\x05' + le32(bed_d2_va) + le32(0x80000000)) # sign set?
+            a.jnz('bed_op_no_j')
+            a.raw(b'\xF6\x85' + le32(door_opener_va + 12) + b'\x01')  # team0?
+            a.jz('bed_op_j_t1')
+            a.raw(b'\x83\xC9\x02')                                  # pass |= team0 from-j
+            a.label('bed_op_j_t1')
+            a.raw(b'\xF6\x85' + le32(door_opener_va + 12) + b'\x02')  # team1?
+            a.jz('bed_op_no_j')
+            a.raw(b'\x83\xC9\x08')                                  # pass |= team1 from-j
+            a.label('bed_op_no_j')
+            a.raw(b'\x83\xF9\x0F')                                  # every bit already?
+            a.jz('bed_pass_store')
+            a.label('bed_op_next')
+            a.raw(b'\x47')                                          # ++opener
+            a.jmp('bed_op_loop')
+            a.label('bed_pass_both')
+            a.raw(b'\xB9\x0F\x00\x00\x00')                          # pass = 0x0F
+            a.label('bed_pass_store')
+            a.raw(b'\x88\x0C\x35' + le32(edge_pass_va))             # edge_pass[e] = cl
             a.label('bed_edge_next')
             a.raw(b'\x46')                                          # ++edge
             a.jmp('bed_edge_loop')

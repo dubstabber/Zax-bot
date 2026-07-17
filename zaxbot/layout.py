@@ -185,6 +185,8 @@ def build_scratch_layout(
     door_static_point_max=0,
     door_map_name_slot=0,
     door_entity_slots=3,
+    door_opener_table_max=0,
+    door_opener_static_max=0,
 ):
     BOT_STATE_BASE = 0x180
     MAX_BOT_SLOTS = 16
@@ -1031,7 +1033,10 @@ def build_scratch_layout(
     door_static_map_max_capped = max(0, door_static_map_max)
     door_static_point_max_capped = max(0, door_static_point_max)
     door_name_slot_capped = max(0, door_map_name_slot)
-    door_map_stride = door_name_slot_capped + 8
+    door_opener_table_max_capped = max(0, door_opener_table_max)
+    door_opener_static_max_capped = max(0, door_opener_static_max)
+    # Door map records carry TWO (count, first) pairs: points and openers.
+    door_map_stride = door_name_slot_capped + 16
     if door_table_max_capped > 0:
         door_base = flag_static_base
         overlay_fields.extend([
@@ -1080,6 +1085,52 @@ def build_scratch_layout(
                 'door: static float[2] point table parsed from Data.dat',
             ))
             door_static_base += door_static_point_max_capped * 8
+            overlay_fields.append(ScratchField(
+                'door_static_flags', door_static_base,
+                door_static_point_max_capped,
+                'door: per-static-point flag byte (bit0 = has ANY authored opener)',
+            ))
+            door_static_base += door_static_point_max_capped
+        if door_opener_static_max_capped > 0:
+            overlay_fields.append(ScratchField(
+                'door_static_openers', door_static_base,
+                door_opener_static_max_capped * 16,
+                'door: static (x f32, y f32, door_idx u32, team_mask u32) opener records',
+            ))
+            door_static_base += door_opener_static_max_capped * 16
+        if door_opener_table_max_capped > 0:
+            overlay_fields.extend([
+                ScratchField('door_opener_count', door_static_base, 0x04,
+                             'door: live opener records for the active map'),
+                ScratchField('door_opener', door_static_base + 0x04,
+                             door_opener_table_max_capped * 16,
+                             'door: live (x, y, door_idx, team_mask) bot-usable opener records'),
+                ScratchField('door_flags', door_static_base + 0x04 + door_opener_table_max_capped * 16,
+                             door_table_max_capped,
+                             'door: live per-door flag byte (bit0 = has ANY authored opener)'),
+                ScratchField('edge_pass',
+                             door_static_base + 0x04 + door_opener_table_max_capped * 16
+                             + door_table_max_capped,
+                             max(1, overlay_edge_max_capped),
+                             'door: per-edge byte — bits0-1 team0 / bits2-3 team1 from-i/from-j closed-door traversability'),
+                ScratchField('cnh_blk',
+                             door_static_base + 0x04 + door_opener_table_max_capped * 16
+                             + door_table_max_capped + max(1, overlay_edge_max_capped),
+                             0x04,
+                             'door: per-edge blocked-door spill (bfs_run / ctf_next_hop temp)'),
+                ScratchField('door_mask_i',
+                             door_static_base + 0x08 + door_opener_table_max_capped * 16
+                             + door_table_max_capped + max(1, overlay_edge_max_capped),
+                             0x04,
+                             'door: active from-i edge_pass mask (1 << team*2), set per bfs_run/next-hop'),
+                ScratchField('door_mask_j',
+                             door_static_base + 0x0C + door_opener_table_max_capped * 16
+                             + door_table_max_capped + max(1, overlay_edge_max_capped),
+                             0x04,
+                             'door: active from-j edge_pass mask (2 << team*2)'),
+            ])
+            door_static_base += (0x10 + door_opener_table_max_capped * 16
+                                 + door_table_max_capped + max(1, overlay_edge_max_capped))
 
         # --- Per-frame door state + door-aware routing -------------------
         # door_entity[] is the anchor-entity cache maintained by the periodic
@@ -1136,12 +1187,25 @@ def build_scratch_layout(
             ))
             door_dyn_base += overlay_edge_max_capped * 4
         if flag_route_max_capped > 0 and overlay_vertex_max_capped > 0:
+            # TEAM-MAJOR: row for (team, base) = (team*FLAG_ROUTE_MAX + base).
+            # Two fields because closed-door traversability is per-team
+            # (same-team-conditional walk-up doors).
             overlay_fields.append(ScratchField(
                 'flag_dist_open', door_dyn_base,
-                flag_route_max_capped * overlay_vertex_max_capped * 4,
-                'door: BFS hop-distance field skipping closed-door edges',
+                2 * flag_route_max_capped * overlay_vertex_max_capped * 4,
+                'door: per-team BFS hop-distance fields gating closed-door edges directionally',
             ))
-            door_dyn_base += flag_route_max_capped * overlay_vertex_max_capped * 4
+            door_dyn_base += 2 * flag_route_max_capped * overlay_vertex_max_capped * 4
+        # R-snapshot tags for the door-state diagnostic chunks (the fixed tag
+        # block at 0x730..0x8FF is full). Only present on door-enabled builds;
+        # the static writer and snapshot emitter both skip absent tag fields.
+        for tag_field in ('tag_door_cnt', 'tag_door_blk', 'tag_door_ent',
+                          'tag_door_dyn', 'tag_edge_door', 'tag_edge_pass'):
+            overlay_fields.append(ScratchField(
+                tag_field, door_dyn_base, 0x10,
+                'diag: door-state dump chunk tag',
+            ))
+            door_dyn_base += 0x10
 
     fields.extend(overlay_fields)
     return ScratchLayout(base_va, scratch_size, fields)

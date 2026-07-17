@@ -36,6 +36,14 @@ DUMP_TAGS = (
     ('tag_wp_map',  'wp_map'),
     ('tag_plasma_diag', 'plasma'),
     ('tag_pheat', 'pheat'),
+    # Door-state diagnostics (layout fields exist only on door-enabled builds;
+    # the writer loop skips tags whose field is absent).
+    ('tag_door_cnt', 'door_cnt'),
+    ('tag_door_blk', 'door_blk'),
+    ('tag_door_ent', 'door_ent'),
+    ('tag_door_dyn', 'door_dyn'),
+    ('tag_edge_door', 'edge_door'),
+    ('tag_edge_pass', 'edge_pass'),
 )
 
 
@@ -215,10 +223,13 @@ def write_flag_static_table(section, scratch_off, layout, flag_maps, map_name_sl
 
 
 def write_door_static_table(section, scratch_off, layout, door_maps, map_name_slot):
-    """Pack build-time door map records and point coordinates into scratch.
+    """Pack build-time door map records, point coordinates, per-door flags and
+    bot-usable opener records into scratch.
 
-    Mirror of ``write_portal_static_table`` for the door detection block.
-    Also zeroes the live tables and seeds the per-bot wedge-door latch to -1.
+    ``door_maps`` is a sequence of ``door_data.MapDoorData``. Each map record
+    is ``name[slot] | point_count u32 | point_first u32 | opener_count u32 |
+    opener_first u32``. Also zeroes the live tables and seeds the per-bot
+    wedge-door latch to -1.
     """
     if not layout.has_field('door_static_map_count'):
         return
@@ -226,7 +237,7 @@ def write_door_static_table(section, scratch_off, layout, door_maps, map_name_sl
     door_maps = tuple(door_maps or ())
     if not layout.has_field('door_static_maps') and door_maps:
         raise ValueError('door map data present but layout has no door_static_maps field')
-    if not layout.has_field('door_static_points') and any(points for _, points in door_maps):
+    if not layout.has_field('door_static_points') and any(m.doors for m in door_maps):
         raise ValueError('door point data present but layout has no door_static_points field')
 
     layout.write(section, scratch_off, 'door_count', struct.pack('<I', 0))
@@ -236,6 +247,16 @@ def write_door_static_table(section, scratch_off, layout, door_maps, map_name_sl
         layout.write(section, scratch_off, 'door_blocked', b'\x00' * layout.field('door_blocked').size)
     if layout.has_field('door_entity'):
         layout.write(section, scratch_off, 'door_entity', b'\x00' * layout.field('door_entity').size)
+    if layout.has_field('door_flags'):
+        layout.write(section, scratch_off, 'door_flags', b'\x00' * layout.field('door_flags').size)
+    if layout.has_field('door_opener_count'):
+        layout.write(section, scratch_off, 'door_opener_count', struct.pack('<I', 0))
+    if layout.has_field('door_opener'):
+        layout.write(section, scratch_off, 'door_opener', b'\x00' * layout.field('door_opener').size)
+    if layout.has_field('edge_pass'):
+        # 0x0F = traversable both ways for both teams (safe default until
+        # build_edge_doors runs).
+        layout.write(section, scratch_off, 'edge_pass', b'\x0F' * layout.field('edge_pass').size)
     if layout.has_field('route_block_door'):
         # -1 = "no door latched to this bot's failed-edge marker".
         field = layout.field('route_block_door')
@@ -247,43 +268,63 @@ def write_door_static_table(section, scratch_off, layout, door_maps, map_name_sl
         # -1 = unreachable, same sentinel as flag_dist.
         layout.write(section, scratch_off, 'flag_dist_open', b'\xFF' * layout.field('flag_dist_open').size)
 
+    map_stride = map_name_slot + 16
     map_capacity = 0
     point_capacity = 0
+    opener_capacity = 0
     if layout.has_field('door_static_maps'):
-        map_capacity = layout.field('door_static_maps').size // (map_name_slot + 8)
+        map_capacity = layout.field('door_static_maps').size // map_stride
     if layout.has_field('door_static_points'):
         point_capacity = layout.field('door_static_points').size // 8
+    if layout.has_field('door_static_openers'):
+        opener_capacity = layout.field('door_static_openers').size // 16
 
     if len(door_maps) > map_capacity:
         raise ValueError(
             f'door map table has {len(door_maps)} rows but scratch holds {map_capacity}'
         )
 
-    total_points = sum(len(points) for _, points in door_maps)
+    total_points = sum(len(m.doors) for m in door_maps)
     if total_points > point_capacity:
         raise ValueError(
             f'door point table has {total_points} rows but scratch holds {point_capacity}'
         )
+    total_openers = sum(len(m.openers) for m in door_maps)
+    if total_openers > opener_capacity:
+        raise ValueError(
+            f'door opener table has {total_openers} rows but scratch holds {opener_capacity}'
+        )
 
-    map_stride = map_name_slot + 8
     packed_maps = bytearray(map_capacity * map_stride)
     packed_points = bytearray(point_capacity * 8)
+    packed_flags = bytearray(point_capacity)
+    packed_openers = bytearray(opener_capacity * 16)
     point_index = 0
-    for map_idx, (map_name, points) in enumerate(door_maps):
-        name_bytes = map_name.encode('latin1')
+    opener_index = 0
+    for map_idx, m in enumerate(door_maps):
+        name_bytes = m.map_name.encode('latin1')
         if b'\x00' in name_bytes:
-            raise ValueError(f'door map name contains NUL: {map_name!r}')
+            raise ValueError(f'door map name contains NUL: {m.map_name!r}')
         if len(name_bytes) + 1 > map_name_slot:
             raise ValueError(
-                f'door map name too long for {map_name_slot}-byte slot: {map_name!r}'
+                f'door map name too long for {map_name_slot}-byte slot: {m.map_name!r}'
             )
+        if len(m.flags) != len(m.doors):
+            raise ValueError(f'door flags not parallel to doors for {m.map_name!r}')
         rec_off = map_idx * map_stride
         packed_maps[rec_off:rec_off + len(name_bytes)] = name_bytes
-        count_off = rec_off + map_name_slot
-        packed_maps[count_off:count_off + 8] = struct.pack('<II', len(points), point_index)
-        for x, y in points:
+        struct.pack_into('<IIII', packed_maps, rec_off + map_name_slot,
+                         len(m.doors), point_index, len(m.openers), opener_index)
+        for (x, y), fl in zip(m.doors, m.flags):
             struct.pack_into('<ff', packed_points, point_index * 8, float(x), float(y))
+            packed_flags[point_index] = fl & 0xFF
             point_index += 1
+        for (ox, oy, di, mask) in m.openers:
+            if not (0 <= di < len(m.doors)):
+                raise ValueError(f'opener door index {di} out of range for {m.map_name!r}')
+            struct.pack_into('<ffII', packed_openers, opener_index * 16,
+                             float(ox), float(oy), di, mask & 0x3)
+            opener_index += 1
 
     layout.write(section, scratch_off, 'door_static_map_count',
                  struct.pack('<I', len(door_maps)))
@@ -293,6 +334,10 @@ def write_door_static_table(section, scratch_off, layout, door_maps, map_name_sl
         layout.write(section, scratch_off, 'door_static_maps', bytes(packed_maps))
     if layout.has_field('door_static_points'):
         layout.write(section, scratch_off, 'door_static_points', bytes(packed_points))
+    if layout.has_field('door_static_flags'):
+        layout.write(section, scratch_off, 'door_static_flags', bytes(packed_flags))
+    if layout.has_field('door_static_openers'):
+        layout.write(section, scratch_off, 'door_static_openers', bytes(packed_openers))
 
 
 _FORCE_MODE_TABLE = {None: 0xFFFFFFFF, 'dm': 0, 'ctf': 1, 'sk': 2}
@@ -687,6 +732,8 @@ def write_static_scratch_data(
     layout.write(section, scratch_off, 'thdr', struct.pack('<I', dump_magic))
 
     for field_name, tag in DUMP_TAGS:
+        if not layout.has_field(field_name):
+            continue                     # door tags absent on doors-off builds
         layout.write(section, scratch_off, field_name, pack_tag(tag, dump_tag_len))
 
     write_bot_name_tables(

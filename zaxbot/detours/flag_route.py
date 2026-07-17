@@ -119,6 +119,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         cfg.DOOR_ROUTE_AWARE_ENABLED
         and layout.has_field('flag_dist_open')
         and layout.has_field('edge_door')
+        and layout.has_field('edge_pass')
+        and layout.has_field('cnh_blk')
         and layout.has_field('door_blocked')
         and layout.has_field('door_count')
         and layout.has_field('bfs_start')
@@ -128,11 +130,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     if door_route:
         flag_dist_open_va = layout.va('flag_dist_open')
         edge_door_va      = layout.va('edge_door')
+        edge_pass_va      = layout.va('edge_pass')
+        cnh_blk_va        = layout.va('cnh_blk')
+        door_mask_i_va    = layout.va('door_mask_i')
+        door_mask_j_va    = layout.va('door_mask_j')
         door_blocked_va   = layout.va('door_blocked')
         door_count_va     = layout.va('door_count')
         bfs_start_va      = layout.va('bfs_start')
         bfs_skip_va       = layout.va('bfs_skip')
         route_use_open_va = layout.va('route_use_open')
+        TEAM_ROW = RMAX * ROW          # open-field stride per team (team-major)
 
     # =====================================================================
     # build_flag_routes: per-match BFS distance field(s) from each flag base.
@@ -151,9 +158,9 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xFC')                                             # cld
     a.raw(b'\xF3\xAB')                                         # rep stosd
     if door_route:
-        # flag_dist_open[*] = 0xFFFFFFFF
+        # flag_dist_open[*] = 0xFFFFFFFF (both team fields)
         a.raw(b'\xBF' + le32(flag_dist_open_va))               # edi = flag_dist_open
-        a.raw(b'\xB9' + le32(RMAX * VMAX))                     # ecx = RMAX*VMAX
+        a.raw(b'\xB9' + le32(2 * RMAX * VMAX))                 # ecx = 2*RMAX*VMAX
         a.raw(b'\xB8\xFF\xFF\xFF\xFF')                         # eax = -1
         a.raw(b'\xF3\xAB')                                     # rep stosd
     # flag_route_node[*] = -1
@@ -194,12 +201,22 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xA3' + le32(bfs_disti_va))                   # bfs_disti = eax
         a.raw(b'\xC7\x05' + le32(bfs_skip_va) + le32(0))      # bfs_skip = 0
         a.call_lbl('bfs_run')
-        # OPEN field: disti = flag_dist_open + i*ROW, skip blocked-door edges.
+        # OPEN fields (one per team): closed-door edges pass only in
+        # directions that team can open.
+        a.raw(b'\xC7\x05' + le32(bfs_skip_va) + le32(1))      # bfs_skip = 1
         a.raw(b'\xA1' + le32(bfr_i_va))                       # eax = i
         a.raw(b'\x69\xC0' + le32(ROW))                        # imul eax, eax, ROW
-        a.raw(b'\x05' + le32(flag_dist_open_va))              # add eax, flag_dist_open
+        a.raw(b'\x05' + le32(flag_dist_open_va))              # team 0 row
         a.raw(b'\xA3' + le32(bfs_disti_va))                   # bfs_disti = eax
-        a.raw(b'\xC7\x05' + le32(bfs_skip_va) + le32(1))      # bfs_skip = 1
+        a.raw(b'\xC7\x05' + le32(door_mask_i_va) + le32(0x01))
+        a.raw(b'\xC7\x05' + le32(door_mask_j_va) + le32(0x02))
+        a.call_lbl('bfs_run')
+        a.raw(b'\xA1' + le32(bfr_i_va))                       # eax = i
+        a.raw(b'\x69\xC0' + le32(ROW))                        # imul eax, eax, ROW
+        a.raw(b'\x05' + le32(flag_dist_open_va + RMAX * VMAX * 4))  # team 1 row
+        a.raw(b'\xA3' + le32(bfs_disti_va))                   # bfs_disti = eax
+        a.raw(b'\xC7\x05' + le32(door_mask_i_va) + le32(0x04))
+        a.raw(b'\xC7\x05' + le32(door_mask_j_va) + le32(0x08))
         a.call_lbl('bfs_run')
         a.jmp('bfr_next')
     else:
@@ -295,16 +312,21 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.label('bfsr_edge_loop')
         a.raw(b'\x3B\x35' + le32(ecount_va))                # cmp esi, edge_count
         a.jae('bfsr_loop')                                  # edges done -> next BFS node
+        # Blocked-door precheck -> cnh_blk spill (the directional pass test
+        # needs the traversal side, which is only known after decoding the
+        # edge). Open doors and doorless edges are never gated.
+        a.raw(b'\xC7\x05' + le32(cnh_blk_va) + le32(0))     # cnh_blk = 0
         a.raw(b'\x83\x3D' + le32(bfs_skip_va) + b'\x00')    # skipping blocked edges?
-        a.jz('bfsr_no_skip')
+        a.jz('bfsr_no_blk')
         a.raw(b'\x8B\x04\xB5' + le32(edge_door_va))         # eax = edge_door[e]
         a.raw(b'\x83\xF8\xFF')                              # no door on this edge?
-        a.jz('bfsr_no_skip')
+        a.jz('bfsr_no_blk')
         a.raw(b'\x3B\x05' + le32(door_count_va))            # stale idx safety
-        a.jae('bfsr_no_skip')
+        a.jae('bfsr_no_blk')
         a.raw(b'\x83\x3C\x85' + le32(door_blocked_va) + b'\x00')  # door closed?
-        a.jnz('bfsr_edge_next')                             # yes -> edge unusable
-        a.label('bfsr_no_skip')
+        a.jz('bfsr_no_blk')
+        a.raw(b'\xC7\x05' + le32(cnh_blk_va) + le32(1))     # closed door on this edge
+        a.label('bfsr_no_blk')
         a.raw(b'\x8B\x04\xB5' + le32(edges_va))            # eax = edges[esi]
         a.raw(b'\x0F\xB7\xD8')                              # movzx ebx, ax (i)
         a.raw(b'\xC1\xE8\x10')                              # shr eax, 16   (j)
@@ -315,8 +337,23 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.jz('bfsr_edge_v_i')                               # j==u -> v = i (ebx)
         a.jmp('bfsr_edge_next')
         a.label('bfsr_edge_v_i')
+        # v = i. The bot walks v -> u (decreasing dist), so it enters this
+        # edge FROM node i: the closed door must be openable from i by the
+        # field's team (door_mask_i = 1 << team*2, set by the caller).
         a.raw(b'\x89\xD8')                                  # eax = ebx (v = i)
-        a.label('bfsr_edge_v_j')                           # v in eax
+        a.raw(b'\x83\x3D' + le32(cnh_blk_va) + b'\x00')
+        a.jz('bfsr_pass_ok')
+        a.raw(b'\x0F\xB6\x14\x35' + le32(edge_pass_va))     # movzx edx, edge_pass[e]
+        a.raw(b'\x85\x15' + le32(door_mask_i_va))           # test edx, [door_mask_i]
+        a.jz('bfsr_edge_next')
+        a.jmp('bfsr_pass_ok')
+        a.label('bfsr_edge_v_j')                           # v = j: bot enters from j
+        a.raw(b'\x83\x3D' + le32(cnh_blk_va) + b'\x00')
+        a.jz('bfsr_pass_ok')
+        a.raw(b'\x0F\xB6\x14\x35' + le32(edge_pass_va))     # movzx edx, edge_pass[e]
+        a.raw(b'\x85\x15' + le32(door_mask_j_va))           # test edx, [door_mask_j]
+        a.jz('bfsr_edge_next')
+        a.label('bfsr_pass_ok')
         a.raw(b'\x3B\x05' + le32(vcount_va))               # cmp eax, vertex_count
         a.jae('bfsr_edge_next')                            # out of range
         a.raw(b'\x8B\x15' + le32(bfs_disti_va))           # edx = disti
@@ -346,7 +383,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.label('rebuild_open_routes')
         a.raw(b'\x60')                                        # pushad
         a.raw(b'\xBF' + le32(flag_dist_open_va))              # edi = flag_dist_open
-        a.raw(b'\xB9' + le32(RMAX * VMAX))                    # ecx = RMAX*VMAX
+        a.raw(b'\xB9' + le32(2 * RMAX * VMAX))                # ecx = both team fields
         a.raw(b'\xB8\xFF\xFF\xFF\xFF')                        # eax = -1
         a.raw(b'\xFC\xF3\xAB')                                # cld; rep stosd
         a.raw(b'\xA1' + le32(vcount_va))                      # eax = vertex_count
@@ -366,9 +403,20 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x83\xFB\xFF')                                # no node?
         a.jz('ror_next')
         a.raw(b'\x89\x1D' + le32(bfs_start_va))               # bfs_start = node
+        # team 0 row
         a.raw(b'\x69\xC0' + le32(ROW))                        # imul eax, eax, ROW
-        a.raw(b'\x05' + le32(flag_dist_open_va))              # add eax, flag_dist_open
+        a.raw(b'\x05' + le32(flag_dist_open_va))              # + flag_dist_open
         a.raw(b'\xA3' + le32(bfs_disti_va))                   # bfs_disti = eax
+        a.raw(b'\xC7\x05' + le32(door_mask_i_va) + le32(0x01))
+        a.raw(b'\xC7\x05' + le32(door_mask_j_va) + le32(0x02))
+        a.call_lbl('bfs_run')
+        # team 1 row
+        a.raw(b'\xA1' + le32(bfr_i_va))                       # eax = i
+        a.raw(b'\x69\xC0' + le32(ROW))                        # imul eax, eax, ROW
+        a.raw(b'\x05' + le32(flag_dist_open_va + RMAX * VMAX * 4))
+        a.raw(b'\xA3' + le32(bfs_disti_va))                   # bfs_disti = eax
+        a.raw(b'\xC7\x05' + le32(door_mask_i_va) + le32(0x04))
+        a.raw(b'\xC7\x05' + le32(door_mask_j_va) + le32(0x08))
         a.call_lbl('bfs_run')
         a.label('ror_next')
         a.raw(b'\xFF\x05' + le32(bfr_i_va))                   # i++
@@ -520,17 +568,31 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
 
     a.raw(b'\x69\xC0' + le32(ROW))                       # imul eax, eax, ROW
     if door_route:
-        # Prefer the OPEN field (blocked-door edges excluded) so the bot
-        # routes AROUND closed doors whenever a door-free path exists. If the
-        # current node cannot reach the goal without passing a closed door
+        # Prefer this bot's TEAM open field (closed-door edges pass only in
+        # directions this team can open) so the bot routes AROUND doors it
+        # cannot use. If the current node cannot reach the goal that way
         # (open dist == -1), fall back to the FULL field — the old behaviour:
         # walk at the door and let the wedge machinery / approach-open work.
-        a.raw(b'\x89\xC7')                               # edi = row offset (saved)
+        a.raw(b'\x89\xC7')                               # edi = goal row (fallback base)
+        # team = bot_team[slot] & 1 -> masks + team field select
+        a.raw(b'\x8B\x0D' + le32(bot_slot_va))           # ecx = slot
+        a.raw(b'\x8B\x0C\x8D' + le32(bot_team_va))       # ecx = bot_team[slot]
+        a.raw(b'\x83\xE1\x01')                           # and ecx, 1 (defensive)
+        a.raw(b'\x01\xC9')                               # add ecx, ecx (cl = team*2)
+        a.raw(b'\xBA\x01\x00\x00\x00')                   # edx = 1
+        a.raw(b'\xD3\xE2')                               # shl edx, cl
+        a.raw(b'\x89\x15' + le32(door_mask_i_va))        # door_mask_i = 1 << team*2
+        a.raw(b'\x01\xD2')                               # edx += edx
+        a.raw(b'\x89\x15' + le32(door_mask_j_va))        # door_mask_j = 2 << team*2
+        a.raw(b'\x85\xC9')                               # team 1?
+        a.jz('cnh_team_row_ok')
+        a.raw(b'\x05' + le32(TEAM_ROW))                  # eax += team-1 field stride
+        a.label('cnh_team_row_ok')
         a.raw(b'\xC7\x05' + le32(route_use_open_va) + le32(1))
         a.raw(b'\x8D\xA8' + le32(flag_dist_open_va))     # lea ebp, [eax + flag_dist_open]
         a.raw(b'\x8B\x1D' + le32(route_cur_va))          # ebx = cur
         a.raw(b'\x8B\x4C\x9D\x00')                        # ecx = open_dist[cur]
-        a.raw(b'\x83\xF9\xFF')                            # reachable without doors?
+        a.raw(b'\x83\xF9\xFF')                            # reachable for this team?
         a.jnz('cnh_field_ok')
         a.raw(b'\xC7\x05' + le32(route_use_open_va) + le32(0))
         a.raw(b'\x8D\xAF' + le32(flag_dist_va))          # lea ebp, [edi + flag_dist]
@@ -554,9 +616,12 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x3B\x35' + le32(ecount_va))                # cmp esi, edge_count
     a.jae('cnh_scan_done')
     if door_route:
-        # While scanning the OPEN field, never step across a blocked-door
-        # edge: a neighbour can carry a smaller open-distance via ANOTHER
-        # path while the direct cur->nb edge is the closed door itself.
+        # While scanning the OPEN field, a closed-door edge is usable only in
+        # a direction the bot could OPEN the door from (a neighbour can carry
+        # a smaller open-distance via ANOTHER path while the direct cur->nb
+        # edge is the closed door itself). Precheck spills to cnh_blk; the
+        # directional bit is tested after the edge is decoded (from = cur).
+        a.raw(b'\xC7\x05' + le32(cnh_blk_va) + le32(0))  # cnh_blk = 0
         a.raw(b'\x83\x3D' + le32(route_use_open_va) + b'\x00')
         a.jz('cnh_no_door_skip')
         a.raw(b'\x8B\x04\xB5' + le32(edge_door_va))      # eax = edge_door[e]
@@ -565,19 +630,34 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x3B\x05' + le32(door_count_va))         # stale idx safety
         a.jae('cnh_no_door_skip')
         a.raw(b'\x83\x3C\x85' + le32(door_blocked_va) + b'\x00')
-        a.jnz('cnh_scan_next')                           # closed -> unusable edge
+        a.jz('cnh_no_door_skip')
+        a.raw(b'\xC7\x05' + le32(cnh_blk_va) + le32(1))  # closed door on this edge
         a.label('cnh_no_door_skip')
     a.raw(b'\x8B\x04\xB5' + le32(edges_va))            # eax = edges[esi]
     a.raw(b'\x0F\xB7\xF8')                              # movzx edi, ax (i)
     a.raw(b'\xC1\xE8\x10')                              # shr eax, 16   (j)
     a.raw(b'\x39\xDF')                                  # cmp edi, ebx (i == cur?)
-    a.jz('cnh_nb_j')                                    # nb = j (eax)
+    a.jz('cnh_nb_j')                                    # nb = j (eax); bot crosses FROM i
     a.raw(b'\x39\xD8')                                  # cmp eax, ebx (j == cur?)
-    a.jz('cnh_nb_i')                                    # nb = i (edi)
+    a.jz('cnh_nb_i')                                    # nb = i (edi); bot crosses FROM j
     a.jmp('cnh_scan_next')
     a.label('cnh_nb_i')
     a.raw(b'\x89\xF8')                                  # eax = edi (nb = i)
+    if door_route:
+        a.raw(b'\x83\x3D' + le32(cnh_blk_va) + b'\x00')
+        a.jz('cnh_pass_ok')
+        a.raw(b'\x0F\xB6\x3C\x35' + le32(edge_pass_va)) # movzx edi, edge_pass[e]
+        a.raw(b'\x85\x3D' + le32(door_mask_j_va))       # openable from j (cur side), this team?
+        a.jz('cnh_scan_next')
+        a.jmp('cnh_pass_ok')
     a.label('cnh_nb_j')                                # nb in eax
+    if door_route:
+        a.raw(b'\x83\x3D' + le32(cnh_blk_va) + b'\x00')
+        a.jz('cnh_pass_ok')
+        a.raw(b'\x0F\xB6\x3C\x35' + le32(edge_pass_va)) # movzx edi, edge_pass[e]
+        a.raw(b'\x85\x3D' + le32(door_mask_i_va))       # openable from i (cur side), this team?
+        a.jz('cnh_scan_next')
+        a.label('cnh_pass_ok')
     a.raw(b'\x3B\x05' + le32(vcount_va))               # cmp eax, vertex_count
     a.jae('cnh_scan_next')                             # out of range
     a.raw(b'\x8B\x7C\x85\x00')                          # edi = [ebp + eax*4] (nd = disti[nb])

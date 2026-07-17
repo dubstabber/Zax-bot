@@ -187,6 +187,36 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     emit_chunk(tag_ai_move_va,   b'\xB8' + le32(ai_move_src_va),  ai_move_dump_bytes, 'snap_skip_ai_move')
     emit_chunk(tag_hazard_va,    b'\xB8' + le32(hazard_src_va),         0x190, 'snap_skip_hazard')
 
+    # --- Door-state diagnostics (live-reroute debugging). One R press pins
+    # the whole chain: door_cnt proves load_doors matched the map (count +
+    # match/wedge radii); door_blk is the live open/closed readback the
+    # overlay rings and the open-field BFS consume; door_ent shows whether
+    # the periodic grid walk actually cached entities at each anchor (all
+    # zeros = position-match failure, the readback then never flips);
+    # door_dyn covers door_dirty/rebuild_cd/route_use_open/bfs spills
+    # (route_use_open = which field ctf_next_hop last scanned); edge_door /
+    # edge_pass pin the static per-match edge->door binding + directional
+    # pass bits. Prefixes: 48 doors / 64 edges — covers every shipped map's
+    # graph and all but Curse of the Temple's 186-door tail (Torture = 43).
+    if (layout.has_field('tag_door_cnt') and layout.has_field('door_count')
+            and layout.has_field('door_blocked')
+            and layout.has_field('door_entity')
+            and layout.has_field('door_dirty')):
+        emit_chunk(layout.va('tag_door_cnt'),
+                   b'\xB8' + le32(layout.va('door_count')), 0x24, 'snap_skip_door_cnt')
+        emit_chunk(layout.va('tag_door_blk'),
+                   b'\xB8' + le32(layout.va('door_blocked')), 0xC0, 'snap_skip_door_blk')
+        emit_chunk(layout.va('tag_door_ent'),
+                   b'\xB8' + le32(layout.va('door_entity')), 0x240, 'snap_skip_door_ent')
+        emit_chunk(layout.va('tag_door_dyn'),
+                   b'\xB8' + le32(layout.va('door_dirty')), 0x18, 'snap_skip_door_dyn')
+    if layout.has_field('tag_edge_door') and layout.has_field('edge_door'):
+        emit_chunk(layout.va('tag_edge_door'),
+                   b'\xB8' + le32(layout.va('edge_door')), 0x100, 'snap_skip_edge_door')
+    if layout.has_field('tag_edge_pass') and layout.has_field('edge_pass'):
+        emit_chunk(layout.va('tag_edge_pass'),
+                   b'\xB8' + le32(layout.va('edge_pass')), 0x40, 'snap_skip_edge_pass')
+
     # Waypoint-graph probe. wp_compute populates wp_diag_data[0..7]:
     #   [+0x00] MGR, [+0x04] WM, [+0x08] LV, [+0x0C] WPM,
     #   [+0x10] char count, [+0x14] layer_arr, [+0x18] LAY, [+0x1C] WPM_REAL.
