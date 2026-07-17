@@ -683,6 +683,21 @@ DOOR_ROUTE_REBUILD_COOLDOWN_FRAMES = 30
 # own team; unconditional openers carry mask 3.
 DOOR_OPENER_TABLE_MAX  = 48   # live per-map opener records
 DOOR_OPENER_STATIC_MAX = 96   # build-time records across all MP maps
+# PHYSICAL-STATE routing override. When True, the open-field BFS and
+# ctf_next_hop treat EVERY currently-closed door as impassable and route
+# AROUND it (using the live door_blocked[] state), ignoring the edge_pass
+# team-openability bits above. Rationale: a bot far from the host's camera
+# cannot open ANY door — the touch/switch triggers are camera-gated and never
+# fire — so routing a carrier THROUGH a team-openable-but-closed door stranded
+# it pressing a door that never opens until the host approached (live-reported
+# on Battle on the Ice: a team-1 carrier committed to the openable door on its
+# way home instead of the 12-hop door-free path). Routing around closed doors
+# and only USING them once they read open (the epoch reroute picks them up the
+# frame they flip) is robust regardless of camera distance and still honours
+# team gating (a closed enemy-team door is avoided either way). Set False to
+# restore the directional edge_pass behaviour (route through doors your team
+# could open) — only worthwhile once bots can trigger far doors themselves.
+DOOR_ROUTE_PHYSICAL_STATE = True
 
 # --- CTF flag routing (bots navigate the waypoint graph toward flags) ----
 # Master gate. When on and the active match is CTF with a graph + flags, bots

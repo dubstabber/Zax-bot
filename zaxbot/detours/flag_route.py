@@ -338,21 +338,30 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.jmp('bfsr_edge_next')
         a.label('bfsr_edge_v_i')
         # v = i. The bot walks v -> u (decreasing dist), so it enters this
-        # edge FROM node i: the closed door must be openable from i by the
-        # field's team (door_mask_i = 1 << team*2, set by the caller).
+        # edge FROM node i. PHYSICAL-STATE (cfg.DOOR_ROUTE_PHYSICAL_STATE): any
+        # closed door is impassable, route around it. Else directional: the
+        # closed door must be openable from i by the field's team
+        # (door_mask_i = 1 << team*2, set by the caller).
         a.raw(b'\x89\xD8')                                  # eax = ebx (v = i)
         a.raw(b'\x83\x3D' + le32(cnh_blk_va) + b'\x00')
-        a.jz('bfsr_pass_ok')
-        a.raw(b'\x0F\xB6\x14\x35' + le32(edge_pass_va))     # movzx edx, edge_pass[e]
-        a.raw(b'\x85\x15' + le32(door_mask_i_va))           # test edx, [door_mask_i]
-        a.jz('bfsr_edge_next')
-        a.jmp('bfsr_pass_ok')
-        a.label('bfsr_edge_v_j')                           # v = j: bot enters from j
-        a.raw(b'\x83\x3D' + le32(cnh_blk_va) + b'\x00')
-        a.jz('bfsr_pass_ok')
-        a.raw(b'\x0F\xB6\x14\x35' + le32(edge_pass_va))     # movzx edx, edge_pass[e]
-        a.raw(b'\x85\x15' + le32(door_mask_j_va))           # test edx, [door_mask_j]
-        a.jz('bfsr_edge_next')
+        if cfg.DOOR_ROUTE_PHYSICAL_STATE:
+            a.jnz('bfsr_edge_next')                         # closed door -> impassable
+            a.jmp('bfsr_pass_ok')
+            a.label('bfsr_edge_v_j')                        # v = j: bot enters from j
+            a.raw(b'\x83\x3D' + le32(cnh_blk_va) + b'\x00')
+            a.jnz('bfsr_edge_next')
+        else:
+            a.jz('bfsr_pass_ok')
+            a.raw(b'\x0F\xB6\x14\x35' + le32(edge_pass_va)) # movzx edx, edge_pass[e]
+            a.raw(b'\x85\x15' + le32(door_mask_i_va))       # test edx, [door_mask_i]
+            a.jz('bfsr_edge_next')
+            a.jmp('bfsr_pass_ok')
+            a.label('bfsr_edge_v_j')                        # v = j: bot enters from j
+            a.raw(b'\x83\x3D' + le32(cnh_blk_va) + b'\x00')
+            a.jz('bfsr_pass_ok')
+            a.raw(b'\x0F\xB6\x14\x35' + le32(edge_pass_va)) # movzx edx, edge_pass[e]
+            a.raw(b'\x85\x15' + le32(door_mask_j_va))       # test edx, [door_mask_j]
+            a.jz('bfsr_edge_next')
         a.label('bfsr_pass_ok')
         a.raw(b'\x3B\x05' + le32(vcount_va))               # cmp eax, vertex_count
         a.jae('bfsr_edge_next')                            # out of range
@@ -652,18 +661,25 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x89\xF8')                                  # eax = edi (nb = i)
     if door_route:
         a.raw(b'\x83\x3D' + le32(cnh_blk_va) + b'\x00')
-        a.jz('cnh_pass_ok')
-        a.raw(b'\x0F\xB6\x3C\x35' + le32(edge_pass_va)) # movzx edi, edge_pass[e]
-        a.raw(b'\x85\x3D' + le32(door_mask_j_va))       # openable from j (cur side), this team?
-        a.jz('cnh_scan_next')
-        a.jmp('cnh_pass_ok')
+        if cfg.DOOR_ROUTE_PHYSICAL_STATE:
+            a.jnz('cnh_scan_next')                      # closed door -> impassable
+            a.jmp('cnh_pass_ok')
+        else:
+            a.jz('cnh_pass_ok')
+            a.raw(b'\x0F\xB6\x3C\x35' + le32(edge_pass_va)) # movzx edi, edge_pass[e]
+            a.raw(b'\x85\x3D' + le32(door_mask_j_va))   # openable from j (cur side), this team?
+            a.jz('cnh_scan_next')
+            a.jmp('cnh_pass_ok')
     a.label('cnh_nb_j')                                # nb in eax
     if door_route:
         a.raw(b'\x83\x3D' + le32(cnh_blk_va) + b'\x00')
-        a.jz('cnh_pass_ok')
-        a.raw(b'\x0F\xB6\x3C\x35' + le32(edge_pass_va)) # movzx edi, edge_pass[e]
-        a.raw(b'\x85\x3D' + le32(door_mask_i_va))       # openable from i (cur side), this team?
-        a.jz('cnh_scan_next')
+        if cfg.DOOR_ROUTE_PHYSICAL_STATE:
+            a.jnz('cnh_scan_next')                      # closed door -> impassable
+        else:
+            a.jz('cnh_pass_ok')
+            a.raw(b'\x0F\xB6\x3C\x35' + le32(edge_pass_va)) # movzx edi, edge_pass[e]
+            a.raw(b'\x85\x3D' + le32(door_mask_i_va))   # openable from i (cur side), this team?
+            a.jz('cnh_scan_next')
         a.label('cnh_pass_ok')
     a.raw(b'\x3B\x05' + le32(vcount_va))               # cmp eax, vertex_count
     a.jae('cnh_scan_next')                             # out of range

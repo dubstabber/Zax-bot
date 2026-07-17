@@ -451,6 +451,23 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     and open to 28/29 when one gate is switched open (the live-reported
     reroute scenario); Doom ship's team doors split by team. No new patch
     sites.
+  - **PHYSICAL-STATE override** (`cfg.DOOR_ROUTE_PHYSICAL_STATE`, default ON):
+    the directional `edge_pass` scheme above lets a bot route THROUGH a
+    closed door its team could open — but a bot far from the host's camera
+    can open NO door (touch/switch triggers are camera-gated and never fire
+    far away), so a team-1 carrier on Battle on the Ice committed to the
+    openable door on its way home and pressed it forever (live-reported: got
+    home only when the host approached and the door woke). With the flag ON,
+    `bfs_run` + `ctf_next_hop` treat EVERY currently-blocked door as impassable
+    (skip on `cnh_blk` alone, `edge_pass`/`door_mask` ignored) and route AROUND
+    it via live `door_blocked[]`; a door is USED only once it reads open (the
+    epoch reroute picks it up the frame it flips). Offline-verified: Battle on
+    the Ice + Doom ship reach the enemy base around all-closed doors (138/139,
+    62/64); Torture Chamber / Temple Melee / Curse stay full-field-fallback
+    (walk-at-door) exactly as before because those bases are truly sealed with
+    no around-path. The two team fields build identically under this flag
+    (`edge_pass`/`door_mask` become vestigial but the build machinery is kept
+    for flag-OFF). Turn OFF only once bots can trigger far doors themselves.
   - **Mid-life reroute epoch** (`route_epoch` global + `bot_route_epoch[slot]`;
     flag-route block): `ctf_next_hop` only runs on node ARRIVAL, so a bot
     committed to a full-field walk-at-the-door path (open field couldn't reach
