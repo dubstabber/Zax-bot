@@ -216,6 +216,12 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     if layout.has_field('tag_edge_pass') and layout.has_field('edge_pass'):
         emit_chunk(layout.va('tag_edge_pass'),
                    b'\xB8' + le32(layout.va('edge_pass')), 0x40, 'snap_skip_edge_pass')
+    # Routing-decision state: dump the whole flag-route block (globals +
+    # per-bot missing-policy/goal/suspend/block-hits + route_epoch +
+    # bot_route_epoch) in one contiguous chunk from flag_routing_active.
+    if layout.has_field('tag_rstate') and layout.has_field('flag_routing_active'):
+        emit_chunk(layout.va('tag_rstate'),
+                   b'\xB8' + le32(layout.va('flag_routing_active')), 0x170, 'snap_skip_rstate')
 
     # Waypoint-graph probe. wp_compute populates wp_diag_data[0..7]:
     #   [+0x00] MGR, [+0x04] WM, [+0x08] LV, [+0x0C] WPM,

@@ -44,6 +44,9 @@ DUMP_TAGS = (
     ('tag_door_dyn', 'door_dyn'),
     ('tag_edge_door', 'edge_door'),
     ('tag_edge_pass', 'edge_pass'),
+    # Routing-decision state (goal/carry/missing-policy/suspend/epoch) for
+    # diagnosing per-bot route commitment.
+    ('tag_rstate', 'rstate'),
 )
 
 

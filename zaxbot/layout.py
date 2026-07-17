@@ -1207,7 +1207,8 @@ def build_scratch_layout(
         # block at 0x730..0x8FF is full). Only present on door-enabled builds;
         # the static writer and snapshot emitter both skip absent tag fields.
         for tag_field in ('tag_door_cnt', 'tag_door_blk', 'tag_door_ent',
-                          'tag_door_dyn', 'tag_edge_door', 'tag_edge_pass'):
+                          'tag_door_dyn', 'tag_edge_door', 'tag_edge_pass',
+                          'tag_rstate'):
             overlay_fields.append(ScratchField(
                 tag_field, door_dyn_base, 0x10,
                 'diag: door-state dump chunk tag',

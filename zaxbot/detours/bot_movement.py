@@ -581,6 +581,24 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         door_blocked_va     = layout.va('door_blocked')
         door_count_va       = layout.va('door_count')
 
+    # Closed-door commitment recovery. The door-BLIND commit paths (cold-acquire
+    # nearest node, reacquire, retreat) and any next-hop made while a door was
+    # open can leave a bot latched onto a target node it must reach ACROSS a
+    # now-closed door. Only ctf_next_hop is door-aware, and it re-runs only on
+    # ARRIVAL — which never happens when the closed door blocks the last leg —
+    # so the bot grinds the door until death/respawn (live-reported edge case;
+    # R-snapshots showed a bot on the prev side of closed pillar gates with
+    # current_wp on the far node). When this fires we re-route door-aware from
+    # the reachable side. Needs the edge list + per-edge door binding.
+    door_reroute = (routing and door_gate
+                    and layout.has_field('edge_door')
+                    and layout.has_field('overlay_edges')
+                    and layout.has_field('overlay_edge_count'))
+    if door_reroute:
+        edge_door_va         = layout.va('edge_door')
+        overlay_edges_va     = layout.va('overlay_edges')
+        overlay_edge_count_va = layout.va('overlay_edge_count')
+
     # === Waypoint following =============================================
     a.raw(b'\x83\x3D' + le32(wp_follow_enabled_va) + b'\x00')
     a.jz('s542360_fallback_zero')
@@ -662,6 +680,83 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     # fall through to wp_have_cur
 
     a.label('s542360_wp_have_cur')
+    if door_reroute:
+        # --- Closed-door commitment recovery -------------------------------
+        # If the (prev -> cur) edge we are latched onto is bound to a currently
+        # CLOSED door and we are still on the PREV side (nearer prev than cur, so
+        # we have not crossed), the last leg is impassable and arrival — the only
+        # thing that re-runs the door-aware ctf_next_hop — will never happen. Back
+        # the target up to prev and jump into the arrival/advance path so
+        # ctf_next_hop re-plans door-aware from the reachable node. Fires only in
+        # exactly this stuck state (door open, or already crossed => no-op).
+        a.raw(b'\x83\x3D' + le32(routing_active_va) + b'\x00')  # routing active?
+        a.jz('s542360_cdr_done')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
+        a.raw(b'\x8B\x3C\x8D' + le32(prev_wp_va))             # edi = prev_wp[slot]
+        a.raw(b'\x83\xFF\xFF')                                # cmp edi, -1
+        a.jz('s542360_cdr_done')                              # not latched
+        a.raw(b'\x8B\x04\x8D' + le32(current_wp_va))          # eax = current_wp[slot]
+        a.raw(b'\x39\xC7')                                    # cmp edi, eax (prev == cur?)
+        a.jz('s542360_cdr_done')
+        a.raw(b'\xA3' + le32(dy_accum_va))                    # spill cur -> dy_accum (cand_tmp)
+        a.raw(b'\x31\xF6')                                    # esi = 0 (edge idx)
+        a.label('s542360_cdr_scan')
+        a.raw(b'\x3B\x35' + le32(overlay_edge_count_va))      # cmp esi, edge_count
+        a.jae('s542360_cdr_done')                             # (prev,cur) edge not found
+        a.raw(b'\x8B\x04\xB5' + le32(overlay_edges_va))       # eax = edges[esi]
+        a.raw(b'\x0F\xB7\xD8')                                # movzx ebx, ax (i)
+        a.raw(b'\xC1\xE8\x10')                                # shr eax, 16   (j)
+        a.raw(b'\x39\xFB')                                    # cmp ebx, edi (i == prev?)
+        a.jnz('s542360_cdr_swap')
+        a.raw(b'\x3B\x05' + le32(dy_accum_va))                # cmp eax, cur (j == cur?)
+        a.jz('s542360_cdr_found')
+        a.jmp('s542360_cdr_next')
+        a.label('s542360_cdr_swap')
+        a.raw(b'\x3B\x1D' + le32(dy_accum_va))                # cmp ebx, cur (i == cur?)
+        a.jnz('s542360_cdr_next')
+        a.raw(b'\x39\xF8')                                    # cmp eax, edi (j == prev?)
+        a.jz('s542360_cdr_found')
+        a.label('s542360_cdr_next')
+        a.raw(b'\x46')                                        # inc esi
+        a.jmp('s542360_cdr_scan')
+        a.label('s542360_cdr_found')
+        a.raw(b'\x8B\x14\xB5' + le32(edge_door_va))           # edx = edge_door[esi]
+        a.raw(b'\x83\xFA\xFF')                                # cmp edx, -1
+        a.jz('s542360_cdr_done')                              # no door on this edge
+        a.raw(b'\x3B\x15' + le32(door_count_va))              # cmp edx, door_count
+        a.jae('s542360_cdr_done')                             # stale idx
+        a.raw(b'\x83\x3C\x95' + le32(door_blocked_va) + b'\x00')  # door blocked?
+        a.jz('s542360_cdr_done')                              # open -> normal handling
+        # Closed door on the committed edge. dsq(bot,prev) vs dsq(bot,cur);
+        # edi = prev idx still live, cur idx in dy_accum.
+        a.raw(b'\x8D\x04\xFD' + le32(overlay_vertices_va))    # lea eax, [edi*8 + verts] (prev)
+        a.raw(b'\xD9\x00')                                    # fld prev.x
+        a.raw(b'\xD8\x25' + le32(bot_pos_va))                 # fsub bot.x
+        a.raw(b'\xD8\xC8')                                    # fmul st,st
+        a.raw(b'\xD9\x40\x04')                                # fld prev.y
+        a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))             # fsub bot.y
+        a.raw(b'\xD8\xC8')                                    # fmul st,st
+        a.raw(b'\xDE\xC1')                                    # faddp -> dsq_prev
+        a.raw(b'\xD9\x1D' + le32(wp_seg_x_va))                # fstp wp_seg_x = dsq_prev
+        a.raw(b'\xA1' + le32(dy_accum_va))                    # eax = cur idx
+        a.raw(b'\x8D\x04\xC5' + le32(overlay_vertices_va))    # lea eax, [eax*8 + verts] (cur)
+        a.raw(b'\xD9\x00')                                    # fld cur.x
+        a.raw(b'\xD8\x25' + le32(bot_pos_va))                 # fsub bot.x
+        a.raw(b'\xD8\xC8')                                    # fmul st,st
+        a.raw(b'\xD9\x40\x04')                                # fld cur.y
+        a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))             # fsub bot.y
+        a.raw(b'\xD8\xC8')                                    # fmul st,st
+        a.raw(b'\xDE\xC1')                                    # faddp -> dsq_cur (st0)
+        a.raw(b'\xD9\x05' + le32(wp_seg_x_va))                # fld dsq_prev (st0=prev, st1=cur)
+        a.raw(b'\xDF\xF1')                                    # fcomip st0,st1 (CF=1 if prev<cur); pop
+        a.raw(b'\xDD\xD8')                                    # fstp st(0) (drop dsq_cur; EFLAGS kept)
+        a.jae('s542360_cdr_done')                             # nearer cur -> arrival handles it
+        # Nearer prev: re-plan door-aware from prev by advancing from it.
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
+        a.raw(b'\x8B\x04\x8D' + le32(prev_wp_va))             # eax = prev_wp[slot]
+        a.raw(b'\x89\x04\x8D' + le32(current_wp_va))          # current_wp[slot] = prev
+        a.jmp('s542360_wp_arrived')
+        a.label('s542360_cdr_done')
     # --- CTF final approach -------------------------------------------------
     # Once the bot's current node IS the nearest node to its goal flag, the
     # graph can take it no closer — so steer straight at the actual flag base

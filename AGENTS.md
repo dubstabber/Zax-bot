@@ -467,6 +467,26 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     debounced by the rebuild cooldown, gated on `flag_routing_active`. This is
     the deterministic complement to the per-bot suspension (whose progress
     timeout can be starved by wall-slide micro-progress at a sealed door).
+  - **Closed-door commitment recovery** (`door_reroute` block at
+    `s542360_wp_have_cur`): the door-BLIND commit paths (cold-acquire nearest
+    node, reacquire, retreat, and the epoch cold-acquire which picks the nearest
+    node by Euclidean distance) plus any next-hop taken while a door was open
+    can leave a bot latched onto a node reachable only ACROSS a now-closed door.
+    Only `ctf_next_hop` is door-aware, and it re-runs only on ARRIVAL — which the
+    closed door prevents — so the bot grinds the door until death/respawn
+    (live-reported; R-snapshots showed a bot on the PREV side of a closed pillar
+    gate with `current_wp` on the far node, `route_use_open=1`, `wp_try=0`,
+    `stuck=0`). Each think, if the latched `(prev,cur)` edge is bound to a
+    currently-blocked door AND the bot is still nearer prev than cur (has not
+    crossed), back `current_wp` up to prev and fall into the arrival/advance path
+    so `ctf_next_hop` re-plans door-aware from the reachable node (offline-
+    verified: 15→14 across closed door 9 re-plans 15→16; 5→6 across closed door
+    15 re-plans 5→1). Fires only in that exact stuck state — door open or
+    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is now ~128 B below
+    `SCRATCH_OFF`; the next code addition likely needs `SCRATCH_OFF`+
+    `NEW_SECTION_SIZE` bumped together (build asserts on overflow). The `rstate`
+    R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
+    `flag_routing_active`) was added for diagnosing route commitment.
 - General world-entity enumeration (`detours/entity_scan.py:scan_entities`,
   gated by `cfg.SCAN_ENTITIES_ENABLED`). The long-standing blocker for object
   detection was that there is no flat entity list: `mgr+0x290` is players,
