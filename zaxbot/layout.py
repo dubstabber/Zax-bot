@@ -187,6 +187,12 @@ def build_scratch_layout(
     door_entity_slots=3,
     door_opener_table_max=0,
     door_opener_static_max=0,
+    switch_table_max=0,
+    switch_pair_max=0,
+    switch_static_map_max=0,
+    switch_static_point_max=0,
+    switch_static_pair_max=0,
+    switch_map_name_slot=0,
 ):
     BOT_STATE_BASE = 0x180
     MAX_BOT_SLOTS = 16
@@ -1214,6 +1220,85 @@ def build_scratch_layout(
                 'diag: door-state dump chunk tag',
             ))
             door_dyn_base += 0x10
+
+        # --- Switch tables (CollideTriggerAI bump switches) ----------------
+        # Mirrors the door static/live split. Live tables are per-match copies
+        # (load_switches); pairs bind switch idx -> door idx in the SAME map's
+        # door_table order (u32 = switch_idx | door_idx << 16). Nested inside
+        # the door block because pair door indices are meaningless without the
+        # door tables.
+        switch_table_max_capped = max(0, switch_table_max)
+        switch_pair_max_capped = max(0, switch_pair_max)
+        switch_static_map_max_capped = max(0, switch_static_map_max)
+        switch_static_point_max_capped = max(0, switch_static_point_max)
+        switch_static_pair_max_capped = max(0, switch_static_pair_max)
+        switch_name_slot_capped = max(0, switch_map_name_slot)
+        switch_map_stride = switch_name_slot_capped + 16
+        if switch_table_max_capped > 0:
+            sw_base = door_dyn_base
+            overlay_fields.extend([
+                ScratchField('switch_count', sw_base + 0x00, 0x04,
+                             'switch: live entries in switch_table for active map'),
+                ScratchField('overlay_switch_color', sw_base + 0x04, overlay_color_size,
+                             'overlay: detected-switch CColor (rebuilt per-frame)'),
+                ScratchField('switch_pair_count', sw_base + 0x14, 0x04,
+                             'switch: live (switch, door) pair records for active map'),
+                ScratchField('switch_table', sw_base + 0x18,
+                             switch_table_max_capped * 8,
+                             'switch: float[2] per switch center (world coords, active map)'),
+            ])
+            sw_off = sw_base + 0x18 + switch_table_max_capped * 8
+            if switch_pair_max_capped > 0:
+                overlay_fields.append(ScratchField(
+                    'switch_pairs', sw_off, switch_pair_max_capped * 4,
+                    'switch: live u32 pair records (switch_idx | door_idx << 16)',
+                ))
+                sw_off += switch_pair_max_capped * 4
+            switch_flags_padded = (switch_table_max_capped + 3) & ~3
+            overlay_fields.append(ScratchField(
+                'switch_flags', sw_off, switch_table_max_capped,
+                'switch: live per-switch class byte (door_data.SWITCH_FLAG_*)',
+            ))
+            sw_off += switch_flags_padded
+            overlay_fields.extend([
+                ScratchField('switch_static_map_count', sw_off + 0x00, 0x04,
+                             'switch: build-time static map table count'),
+                ScratchField('switch_static_point_count', sw_off + 0x04, 0x04,
+                             'switch: build-time static point table count'),
+            ])
+            sw_off += 0x08
+            if switch_static_map_max_capped > 0 and switch_map_stride > 16:
+                overlay_fields.append(ScratchField(
+                    'switch_static_maps', sw_off,
+                    switch_static_map_max_capped * switch_map_stride,
+                    'switch: static map records (name | switch cnt/first | pair cnt/first)',
+                ))
+                sw_off += switch_static_map_max_capped * switch_map_stride
+            if switch_static_point_max_capped > 0:
+                overlay_fields.append(ScratchField(
+                    'switch_static_points', sw_off,
+                    switch_static_point_max_capped * 8,
+                    'switch: static float[2] center table parsed from Data.dat',
+                ))
+                sw_off += switch_static_point_max_capped * 8
+                if switch_static_pair_max_capped > 0:
+                    overlay_fields.append(ScratchField(
+                        'switch_static_pairs', sw_off,
+                        switch_static_pair_max_capped * 4,
+                        'switch: static u32 pair records (switch_idx | door_idx << 16)',
+                    ))
+                    sw_off += switch_static_pair_max_capped * 4
+                switch_static_flags_padded = (switch_static_point_max_capped + 3) & ~3
+                overlay_fields.append(ScratchField(
+                    'switch_static_flags', sw_off,
+                    switch_static_point_max_capped,
+                    'switch: per-static-switch class byte (door_data.SWITCH_FLAG_*)',
+                ))
+                sw_off += switch_static_flags_padded
+            overlay_fields.append(ScratchField(
+                'tag_switch', sw_off, 0x10,
+                'diag: switch-table dump chunk tag',
+            ))
 
     fields.extend(overlay_fields)
     return ScratchLayout(base_va, scratch_size, fields)

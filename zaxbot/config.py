@@ -11,13 +11,15 @@ from .build import SectionSpec
 # --- new section parameters (.zaxbot) -------------------------------------
 NEW_SECTION_NAME   = b'.zaxbot\x00'
 NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
-NEW_SECTION_SIZE   = 0x12000       # 26KB code + 46KB scratch (grown for the door detection
-                                   # tables, the door-aware routing field, then its per-team split)
+NEW_SECTION_SIZE   = 0x14000       # 28KB code + 52KB scratch (grown for the door detection
+                                   # tables, the door-aware routing field, its per-team
+                                   # split, then the switch detection tables)
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
-SCRATCH_OFF        = 0x6800        # writable scratch buffer; 26KB code / 42KB scratch
-                                   # (code/scratch boundary moved from 0x5A00 when the
-                                   # door layer left only ~400 code bytes of headroom)
+SCRATCH_OFF        = 0x7000        # writable scratch buffer; 28KB code / 52KB scratch
+                                   # (boundary moved from 0x5A00 at the door layer, then
+                                   # from 0x6800 when the switch layer left only ~87 code
+                                   # bytes of headroom)
 
 ZAXBOT_SECTION = SectionSpec(
     name=NEW_SECTION_NAME,
@@ -511,6 +513,7 @@ OVERLAY_FLAG_COLOR     = (0, 0, 255, 255)     # blue; B=255 -> visible detected 
 # second, double-radius ring drawn around its marker, an OPEN door by a single
 # small oval. Distinguish door vs flag/portal points by position/count.
 OVERLAY_DOOR_COLOR     = (255, 128, 255, 255) # B=255 -> visible detected doors
+OVERLAY_SWITCH_COLOR   = (128, 255, 255, 255) # B=255 -> visible detected switches
 OVERLAY_VERTEX_RADIUS  = 8.0                  # world-space pixels
 OVERLAY_VERTEX_ASPECT  = 1.0                  # y/x ratio (1.0 = round)
 
@@ -698,6 +701,29 @@ DOOR_OPENER_STATIC_MAX = 96   # build-time records across all MP maps
 # restore the directional edge_pass behaviour (route through doors your team
 # could open) — only worthwhile once bots can trigger far doors themselves.
 DOOR_ROUTE_PHYSICAL_STATE = False
+
+# --- Switch detection (CollideTriggerAI bump switches) ---------------------
+# Census over the shipped Data.dat (2026-07-18): 116 collide switches across
+# 17 MP maps (15 with switches + 2 door-only), and ALL of them are
+# `Triggered By Players=1` / `Projectiles=0` / repeatable / authored active —
+# every MP switch is a walk-into-it bump switch a bot can fire by steering
+# into it (no shooting needed). Classes (switch_static_flags bits, see
+# door_data.SWITCH_FLAG_*): door open/togglers (Torture Chamber's 4 pillar
+# togglers bind to all 43 pillar doors; Doom ship lights; Battle on the Ice
+# team doors; Curse first/last/spike doors), trap switches (CCloseDoorAction
+# jaws/spikes/"Player N door" lockouts), SK deposit bins (CUseCannedAction
+# 'Bin NN'), and script relays. The static tables mirror the door pipeline:
+# per-map switch centers + class bytes + (switch, door) open/toggle pairs
+# (door indices reference the SAME map's door_table order), packed at build
+# time and copied per match by load_switches. DETECTION layer only — overlay
+# markers + tables; switch-seek routing consumes these later.
+SWITCH_DETECT_ENABLED = True
+SWITCH_TABLE_MAX        = 20    # live per-map switches (Foundry peaks at 19)
+SWITCH_PAIR_MAX         = 160   # live per-map (switch, door) pairs (Curse: 158)
+SWITCH_STATIC_MAP_MAX   = 20    # shipped Data.dat has 17 MP switch/door maps
+SWITCH_STATIC_POINT_MAX = 128   # shipped Data.dat has 116 MP switches
+SWITCH_STATIC_PAIR_MAX  = 288   # shipped Data.dat has 255 pairs
+SWITCH_MAP_NAME_SLOT    = 96    # fixed ASCII bytes per map path, incl. NUL
 
 # --- CTF flag routing (bots navigate the waypoint graph toward flags) ----
 # Master gate. When on and the active match is CTF with a graph + flags, bots

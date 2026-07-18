@@ -66,6 +66,19 @@ _WALK_TRIGGER_ACTIVITIES = (
 # Per-door flag bits packed for the runtime (door_static_flags).
 DOOR_FLAG_HAS_ANY_OPENER = 0x01   # some part opens/toggles this door by name/self
 
+# Per-switch class bits packed for the runtime (switch_static_flags). A
+# "switch" is a Level Part carrying ``Activity=CollideTriggerAI`` — the
+# bumpable wall/floor switches. Census over the shipped Data.dat (2026-07-18):
+# ALL 116 MP-map collide switches are ``Triggered By Players=1`` /
+# ``Projectiles=0`` / ``Trigger Only Once=0`` / authored ``Active=1`` — every
+# one is a repeatable walk-into-it switch a bot can fire by bumping it.
+SWITCH_FLAG_OPENS_DOORS  = 0x01   # >=1 COpenDoorAction/CToggleDoorAction pair to a door
+SWITCH_FLAG_CLOSES_DOORS = 0x02   # CCloseDoorAction present (trap: jaws/spikes/lockouts)
+SWITCH_FLAG_TOGGLE       = 0x04   # door pairs use CToggleDoorAction (re-bump RE-CLOSES!)
+SWITCH_FLAG_CANNED       = 0x08   # CUseCannedAction (the Greed/SK deposit 'Bin NN')
+SWITCH_FLAG_RELAY        = 0x10   # CTriggerRelayAction (script relay)
+SWITCH_FLAG_PLAYER_BUMP  = 0x20   # Triggered By Players=1 (bot can fire it by walking)
+
 # Opener team masks (who can use this opener): bit0 = team 0 (Blue),
 # bit1 = team 1 (Red). Openers wrapped in a same-team conditional
 # (CConditionalAction whose Try is CIsOnSameTeamAction — the walk-up team
@@ -85,6 +98,8 @@ class MapDoorData:
     doors: tuple[tuple[float, float], ...]          # (x, y) per door instance
     flags: tuple[int, ...]                          # parallel per-door flag bits
     openers: tuple[tuple[float, float, int, int], ...]  # (x, y, door_index, team_mask)
+    switches: tuple[tuple[float, float, int], ...] = ()   # (x, y, class bits) per switch
+    switch_pairs: tuple[tuple[int, int], ...] = ()  # (switch_index, door_index) open/toggle
 
 
 def _block_fields(lines, start, end):
@@ -211,7 +226,8 @@ def _parse_map_doors(map_name: str, payload: bytes) -> MapDoorData | None:
             idx += 1
             continue
         start, end = _find_block(lines, idx)
-        blob_has_door_ai = any(l.strip() == 'Activity=CDoorAI' for l in lines[start:end])
+        blob = lines[start:end]
+        blob_has_door_ai = any(l.strip() == 'Activity=CDoorAI' for l in blob)
         name, active, x, y, poly, team = _block_fields(lines, start, end)
         rec = {
             'name': (name or '').lower(),
@@ -219,10 +235,16 @@ def _parse_map_doors(map_name: str, payload: bytes) -> MapDoorData | None:
             'pos': poly if poly is not None else (x, y),
             'is_door': False,
             'walk_trigger': any(
-                l.strip() in _WALK_TRIGGER_ACTIVITIES for l in lines[start:end]
+                l.strip() in _WALK_TRIGGER_ACTIVITIES for l in blob
             ),
             'door_targets': _door_targets(lines, start, end, _team_mask_of(team)),
             'activate_targets': _activate_targets(lines, start, end),
+            'is_switch': any('Activity=CollideTriggerAI' in l for l in blob),
+            'player_bump': any(l.strip() == 'Triggered By Players=1' for l in blob),
+            'has_close_door': any('CCloseDoorAction' in l for l in blob),
+            'has_toggle_door': any('CToggleDoorAction' in l for l in blob),
+            'has_canned': any('CUseCannedAction' in l for l in blob),
+            'has_relay': any('CTriggerRelayAction' in l for l in blob),
         }
         if blob_has_door_ai and x is not None and y is not None:
             key = (round(x * 1000), round(y * 1000))
@@ -235,9 +257,6 @@ def _parse_map_doors(map_name: str, payload: bytes) -> MapDoorData | None:
         parts.append(rec)
         idx = end
 
-    if not doors:
-        return None
-
     def doors_named(nm):
         """Door instances matching a target name, with '#a-b#' templates
         expanded ('lights #1-13#' => 'lights 1'..'lights 13')."""
@@ -247,6 +266,52 @@ def _parse_map_doors(map_name: str, payload: bytes) -> MapDoorData | None:
             names = {f'{prefix}{k}' for k in range(lo, hi + 1)}
             return [i for i, dn in enumerate(door_names) if dn in names]
         return [i for i, dn in enumerate(door_names) if dn == nm]
+
+    # Switch pass: every CollideTriggerAI part (the bumpable switches).
+    # Position + class bits, plus (switch, door) pairs for each door instance
+    # its COpenDoorAction/CToggleDoorAction targets resolve to (the routing-
+    # relevant binding: which doors this switch can make passable). CClose
+    # targets are deliberately NOT paired — closing is a trap, not an opener —
+    # but the class bit records it so behavior can avoid/exploit trap switches.
+    switches = []
+    switch_pairs = []
+    switch_seen = set()
+    for rec in parts:
+        if not rec['is_switch']:
+            continue
+        pos = rec['pos']
+        if pos[0] is None or pos[1] is None:
+            continue
+        key = (round(float(pos[0]) * 1000), round(float(pos[1]) * 1000))
+        if key in switch_seen:
+            continue
+        switch_seen.add(key)
+        sflags = 0
+        if rec['player_bump']:
+            sflags |= SWITCH_FLAG_PLAYER_BUMP
+        if rec['has_close_door']:
+            sflags |= SWITCH_FLAG_CLOSES_DOORS
+        if rec['has_toggle_door']:
+            sflags |= SWITCH_FLAG_TOGGLE
+        if rec['has_canned']:
+            sflags |= SWITCH_FLAG_CANNED
+        if rec['has_relay']:
+            sflags |= SWITCH_FLAG_RELAY
+        sw_idx = len(switches)
+        pair_doors = set()
+        for t, _mask in rec['door_targets']:
+            if t == '$SELF':
+                continue
+            for di in doors_named(t):
+                pair_doors.add(di)
+        if pair_doors:
+            sflags |= SWITCH_FLAG_OPENS_DOORS
+            for di in sorted(pair_doors):
+                switch_pairs.append((sw_idx, di))
+        switches.append((float(pos[0]), float(pos[1]), sflags))
+
+    if not doors and not switches:
+        return None
 
     # Pass 1: which doors have ANY opener authored (any part type — collide
     # switches, spawn triggers, relays, timers included). Doors with none are
@@ -308,6 +373,8 @@ def _parse_map_doors(map_name: str, payload: bytes) -> MapDoorData | None:
         doors=tuple(doors),
         flags=flags,
         openers=tuple(openers),
+        switches=tuple(switches),
+        switch_pairs=tuple(switch_pairs),
     )
 
 
@@ -338,5 +405,6 @@ def resolve_door_topology(data_path: str | None = None) -> tuple[MapDoorData, ..
 
 
 def resolve_door_data(data_path: str | None = None) -> tuple[tuple[str, tuple[tuple[float, float], ...]], ...]:
-    """Back-compat view: ``((map_name, ((x, y), ...)), ...)``."""
-    return tuple((m.map_name, m.doors) for m in resolve_door_topology(data_path))
+    """Back-compat view: ``((map_name, ((x, y), ...)), ...)`` — door maps only
+    (the topology also keeps switch-only maps for the switch tables)."""
+    return tuple((m.map_name, m.doors) for m in resolve_door_topology(data_path) if m.doors)

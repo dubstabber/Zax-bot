@@ -58,13 +58,15 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 
 - WM_KEYDOWN hook at `0x599A1A` redirects `call sub_599580` to
   `.zaxbot:hook_entry`, then tail-jumps back to `sub_599580`.
-- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x11000`, RWX (grown from
+- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x14000`, RWX (grown from
   `0xA000` for the CTF flag static tables, then to `0xC000` for the CTF routing
   BFS distance field, then to `0xD000` for far-base CTF flag entity force-ticks,
   then to `0xF000` for the door detection static tables, then to `0x11000` for
-  the door-aware routing field + anchor-entity cache).
-- Scratch starts at `0x720800` (`SCRATCH_OFF = 0x6800`; the code/scratch
-  boundary moved from `0x5A00` when the door layer left only ~400 code bytes).
+  the door-aware routing field + anchor-entity cache, then `0x12000` for its
+  per-team split, then to `0x14000` for the switch detection tables).
+- Scratch starts at `0x721000` (`SCRATCH_OFF = 0x7000`; the code/scratch
+  boundary moved from `0x5A00` at the door layer, then from `0x6800` when the
+  switch layer left only ~87 code bytes).
 - B opens the bot menu via `sub_59B260`; R writes a runtime snapshot.
 - Digit selection calls `do_spawn_with_team`.
 - Spawn injects a synthetic DirectPlay "player added" queue entry at
@@ -527,13 +529,44 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     so `ctf_next_hop` re-plans door-aware from the reachable node (offline-
     verified: 15→14 across closed door 9 re-plans 15→16; 5→6 across closed door
     15 re-plans 5→1). Fires only in that exact stuck state — door open or
-    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is now ~87 B below
-    `SCRATCH_OFF` (hook_entry_size 26537 of 26624 after the participant-position
-    mirror + the physical-state-OFF directional gates); the next code addition
-    needs `SCRATCH_OFF`+`NEW_SECTION_SIZE` bumped together (build asserts on
-    overflow). The `rstate`
+    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~1.5 KB below
+    `SCRATCH_OFF` (hook_entry_size 27155 of 28672 after the switch-detection
+    layer; the boundary moved 0x6800→0x7000 with the section at 0x14000). When
+    it runs out again, bump `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build
+    asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
     `flag_routing_active`) was added for diagnosing route commitment.
+- Switches are DETECTED (`cfg.SWITCH_DETECT_ENABLED`; static pipeline mirror
+  of doors, parsed in `door_data.py` alongside the door topology):
+  - **What a switch is**: a Level Part carrying `Activity=CollideTriggerAI` —
+    the bumpable wall/floor switches. Census (2026-07-18): 116 across 16 MP
+    maps, and EVERY one is `Triggered By Players=1` / `Projectiles=0` /
+    `Trigger Only Once=0` / authored active — all repeatable player-BUMP
+    switches (no shoot-switches in MP), so a bot fires one by steering into
+    it, and with `BOT_PARTICIPANT_POS_ENABLED` that works far from the host.
+  - **Classes** (`switch_static_flags` byte, `door_data.SWITCH_FLAG_*`):
+    door open/togglers (0x01; TOGGLE 0x04 warns re-bump RE-CLOSES — Torture
+    Chamber's 4 pillar togglers bind to ALL 43 pillar doors, Doom ship's
+    light walls, Battle on the Ice team doors, Curse first/last/spike
+    doors, Hydroplant's 4 one-ways, Jungle Ruins rocket/middle doors), trap
+    switches (CLOSES_DOORS 0x02: Curse jaws/spikes, Temple Melee/Corridor
+    "Player N door" lockouts — often also 0x01 because the trap re-OPENS via
+    a delayed action), SK deposit bins (CANNED 0x08, the Greed 'Bin NN'
+    parts), script relays (RELAY 0x10), PLAYER_BUMP 0x20.
+  - **(switch, door) pairs**: per map, each door-opening switch is bound to
+    every door instance its `COpenDoorAction`/`CToggleDoorAction` targets
+    resolve to (template `#a-b#` names expanded; door indices reference the
+    same map's `door_table` order). Packed as u32 `switch_idx|door_idx<<16`;
+    `load_switches` (called from `detour_df90` AFTER `load_doors`) copies the
+    active map's centers + class bytes + pairs into `switch_table` /
+    `switch_flags` / `switch_pairs`. Per-map peaks: 19 switches (Foundry),
+    158 pairs (Curse). Tests pin the full per-map census.
+  - **Overlay**: every switch draws as an oval; door-opening switches get a
+    second double-radius ring (same B-driven palette caveat as doors — the
+    ring, not the hue, is the signal). R-snapshot chunk `switch` dumps the
+    whole live block (counts + centers + pairs + flags).
+  - **Not yet behavior**: bots do not seek/bump switches on purpose — see
+    Open work (switch-seek routing consumes these tables next).
 - General world-entity enumeration (`detours/entity_scan.py:scan_entities`,
   gated by `cfg.SCAN_ENTITIES_ENABLED`). The long-standing blocker for object
   detection was that there is no flat entity list: `mgr+0x290` is players,
@@ -726,10 +759,17 @@ Older emitted labels or disabled detours are not active unless they appear in
   `BOT_PARTICIPANT_POS_ENABLED` each bot is an engine-native activation
   source, so walk-up/touch/proximity door triggers near a far bot think and
   fire exactly as if a real player walked up (no message sender needed).
-  Remaining: SWITCH-SEEKING (walk to a CollideTriggerAI wall switch and
-  trigger it — switches are parsed but deliberately not counted as
-  bot-usable openers; on switch-only maps like Torture Chamber a bot sealed
-  in with the flag still has no self-serve exit). Do NOT
+  Remaining: SWITCH-SEEK behavior. Detection is DONE (see the switch bullet:
+  positions, classes, and per-map (switch, door) pair bindings are live in
+  `switch_table`/`switch_flags`/`switch_pairs`, and every MP switch is
+  player-bump so a bot triggers one just by steering into it). What's left is
+  the routing layer: when the open-field BFS can't reach the goal (sealed
+  Torture Chamber base), pick a REACHABLE switch whose pairs include a door
+  on the sealed frontier, route to it, bump it, and let the existing
+  door_dirty/epoch reroute machinery pick up the opened door. Mind the
+  TOGGLE flag: bumping a toggler while its doors are OPEN closes them —
+  gate the seek on the paired door being currently blocked, and mind trap
+  switches (CLOSES_DOORS) targeting doors on someone's route. Do NOT
   blanket-wake door triggers near bots (Active-bit forcing) — same hazard
   class as the checker re-arm bug; the participant-rect path is safe because
   the grid collect masks on the Active bit.

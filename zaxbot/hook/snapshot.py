@@ -222,6 +222,17 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     if layout.has_field('tag_rstate') and layout.has_field('flag_routing_active'):
         emit_chunk(layout.va('tag_rstate'),
                    b'\xB8' + le32(layout.va('flag_routing_active')), 0x170, 'snap_skip_rstate')
+    # Switch detection: one contiguous chunk covering the whole live block
+    # (switch_count | overlay color | pair_count | switch_table | switch_pairs
+    # | switch_flags) — pins load_switches' map match, the copied centers,
+    # the (switch, door) pair bindings and the class bytes in one R press.
+    if layout.has_field('tag_switch') and layout.has_field('switch_count'):
+        switch_dump_len = (layout.field('switch_flags').offset
+                           + layout.field('switch_flags').size
+                           - layout.field('switch_count').offset)
+        emit_chunk(layout.va('tag_switch'),
+                   b'\xB8' + le32(layout.va('switch_count')),
+                   switch_dump_len, 'snap_skip_switch')
 
     # Waypoint-graph probe. wp_compute populates wp_diag_data[0..7]:
     #   [+0x00] MGR, [+0x04] WM, [+0x08] LV, [+0x0C] WPM,

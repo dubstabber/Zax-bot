@@ -66,6 +66,12 @@ _DETOUR_LABEL_KEYS = {
 }
 
 
+def _switch_on():
+    """Switch tables require the door tables (pair door indices reference the
+    active map's door_table order)."""
+    return cfg.SWITCH_DETECT_ENABLED and cfg.DOOR_DETECT_ENABLED
+
+
 def build_hook(section_va_abs):
     """Assemble the .zaxbot section. Returns ``(section_bytes, info)``.
 
@@ -108,6 +114,12 @@ def build_hook(section_va_abs):
         door_entity_slots=cfg.DOOR_ENTITY_SLOTS_PER_DOOR,
         door_opener_table_max=cfg.DOOR_OPENER_TABLE_MAX if cfg.DOOR_DETECT_ENABLED else 0,
         door_opener_static_max=cfg.DOOR_OPENER_STATIC_MAX if cfg.DOOR_DETECT_ENABLED else 0,
+        switch_table_max=cfg.SWITCH_TABLE_MAX if _switch_on() else 0,
+        switch_pair_max=cfg.SWITCH_PAIR_MAX if _switch_on() else 0,
+        switch_static_map_max=cfg.SWITCH_STATIC_MAP_MAX if _switch_on() else 0,
+        switch_static_point_max=cfg.SWITCH_STATIC_POINT_MAX if _switch_on() else 0,
+        switch_static_pair_max=cfg.SWITCH_STATIC_PAIR_MAX if _switch_on() else 0,
+        switch_map_name_slot=cfg.SWITCH_MAP_NAME_SLOT if _switch_on() else 0,
     )
 
     a = Asm(section_va_abs + cfg.HOOK_ENTRY_OFF)
@@ -266,6 +278,8 @@ def build_hook(section_va_abs):
         door_entity_match_radius_sq=cfg.DOOR_ENTITY_MATCH_RADIUS_SQ,
         door_wedge_match_radius_sq=cfg.DOOR_WEDGE_MATCH_RADIUS_SQ,
         door_edge_radius_sq=cfg.DOOR_EDGE_RADIUS_SQ,
+        switch_map_name_slot=cfg.SWITCH_MAP_NAME_SLOT,
+        overlay_switch_color=cfg.OVERLAY_SWITCH_COLOR,
     )
 
     info = {

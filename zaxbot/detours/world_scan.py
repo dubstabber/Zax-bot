@@ -1171,3 +1171,119 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('pdh_done')
     a.raw(b'\x61')                                              # popad
     a.raw(b'\xC3')                                              # ret
+
+    # =====================================================================
+    # load_switches: copy the build-time switch centers, class bytes and
+    # (switch, door) pair records for the active map into the live tables.
+    # Called once per match from detour_df90 right after load_doors (pair
+    # door indices reference the same map's door_table order, so both copies
+    # must come from the same parse — they do, both static tables pack in
+    # parse order). Same bounded map-name match as load_doors. Inert stub
+    # when the switch layout fields are absent.
+    # =====================================================================
+    if not (
+        layout.has_field('switch_table')
+        and layout.has_field('switch_flags')
+        and layout.has_field('switch_pairs')
+        and layout.has_field('switch_static_maps')
+        and layout.has_field('switch_static_points')
+        and layout.has_field('switch_static_flags')
+        and layout.has_field('switch_static_pairs')
+    ):
+        a.label('load_switches')
+        a.raw(b'\xC3')
+    else:
+        switch_count_va         = layout.va('switch_count')
+        switch_table_va         = layout.va('switch_table')
+        switch_flags_va         = layout.va('switch_flags')
+        switch_pair_count_va    = layout.va('switch_pair_count')
+        switch_pairs_va         = layout.va('switch_pairs')
+        switch_static_map_count_va = layout.va('switch_static_map_count')
+        switch_static_maps_va   = layout.va('switch_static_maps')
+        switch_static_points_va = layout.va('switch_static_points')
+        switch_static_flags_va  = layout.va('switch_static_flags')
+        switch_static_pairs_va  = layout.va('switch_static_pairs')
+        switch_map_stride       = cfg.SWITCH_MAP_NAME_SLOT + 16
+
+        a.label('load_switches')
+        a.raw(b'\x60')                                              # pushad
+        a.raw(b'\xC7\x05' + le32(switch_count_va) + le32(0))        # switch_count = 0
+        a.raw(b'\xC7\x05' + le32(switch_pair_count_va) + le32(0))   # pair_count = 0
+        a.raw(b'\xBF' + le32(switch_table_va))                      # edi = switch_table
+        a.raw(b'\xB9' + le32(cfg.SWITCH_TABLE_MAX * 2))             # ecx = table dwords
+        a.raw(b'\x31\xC0')                                          # eax = 0
+        a.raw(b'\xFC\xF3\xAB')                                      # cld; rep stosd
+        a.raw(b'\xBF' + le32(switch_flags_va))                      # edi = switch_flags
+        a.raw(b'\xB9' + le32(cfg.SWITCH_TABLE_MAX))                 # ecx = flag bytes
+        a.raw(b'\xF3\xAA')                                          # rep stosb (eax still 0)
+        a.raw(b'\xA1' + le32(ax.MAP_NAME_CSTRING_VA))               # eax = [map CString header]
+        a.raw(b'\x85\xC0'); a.jz('lsw_done')
+        a.raw(b'\x83\xC0' + bytes([ax.MAP_NAME_ASCII_OFFSET]))      # eax = map name ASCII
+        a.raw(b'\x80\x38\x00'); a.jz('lsw_done')                    # empty name?
+        a.raw(b'\x89\xC5')                                          # ebp = active map name
+
+        a.raw(b'\x8B\x0D' + le32(switch_static_map_count_va))       # ecx = map_count
+        a.raw(b'\x85\xC9'); a.jz('lsw_done')
+        a.raw(b'\x83\xF9' + bytes([cfg.SWITCH_STATIC_MAP_MAX]))     # cmp ecx, static max
+        a.jbe('lsw_map_count_ok')
+        a.raw(b'\xB9' + le32(cfg.SWITCH_STATIC_MAP_MAX))            # cap corrupt count defensively
+        a.label('lsw_map_count_ok')
+        a.raw(b'\x31\xF6')                                          # esi = map idx
+
+        a.label('lsw_map_loop')
+        a.raw(b'\x39\xCE'); a.jae('lsw_done')                       # if idx >= map_count
+        a.raw(b'\x69\xC6' + le32(switch_map_stride))                # eax = idx * map_stride
+        a.raw(b'\x05' + le32(switch_static_maps_va))                # eax = &map_entry[idx]
+        a.raw(b'\x89\xC7')                                          # edi = entry
+        a.raw(b'\x89\xEA')                                          # edx = active map name
+        a.raw(b'\x89\xFB')                                          # ebx = entry name
+
+        a.label('lsw_str_loop')
+        a.raw(b'\x8A\x02')                                          # al = [active]
+        a.raw(b'\x3A\x03')                                          # cmp al, [entry]
+        a.jnz('lsw_next_map')
+        a.raw(b'\x84\xC0'); a.jz('lsw_match')                       # both NUL -> equal
+        a.raw(b'\x42\x43')                                          # inc edx; inc ebx
+        a.jmp('lsw_str_loop')
+
+        a.label('lsw_next_map')
+        a.raw(b'\x46')                                              # ++idx
+        a.jmp('lsw_map_loop')
+
+        a.label('lsw_match')
+        a.raw(b'\x89\xFD')                                          # ebp = map record (name done)
+        a.raw(b'\x8B\x4D' + bytes([cfg.SWITCH_MAP_NAME_SLOT]))      # ecx = switch count
+        a.raw(b'\x83\xF9' + bytes([cfg.SWITCH_TABLE_MAX]))          # cmp ecx, live cap
+        a.jbe('lsw_count_ok')
+        a.raw(b'\xB9' + le32(cfg.SWITCH_TABLE_MAX))                 # cap live count
+        a.label('lsw_count_ok')
+        a.raw(b'\x89\x0D' + le32(switch_count_va))                  # switch_count = ecx
+        a.raw(b'\x85\xC9'); a.jz('lsw_done')
+        a.raw(b'\x8B\x5D' + bytes([cfg.SWITCH_MAP_NAME_SLOT + 4]))  # ebx = first switch idx
+        # Points: src = &static_points[first*8], n = count*2 dwords.
+        a.raw(b'\x8D\x34\xDD' + le32(switch_static_points_va))      # lea esi, [ebx*8 + points]
+        a.raw(b'\xBF' + le32(switch_table_va))                      # edi = live switch_table
+        a.raw(b'\xD1\xE1')                                          # ecx *= 2 dwords per point
+        a.raw(b'\xFC\xF3\xA5')                                      # cld; rep movsd
+        # Flags: src = &static_flags[first], n = switch_count bytes.
+        a.raw(b'\x8B\x0D' + le32(switch_count_va))                  # ecx = switch_count
+        a.raw(b'\x8D\xB3' + le32(switch_static_flags_va))           # lea esi, [ebx + flags]
+        a.raw(b'\xBF' + le32(switch_flags_va))                      # edi = live switch_flags
+        a.raw(b'\xF3\xA4')                                          # rep movsb
+        # Pairs: count/first from the second record pair. SWITCH_PAIR_MAX
+        # (160) exceeds a sign-extended imm8 -> imm32 compare form.
+        a.raw(b'\x8B\x4D' + bytes([cfg.SWITCH_MAP_NAME_SLOT + 8]))  # ecx = pair count
+        a.raw(b'\x81\xF9' + le32(cfg.SWITCH_PAIR_MAX))              # cmp ecx, live cap
+        a.jbe('lsw_pair_count_ok')
+        a.raw(b'\xB9' + le32(cfg.SWITCH_PAIR_MAX))                  # cap live count
+        a.label('lsw_pair_count_ok')
+        a.raw(b'\x89\x0D' + le32(switch_pair_count_va))             # pair_count = ecx
+        a.raw(b'\x85\xC9'); a.jz('lsw_done')
+        a.raw(b'\x8B\x5D' + bytes([cfg.SWITCH_MAP_NAME_SLOT + 12])) # ebx = first pair idx
+        a.raw(b'\x8D\x34\x9D' + le32(switch_static_pairs_va))       # lea esi, [ebx*4 + pairs]
+        a.raw(b'\xBF' + le32(switch_pairs_va))                      # edi = live switch_pairs
+        a.raw(b'\xF3\xA5')                                          # rep movsd (ecx = count dwords)
+
+        a.label('lsw_done')
+        a.raw(b'\x61')                                              # popad
+        a.raw(b'\xC3')

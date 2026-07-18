@@ -301,6 +301,68 @@ class PortalDataTests(unittest.TestCase):
         self.assertLessEqual(max(len(p) for p in maps.values()),
                              cfg.DOOR_TABLE_MAX)
 
+    def test_switch_topology_is_extracted_from_data_dat(self):
+        # Collide switches (Activity=CollideTriggerAI) — the bumpable wall
+        # switches. Pin per-map (switch count, open/toggle pair count)
+        # against the 2026-07-18 census. Every shipped MP switch is a
+        # player-bump repeatable trigger; the pairs bind each door-opening
+        # switch to the door instances its COpen/CToggleDoorAction targets
+        # resolve to (Torture Chamber's 4 pillar togglers cover all 43
+        # pillar doors — the switch-seek routing foundation).
+        from zaxbot.door_data import (
+            resolve_door_topology,
+            SWITCH_FLAG_OPENS_DOORS, SWITCH_FLAG_PLAYER_BUMP,
+            SWITCH_FLAG_CANNED, SWITCH_FLAG_TOGGLE,
+        )
+
+        maps = {m.map_name: m for m in resolve_door_topology() if m.switches}
+        counts = {name.split('/')[-1]: (len(m.switches), len(m.switch_pairs))
+                  for name, m in maps.items()}
+        self.assertEqual(counts, {
+            'Battle on the Ice.zax': (2, 2),
+            'Curse of the Temple.zax': (10, 158),
+            'Doom ship.zax': (4, 27),
+            'Hydro Vengence.zax': (2, 0),
+            'Temple Melee.zax': (6, 6),
+            'Torture Chamber.zax': (4, 43),
+            'Hydroplant Bouncefest.zax': (4, 4),
+            'Jungle Ruins.zax': (15, 3),
+            'Caves of Gold.zax': (14, 0),
+            'Cold Crucible.zax': (8, 0),
+            'Cold Sweat.zax': (3, 0),
+            'Corridor of Suffering.zax': (8, 12),
+            'Jungle Madness.zax': (6, 0),
+            'Molten Ice.zax': (3, 0),
+            'The Foundry.zax': (19, 0),
+            'Underground Frenzy.zax': (8, 0),
+        })
+        # Every shipped MP switch is bumpable by players (the whole premise
+        # of bots firing switches by steering into them).
+        for m in maps.values():
+            for (_x, _y, fl) in m.switches:
+                self.assertTrue(fl & SWITCH_FLAG_PLAYER_BUMP, m.map_name)
+        # Torture Chamber: all 4 are door-TOGGLERS covering all 43 doors.
+        tc = maps['Levels/Multiplayer/CTF/Torture Chamber.zax']
+        for (_x, _y, fl) in tc.switches:
+            self.assertTrue(fl & SWITCH_FLAG_OPENS_DOORS)
+            self.assertTrue(fl & SWITCH_FLAG_TOGGLE)
+        self.assertEqual(sorted({di for _si, di in tc.switch_pairs}),
+                         list(range(43)))
+        # The Greed 'Bin NN' deposit switches classify as CANNED, not doors.
+        foundry = maps['Levels/Multiplayer/Greed/The Foundry.zax']
+        self.assertTrue(any(fl & SWITCH_FLAG_CANNED
+                            for (_x, _y, fl) in foundry.switches))
+        # Static scratch capacity must cover the shipped data with headroom.
+        self.assertLessEqual(len(maps), cfg.SWITCH_STATIC_MAP_MAX)
+        total_switches = sum(len(m.switches) for m in maps.values())
+        total_pairs = sum(len(m.switch_pairs) for m in maps.values())
+        self.assertLessEqual(total_switches, cfg.SWITCH_STATIC_POINT_MAX)
+        self.assertLessEqual(total_pairs, cfg.SWITCH_STATIC_PAIR_MAX)
+        self.assertLessEqual(max(len(m.switches) for m in maps.values()),
+                             cfg.SWITCH_TABLE_MAX)
+        self.assertLessEqual(max(len(m.switch_pairs) for m in maps.values()),
+                             cfg.SWITCH_PAIR_MAX)
+
     def test_door_opener_topology_is_extracted(self):
         # Openers drive DIRECTIONAL closed-door passability: bot-usable
         # walk-in triggers only (touching/pass-through, authored active;
@@ -466,8 +528,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '0dc1f4e4f03102435e54a88d0d5f6ac9cc585cf305c2554204761e44e2dbc002'
-    HOOK_ENTRY_SIZE = 26537
+    SECTION_SHA256 = '9c826610895af0a9d87761acaf32fea9edb7115426e7ff91528a76ecd7aaa77a'
+    HOOK_ENTRY_SIZE = 27155
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

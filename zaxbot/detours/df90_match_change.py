@@ -128,6 +128,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # The periodic grid scan (seeded below) fills the entity cache within ~1
     # frame; the page-flip per-frame refresh derives door_blocked[] from it.
     a.call_lbl('load_doors')
+    # Copy this map's build-time parsed switch centers, class bytes and
+    # (switch, door) pair records into the live tables. Pair door indices
+    # reference the door_table order load_doors just filled — keep this call
+    # AFTER load_doors. Inert stub on non-switch builds.
+    a.call_lbl('load_switches')
     # Static edge->door adjacency for the door-aware routing field. Doors and
     # the graph never move mid-match, so the point-segment sweep runs once
     # here (wp_load above loaded the graph; load_doors filled door_table).

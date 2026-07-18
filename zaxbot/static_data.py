@@ -47,6 +47,8 @@ DUMP_TAGS = (
     # Routing-decision state (goal/carry/missing-policy/suspend/epoch) for
     # diagnosing per-bot route commitment.
     ('tag_rstate', 'rstate'),
+    # Switch tables (count/pairs/live table prefix) for switch detection.
+    ('tag_switch', 'switch'),
 )
 
 
@@ -343,6 +345,105 @@ def write_door_static_table(section, scratch_off, layout, door_maps, map_name_sl
         layout.write(section, scratch_off, 'door_static_openers', bytes(packed_openers))
 
 
+def write_switch_static_table(section, scratch_off, layout, switch_maps, map_name_slot):
+    """Pack build-time switch map records, centers, class bytes and
+    (switch, door) pair records into scratch.
+
+    ``switch_maps`` is a sequence of ``door_data.MapDoorData`` (only maps with
+    switches). Each map record is ``name[slot] | switch_count u32 |
+    switch_first u32 | pair_count u32 | pair_first u32``. Pairs pack as
+    ``switch_idx | door_idx << 16`` — door indices reference the SAME map's
+    door_table order (both loaders copy in parse order). Also zeroes the live
+    tables.
+    """
+    if not layout.has_field('switch_static_map_count'):
+        return
+
+    switch_maps = tuple(switch_maps or ())
+    if not layout.has_field('switch_static_maps') and switch_maps:
+        raise ValueError('switch map data present but layout has no switch_static_maps field')
+
+    layout.write(section, scratch_off, 'switch_count', struct.pack('<I', 0))
+    layout.write(section, scratch_off, 'switch_pair_count', struct.pack('<I', 0))
+    if layout.has_field('switch_table'):
+        layout.write(section, scratch_off, 'switch_table', b'\x00' * layout.field('switch_table').size)
+    if layout.has_field('switch_flags'):
+        layout.write(section, scratch_off, 'switch_flags', b'\x00' * layout.field('switch_flags').size)
+    if layout.has_field('switch_pairs'):
+        layout.write(section, scratch_off, 'switch_pairs', b'\x00' * layout.field('switch_pairs').size)
+
+    map_stride = map_name_slot + 16
+    map_capacity = 0
+    point_capacity = 0
+    pair_capacity = 0
+    if layout.has_field('switch_static_maps'):
+        map_capacity = layout.field('switch_static_maps').size // map_stride
+    if layout.has_field('switch_static_points'):
+        point_capacity = layout.field('switch_static_points').size // 8
+    if layout.has_field('switch_static_pairs'):
+        pair_capacity = layout.field('switch_static_pairs').size // 4
+
+    if len(switch_maps) > map_capacity:
+        raise ValueError(
+            f'switch map table has {len(switch_maps)} rows but scratch holds {map_capacity}'
+        )
+    total_points = sum(len(m.switches) for m in switch_maps)
+    if total_points > point_capacity:
+        raise ValueError(
+            f'switch point table has {total_points} rows but scratch holds {point_capacity}'
+        )
+    total_pairs = sum(len(m.switch_pairs) for m in switch_maps)
+    if total_pairs > pair_capacity:
+        raise ValueError(
+            f'switch pair table has {total_pairs} rows but scratch holds {pair_capacity}'
+        )
+
+    packed_maps = bytearray(map_capacity * map_stride)
+    packed_points = bytearray(point_capacity * 8)
+    packed_flags = bytearray(point_capacity)
+    packed_pairs = bytearray(pair_capacity * 4)
+    point_index = 0
+    pair_index = 0
+    for map_idx, m in enumerate(switch_maps):
+        name_bytes = m.map_name.encode('latin1')
+        if b'\x00' in name_bytes:
+            raise ValueError(f'switch map name contains NUL: {m.map_name!r}')
+        if len(name_bytes) + 1 > map_name_slot:
+            raise ValueError(
+                f'switch map name too long for {map_name_slot}-byte slot: {m.map_name!r}'
+            )
+        rec_off = map_idx * map_stride
+        packed_maps[rec_off:rec_off + len(name_bytes)] = name_bytes
+        struct.pack_into('<IIII', packed_maps, rec_off + map_name_slot,
+                         len(m.switches), point_index,
+                         len(m.switch_pairs), pair_index)
+        for (x, y, fl) in m.switches:
+            struct.pack_into('<ff', packed_points, point_index * 8, float(x), float(y))
+            packed_flags[point_index] = fl & 0xFF
+            point_index += 1
+        for (si, di) in m.switch_pairs:
+            if not (0 <= si < len(m.switches)):
+                raise ValueError(f'pair switch index {si} out of range for {m.map_name!r}')
+            if not (0 <= di < max(1, len(m.doors))):
+                raise ValueError(f'pair door index {di} out of range for {m.map_name!r}')
+            struct.pack_into('<I', packed_pairs, pair_index * 4,
+                             (si & 0xFFFF) | ((di & 0xFFFF) << 16))
+            pair_index += 1
+
+    layout.write(section, scratch_off, 'switch_static_map_count',
+                 struct.pack('<I', len(switch_maps)))
+    layout.write(section, scratch_off, 'switch_static_point_count',
+                 struct.pack('<I', total_points))
+    if layout.has_field('switch_static_maps'):
+        layout.write(section, scratch_off, 'switch_static_maps', bytes(packed_maps))
+    if layout.has_field('switch_static_points'):
+        layout.write(section, scratch_off, 'switch_static_points', bytes(packed_points))
+    if layout.has_field('switch_static_flags'):
+        layout.write(section, scratch_off, 'switch_static_flags', bytes(packed_flags))
+    if layout.has_field('switch_static_pairs'):
+        layout.write(section, scratch_off, 'switch_static_pairs', bytes(packed_pairs))
+
+
 _FORCE_MODE_TABLE = {None: 0xFFFFFFFF, 'dm': 0, 'ctf': 1, 'sk': 2}
 
 
@@ -437,6 +538,8 @@ def write_static_scratch_data(
     door_entity_match_radius_sq=576.0,
     door_wedge_match_radius_sq=9216.0,
     door_edge_radius_sq=1600.0,
+    switch_map_name_slot=0,
+    overlay_switch_color=(128, 255, 255, 255),
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
     # meaningful — "spawn one bot"); CTF is the only team mode and accepts
@@ -675,12 +778,27 @@ def write_static_scratch_data(
             flag_map_name_slot,
         )
     if layout.has_field('door_static_map_count'):
+        # door_maps may include switch-only records (empty doors) since the
+        # parse keeps every map with doors OR switches; the door tables only
+        # take the door-carrying ones (keeps DOOR_STATIC_MAP_MAX at the door
+        # census) while the switch tables take the switch-carrying ones.
         write_door_static_table(
             section,
             scratch_off,
             layout,
-            door_maps,
+            tuple(m for m in door_maps if m.doors),
             door_map_name_slot,
+        )
+    if layout.has_field('overlay_switch_color'):
+        layout.write(section, scratch_off, 'overlay_switch_color',
+                     _pack_color(overlay_switch_color))
+    if layout.has_field('switch_static_map_count'):
+        write_switch_static_table(
+            section,
+            scratch_off,
+            layout,
+            tuple(m for m in door_maps if m.switches),
+            switch_map_name_slot,
         )
     # Pickup self-registration master switch (per-frame CPickupAI detour).
     if layout.has_field('pickup_register_enabled'):

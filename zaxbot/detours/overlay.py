@@ -104,6 +104,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     door_count_va             = layout.va('door_count') if layout.has_field('door_count') else 0
     door_table_va             = layout.va('door_table') if layout.has_field('door_table') else 0
     door_blocked_va           = layout.va('door_blocked') if layout.has_field('door_blocked') else 0
+    overlay_switch_color_va   = layout.va('overlay_switch_color') if layout.has_field('overlay_switch_color') else 0
+    switch_count_va           = layout.va('switch_count') if layout.has_field('switch_count') else 0
+    switch_table_va           = layout.va('switch_table') if layout.has_field('switch_table') else 0
+    switch_flags_va           = layout.va('switch_flags') if layout.has_field('switch_flags') else 0
 
     vr, vg, vb, va_ = _split_rgba_static('vertex')
     er, eg, eb, ea  = _split_rgba_static('edge')
@@ -112,6 +116,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     tr, tg, tb, ta  = _split_rgba_static('portal')
     fr, fg, fb, fa  = _split_rgba_static('flag')
     dr, dg, db, da  = _split_rgba_static('door')
+    wr, wg, wb, wa  = _split_rgba_static('switch')
 
     a.label('detour_5693A0')
     # Per-frame tick — bumped here (the one reliable once-per-frame site, the
@@ -465,6 +470,15 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xB9' + le32(overlay_door_color_va))
         a.call_va(ax.SUB_53F010_VA)
 
+    # --- Build switch-marker color (consumed by the switch pass) ----------
+    if overlay_switch_color_va:
+        a.raw(b'\x6A' + bytes([wa]))
+        a.raw(b'\x6A' + bytes([wb]))
+        a.raw(b'\x6A' + bytes([wg]))
+        a.raw(b'\x6A' + bytes([wr]))
+        a.raw(b'\xB9' + le32(overlay_switch_color_va))
+        a.call_va(ax.SUB_53F010_VA)
+
     # --- Draw vertices ----------------------------------------------------
     if overlay_vertices_va:
         a.raw(b'\x31\xF6')                                    # xor esi, esi
@@ -609,6 +623,52 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x46')                                        # ++idx
         a.jmp('ov_door_loop')
         a.label('ov_after_doors')
+
+    # --- Draw detected switches -------------------------------------------
+    # One oval per collide switch; a second double-radius ring marks the
+    # door-opening ones (SWITCH_FLAG_OPENS_DOORS — the routing-relevant
+    # subset: Torture Chamber pillar togglers, team doors, light walls). In
+    # the 8-bit palettized mode all B=255 markers share a hue, so the ring —
+    # like the closed-door ring — is the distinguishing signal, not color.
+    if switch_table_va and switch_flags_va and overlay_switch_color_va:
+        switch_ring_radius = struct.unpack(
+            '<I', struct.pack('<f', cfg.OVERLAY_VERTEX_RADIUS * 2.0))[0]
+        a.raw(b'\x31\xF6')                                    # esi = switch idx
+        a.raw(b'\x8B\x1D' + le32(switch_count_va))            # ebx = count
+        a.raw(b'\x85\xDB'); a.jz('ov_after_switches')
+        a.label('ov_switch_loop')
+        a.raw(b'\x39\xDE'); a.jae('ov_after_switches')        # idx >= count
+        a.raw(b'\xD9\x04\xF5' + le32(switch_table_va))        # fld switch.x
+        a.raw(b'\xD8\x25' + le32(overlay_cam_x_va))           # fsub cam.x
+        a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va))          # fstp p1.x
+        a.raw(b'\xD9\x04\xF5' + le32(switch_table_va + 4))    # fld switch.y
+        a.raw(b'\xD8\x25' + le32(overlay_cam_y_va))           # fsub cam.y
+        a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va + 4))      # fstp p1.y
+        _emit_point_cull(
+            a, overlay_tmp_p1_va,
+            overlay_cull_min_x_va, overlay_cull_max_x_va,
+            overlay_cull_min_y_va, overlay_cull_max_y_va,
+            'ov_switch_next',
+        )
+        a.raw(b'\xBA' + le32(overlay_tmp_p1_va))              # edx = &p1
+        a.raw(b'\x68' + le32(overlay_switch_color_va))        # push &color
+        a.raw(b'\xFF\x35' + le32(overlay_vertex_aspect_va))   # push aspect
+        a.raw(b'\xFF\x35' + le32(overlay_vertex_radius_va))   # push radius
+        a.raw(b'\x89\xF9')                                    # ecx = renderer
+        a.call_va(ax.SUB_4FCCC0_VA)
+        a.raw(b'\xF6\x04\x35' + le32(switch_flags_va)
+              + b'\x01')                                      # test flags[i], OPENS_DOORS
+        a.jz('ov_switch_next')
+        a.raw(b'\xBA' + le32(overlay_tmp_p1_va))              # edx = &p1
+        a.raw(b'\x68' + le32(overlay_switch_color_va))        # push &color
+        a.raw(b'\xFF\x35' + le32(overlay_vertex_aspect_va))   # push aspect
+        a.raw(b'\x68' + le32(switch_ring_radius))             # push 2x radius (imm float bits)
+        a.raw(b'\x89\xF9')                                    # ecx = renderer
+        a.call_va(ax.SUB_4FCCC0_VA)
+        a.label('ov_switch_next')
+        a.raw(b'\x46')                                        # ++idx
+        a.jmp('ov_switch_loop')
+        a.label('ov_after_switches')
 
     # --- Draw edges -------------------------------------------------------
     if overlay_edges_va and overlay_vertices_va:
@@ -848,6 +908,8 @@ def _split_rgba_static(role):
         src = cfg.OVERLAY_FLAG_COLOR
     elif role == 'door':
         src = cfg.OVERLAY_DOOR_COLOR
+    elif role == 'switch':
+        src = cfg.OVERLAY_SWITCH_COLOR
     else:
         raise ValueError(f'unknown overlay color role: {role!r}')
     return tuple(int(v) & 0xFF for v in src)
