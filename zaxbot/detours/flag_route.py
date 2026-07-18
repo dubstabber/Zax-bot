@@ -175,6 +175,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         seek_best_va         = layout.va('seek_best')
         seek_best_score_va   = layout.va('seek_best_score')
         seek_eval_s_va       = layout.va('seek_eval_s')
+        seek_req_open_va     = layout.va('seek_req_open')
         seek_dist_va         = layout.va('seek_dist')
         bot_seek_va          = layout.va('bot_seek')
         SEEK_ROW = VMAX * 4            # seek_dist stride per team
@@ -218,7 +219,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xB9' + le32(2 * VMAX))                        # ecx = both team rows
         a.raw(b'\xF3\xAB')                                     # rep stosd (eax still -1)
         a.raw(b'\xBF' + le32(seek_active_va))                  # edi = seek state block
-        a.raw(b'\xB9\x14\x00\x00\x00')                         # ecx = 20 dwords (10 pairs)
+        a.raw(b'\xB9\x16\x00\x00\x00')                         # ecx = 22 dwords (11 pairs)
         a.raw(b'\x31\xC0')                                     # eax = 0
         a.raw(b'\xF3\xAB')                                     # rep stosd
         a.raw(b'\xBF' + le32(bot_seek_va))                     # edi = bot_seek
@@ -516,7 +517,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
             # bots re-request on their next arrival if still blocked. The
             # epoch bump below already forces every routed bot to re-acquire.
             a.raw(b'\xBF' + le32(seek_active_va))             # edi = seek state block
-            a.raw(b'\xB9\x14\x00\x00\x00')                    # ecx = 20 dwords
+            a.raw(b'\xB9\x16\x00\x00\x00')                    # ecx = 22 dwords
             a.raw(b'\x31\xC0')                                # eax = 0
             a.raw(b'\xFC\xF3\xAB')                            # cld; rep stosd
         # Bump the route epoch so every routed bot re-acquires its node on the
@@ -722,6 +723,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
             a.jmp('cnh_field_ok')
 
             a.label('cnh_seek_gate')
+            a.raw(b'\x89\xC8')                            # eax = open dist (or -1) for req_open
             # team from door_mask_i (1 = team0, 4 = team1; set above)
             a.raw(b'\x31\xD2')                            # edx = 0
             a.raw(b'\x83\x3D' + le32(door_mask_i_va) + b'\x01')
@@ -736,6 +738,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
             a.jnz('cnh_seek_fb')
             a.raw(b'\xC7\x04\x95' + le32(seek_pending_va) + le32(1))
             a.raw(b'\x89\x1C\x95' + le32(seek_req_node_va))   # req_node = cur
+            a.raw(b'\x89\x04\x95' + le32(seek_req_open_va))   # req_open = open dist (benefit bar)
             a.raw(b'\xA1' + le32(route_goal_va))              # eax = goal idx
             a.raw(b'\x89\x04\x95' + le32(seek_req_goal_va))   # req_goal = goal
             a.raw(b'\xC7\x04\x95' + le32(seek_best_va) + le32(0))  # fresh eval round
@@ -1001,6 +1004,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x83\xF8\xFF')                                  # goal unreachable from switch?
         a.jz('sse_next_team')
         a.raw(b'\x01\xC1')                                      # ecx += eax (score2)
+        # BENEFIT bar: the switch route (walk + ideal post-open path) must
+        # BEAT the requester's current open route, else the detour is a net
+        # loss and the candidate is skipped. req_open == -1 (goal open-field
+        # unreachable, e.g. sealed Torture bases) accepts any viable switch.
+        a.raw(b'\x8B\x04\xAD' + le32(seek_req_open_va))         # eax = req_open[team]
+        a.raw(b'\x83\xF8\xFF')
+        a.jz('sse_benefit_ok')
+        a.raw(b'\x39\xC1')                                      # cmp score2, req_open
+        a.jae('sse_next_team')                                  # no gain -> skip candidate
+        a.label('sse_benefit_ok')
         # Better than the round's best so far? (best==0 = none yet)
         a.raw(b'\x8B\x04\xAD' + le32(seek_best_va))             # eax = best idx+1
         a.raw(b'\x85\xC0'); a.jz('sse_take')

@@ -461,6 +461,11 @@ class PortalDataTests(unittest.TestCase):
                 if seek[start] == -1:
                     continue
                 score = seek[start] + full[sw_nodes[s]]
+                # Activation benefit bar: the switch route must beat the
+                # requester's current open route (unless the goal is
+                # open-field unreachable, where any viable switch wins).
+                if open_[start] != -1 and score >= open_[start]:
+                    continue
                 if best is None or score < best_score:
                     best, best_score = s, score
             return ('seek', best, best_score)
@@ -647,8 +652,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = 'd4177463658e498ad534f60d9d99df314e86a7c8767f48b0f855531c8bdbb108'
-    HOOK_ENTRY_SIZE = 28512
+    SECTION_SHA256 = '20a8197ffc469da6a0cd3c6a29ed47c14f0ec79050acbf52e875f78de66541d0'
+    HOOK_ENTRY_SIZE = 28545
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

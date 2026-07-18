@@ -1326,6 +1326,7 @@ def build_scratch_layout(
                 ('seek_timer',    'seek: [team] frames before the active seek expires'),
                 ('seek_best',     'seek: [team] eval-round best candidate idx+1 (0 = none)'),
                 ('seek_best_score', 'seek: [team] best combined walk+goal score so far'),
+                ('seek_req_open', 'seek: [team] requester open-field dist to goal (-1 unreachable) — activation benefit bar'),
             ):
                 overlay_fields.append(ScratchField(name, sw_off, 0x08, desc))
                 sw_off += 0x08

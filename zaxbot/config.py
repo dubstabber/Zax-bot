@@ -740,7 +740,14 @@ SWITCH_DETECT_ENABLED = True
 # that switch until the next door-state change.
 SWITCH_SEEK_ENABLED = True
 SWITCH_SEEK_TIMEOUT_FRAMES = 900   # ~15 s at 60 Hz before an active seek expires
-SWITCH_SEEK_SHORTCUT_GAIN  = 8    # full+GAIN < open hops => worth a switch trip
+# full+GAIN < open hops triggers the shortcut request. Live-calibrated on
+# Battle on the Ice: the directional gap at the blue base node is exactly 8
+# hops for a red carrier (full 21 vs open 29 — the red door is passable for
+# its own team, unlike the physical-semantics offline sim's 10), so 8 missed
+# the request by one. The request is cheap and activation carries its own
+# BENEFIT check (walk+post-open route must beat the current open route), so
+# a low trigger threshold cannot cause silly cross-map detours.
+SWITCH_SEEK_SHORTCUT_GAIN  = 5
 SWITCH_TABLE_MAX        = 20    # live per-map switches (Foundry peaks at 19)
 SWITCH_PAIR_MAX         = 160   # live per-map (switch, door) pairs (Curse: 158)
 SWITCH_STATIC_MAP_MAX   = 20    # shipped Data.dat has 17 MP switch/door maps
