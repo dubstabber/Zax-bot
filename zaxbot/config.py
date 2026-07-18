@@ -748,6 +748,17 @@ SWITCH_SEEK_TIMEOUT_FRAMES = 900   # ~15 s at 60 Hz before an active seek expire
 # BENEFIT check (walk+post-open route must beat the current open route), so
 # a low trigger threshold cannot cause silly cross-map detours.
 SWITCH_SEEK_SHORTCUT_GAIN  = 5
+# Door-press patience. Live trace (Battle on the Ice, 2026-07-18): a red bot
+# wedged at its own closed walk-up door entered the door's tiny trigger oval
+# via the wall-slide sweep after ~2 s — the SAME timescale as the routed
+# progress timeout, whose suspension threw the bot into a roam at the exact
+# moment the door opened (blk flipped 0 for one sample while susp=234). While
+# the timeout fires WEDGED AGAINST A CLOSED DOOR (door_capture_wedge latch),
+# the follower now resets the watchdog and keeps pressing (the slide sweep
+# re-runs, each cycle another chance to catch the oval) for up to this many
+# timeout cycles before the normal suspension takes over. Truly-impassable
+# doors (sealed pillars) just delay their roam by ~2 cycles.
+WP_DOOR_PRESS_PATIENCE = 3
 SWITCH_TABLE_MAX        = 20    # live per-map switches (Foundry peaks at 19)
 SWITCH_PAIR_MAX         = 160   # live per-map (switch, door) pairs (Curse: 158)
 SWITCH_STATIC_MAP_MAX   = 20    # shipped Data.dat has 17 MP switch/door maps

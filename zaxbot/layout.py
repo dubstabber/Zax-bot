@@ -1344,6 +1344,11 @@ def build_scratch_layout(
                 'seek: eval candidate index spill (survives bfs_run)',
             ))
             sw_off += 0x04
+            overlay_fields.append(ScratchField(
+                'bot_door_patience', sw_off, MAX_BOT_SLOTS * 4,
+                'door: per-bot count of progress-timeouts bypassed while wedged at a closed door',
+            ))
+            sw_off += MAX_BOT_SLOTS * 4
             if overlay_vertex_max_capped > 0:
                 overlay_fields.append(ScratchField(
                     'seek_dist', sw_off,

@@ -1021,6 +1021,32 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xA1' + le32(route_goal_flag_va))         # eax = this bot's goal
         a.raw(b'\x83\xF8\xFF')
         a.jz('s542360_wp_reacq_no_suspend')               # roaming wedge -> no suspend
+        if door_gate and layout.has_field('bot_door_patience'):
+            # DOOR PATIENCE: a routed timeout while wedged against a CLOSED
+            # door means the bot may be one slide-sweep away from the door's
+            # (tiny) walk-up trigger oval — live trace caught the red door
+            # opening the very sample the suspension threw the bot away.
+            # Latch the wedge door now; while it is closed, restart the
+            # watchdog and keep pressing instead of suspending, up to
+            # WP_DOOR_PRESS_PATIENCE timeout cycles.
+            bot_door_patience_va = layout.va('bot_door_patience')
+            a.call_lbl('door_capture_wedge')              # latch nearest blocked door
+            a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))    # ecx = slot
+            a.raw(b'\x8B\x04\x8D' + le32(route_block_door_va))  # eax = latched door
+            a.raw(b'\x83\xF8\xFF')
+            a.jz('s542360_wp_door_impatient')             # no door wedge -> suspend
+            a.raw(b'\x3B\x05' + le32(door_count_va))      # stale idx?
+            a.jae('s542360_wp_door_impatient')
+            a.raw(b'\x83\x3C\x85' + le32(door_blocked_va) + b'\x00')
+            a.jz('s542360_wp_door_impatient')             # door open -> not this case
+            a.raw(b'\xFF\x04\x8D' + le32(bot_door_patience_va))  # ++patience[slot]
+            a.raw(b'\x83\x3C\x8D' + le32(bot_door_patience_va)
+                  + bytes([cfg.WP_DOOR_PRESS_PATIENCE]))
+            a.ja('s542360_wp_door_impatient')             # budget exhausted -> suspend
+            a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))   # fresh watchdog
+            a.jmp('s542360_wp_steer')                     # keep pressing the door
+            a.label('s542360_wp_door_impatient')
+            a.raw(b'\xC7\x04\x8D' + le32(bot_door_patience_va) + le32(0))
         a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
         a.raw(b'\xC7\x04\x8D' + le32(route_suspend_va)
               + le32(cfg.WP_ROUTE_SUSPEND_FRAMES))
