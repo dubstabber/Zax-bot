@@ -220,6 +220,8 @@ def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_route_suspend')) + le32(0))  # respawn = fresh routing
     if layout.has_field('route_block_hits'):
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('route_block_hits')) + le32(0))  # reset blocked-edge retry count
+    if layout.has_field('bot_seek'):
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_seek')) + le32(0))  # drop seek participation
     a.raw(b'\x89\x14\x8D' + le32(bot_last_char_va))       # bot_last_char[slot] = edx
     a.label('s542360_char_same')
 
@@ -565,6 +567,22 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         route_suspend_va   = layout.va('bot_route_suspend')
         route_block_hits_va = layout.va('route_block_hits')
 
+    # Switch-seek final approach: a bot descending the seek field whose node
+    # IS the sought switch's node steers at the switch CENTER to bump it.
+    seek_move = (routing
+                 and cfg.SWITCH_SEEK_ENABLED
+                 and layout.has_field('bot_seek')
+                 and layout.has_field('seek_active')
+                 and layout.has_field('seek_node')
+                 and layout.has_field('switch_table')
+                 and layout.has_field('bot_team'))
+    if seek_move:
+        bot_seek_va     = layout.va('bot_seek')
+        seek_active_va  = layout.va('seek_active')
+        seek_node_va    = layout.va('seek_node')
+        switch_table_va = layout.va('switch_table')
+        bot_team_va     = layout.va('bot_team')
+
     # Door-aware failed-edge handling (detection layer consumer). When the
     # progress watchdog marks a failed edge, door_capture_wedge latches the
     # nearest currently-blocked door to the wedged bot; the fast-retry check
@@ -787,6 +805,31 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.call_lbl('ctf_pick_goal')                       # route_goal_flag for this bot
         a.raw(b'\xA1' + le32(route_goal_flag_va))         # eax = goal flag idx
         a.raw(b'\x83\xF8\xFF'); a.jz('s542360_wp_not_final')  # no goal -> normal
+        if seek_move:
+            # Seek final approach takes precedence: bot_seek was set by the
+            # arrival that chose the seek field, the team seek is still live,
+            # and current_wp IS the switch node -> steer at the switch center
+            # (bump it) through the same watchdog as the flag approach. eax
+            # (goal) is preserved for the normal path below.
+            a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))    # ecx = slot
+            a.raw(b'\x83\x3C\x8D' + le32(bot_seek_va) + b'\x00')
+            a.jz('s542360_fa_no_seek')
+            a.raw(b'\x8B\x14\x8D' + le32(bot_team_va))    # edx = bot_team[slot]
+            a.raw(b'\x83\xE2\x01')                        # and edx, 1
+            a.raw(b'\x8B\x3C\x95' + le32(seek_active_va)) # edi = seek_active[team]
+            a.raw(b'\x85\xFF'); a.jz('s542360_fa_no_seek')
+            a.raw(b'\x8B\x34\x95' + le32(seek_node_va))   # esi = seek_node[team]
+            a.raw(b'\x8B\x14\x8D' + le32(current_wp_va))  # edx = current_wp[slot]
+            a.raw(b'\x39\xD6'); a.jnz('s542360_fa_no_seek')  # cur != switch node
+            a.raw(b'\x4F')                                # edi = switch idx (active-1)
+            a.raw(b'\xD9\x04\xFD' + le32(switch_table_va))    # fld switch.x
+            a.raw(b'\xD8\x25' + le32(bot_pos_va))         # fsub bot.x
+            a.raw(b'\xD9\x1D' + le32(dx_accum_va))        # fstp dx_accum
+            a.raw(b'\xD9\x04\xFD' + le32(switch_table_va + 4))  # fld switch.y
+            a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))     # fsub bot.y
+            a.raw(b'\xD9\x1D' + le32(dy_accum_va))        # fstp dy_accum
+            a.jmp('s542360_fa_have_target')
+            a.label('s542360_fa_no_seek')
         a.raw(b'\x8B\x0C\x85' + le32(flag_route_node_va)) # ecx = flag_route_node[goal]
         a.raw(b'\x8B\x15' + le32(bot_slot_tmp_va))        # edx = slot
         a.raw(b'\x8B\x14\x95' + le32(current_wp_va))      # edx = current_wp[slot] (cur)
@@ -798,6 +841,8 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xD9\x04\xC5' + le32(flag_table_va + 4))  # fld [flag_table + eax*8 + 4] (flag.y)
         a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))         # fsub bot.y
         a.raw(b'\xD9\x1D' + le32(dy_accum_va))            # fstp dy_accum
+        if seek_move:
+            a.label('s542360_fa_have_target')
         # --- Final-approach watchdog. This branch used to jump straight to the
         # emit, bypassing the arrival/progress machinery entirely — a carrier
         # whose straight line to the base was blocked (door, pinch) steered

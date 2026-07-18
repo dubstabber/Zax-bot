@@ -71,6 +71,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.label('rebuild_open_routes'); a.raw(b'\xC3')
         a.label('ctf_pick_goal'); a.raw(b'\xC3')
         a.label('ctf_next_hop'); a.raw(b'\xB8\xFF\xFF\xFF\xFF\xC3')  # mov eax,-1; ret
+        a.label('switch_seek_eval'); a.raw(b'\xC3')
         return
 
     routing_active_va = layout.va('flag_routing_active')
@@ -141,6 +142,42 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         route_use_open_va = layout.va('route_use_open')
         TEAM_ROW = RMAX * ROW          # open-field stride per team (team-major)
 
+    # Switch-seek routing (detection-layer consumer). All state per team; the
+    # seek field is a bfs_run pass rooted at the sought switch's node with the
+    # SAME team door gating as the open field, so descending it is exactly the
+    # open-field walk semantics.
+    seek = (
+        door_route
+        and cfg.SWITCH_SEEK_ENABLED
+        and layout.has_field('seek_active')
+        and layout.has_field('seek_dist')
+        and layout.has_field('switch_node')
+        and layout.has_field('switch_table')
+        and layout.has_field('switch_flags')
+        and layout.has_field('switch_pairs')
+        and layout.has_field('bot_seek')
+    )
+    if seek:
+        switch_node_va       = layout.va('switch_node')
+        switch_table_va      = layout.va('switch_table')
+        switch_flags_va      = layout.va('switch_flags')
+        switch_pairs_va      = layout.va('switch_pairs')
+        switch_count_va      = layout.va('switch_count')
+        switch_pair_count_va = layout.va('switch_pair_count')
+        seek_active_va       = layout.va('seek_active')
+        seek_node_va         = layout.va('seek_node')
+        seek_pending_va      = layout.va('seek_pending')
+        seek_req_node_va     = layout.va('seek_req_node')
+        seek_req_goal_va     = layout.va('seek_req_goal')
+        seek_tried_va        = layout.va('seek_tried')
+        seek_fail_va         = layout.va('seek_fail')
+        seek_timer_va        = layout.va('seek_timer')
+        seek_best_va         = layout.va('seek_best')
+        seek_best_score_va   = layout.va('seek_best_score')
+        seek_dist_va         = layout.va('seek_dist')
+        bot_seek_va          = layout.va('bot_seek')
+        SEEK_ROW = VMAX * 4            # seek_dist stride per team
+
     # =====================================================================
     # build_flag_routes: per-match BFS distance field(s) from each flag base.
     # pushad/popad, no args. Safe to call even with no graph (dist stays INF).
@@ -168,9 +205,48 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xB9' + le32(RMAX))                                # ecx = RMAX
     a.raw(b'\xB8\xFF\xFF\xFF\xFF')                             # eax = -1
     a.raw(b'\xF3\xAB')                                         # rep stosd
+    if seek:
+        # Fresh seek state per match: node bindings/field to -1, the whole
+        # per-team state block (seek_active..seek_timer, contiguous 16 dwords)
+        # and bot_seek[] to 0.
+        a.raw(b'\xBF' + le32(switch_node_va))                  # edi = switch_node
+        a.raw(b'\xB9' + le32(cfg.SWITCH_TABLE_MAX))            # ecx = table max
+        a.raw(b'\xB8\xFF\xFF\xFF\xFF')                         # eax = -1
+        a.raw(b'\xF3\xAB')                                     # rep stosd
+        a.raw(b'\xBF' + le32(seek_dist_va))                    # edi = seek_dist
+        a.raw(b'\xB9' + le32(2 * VMAX))                        # ecx = both team rows
+        a.raw(b'\xF3\xAB')                                     # rep stosd (eax still -1)
+        a.raw(b'\xBF' + le32(seek_active_va))                  # edi = seek state block
+        a.raw(b'\xB9\x14\x00\x00\x00')                         # ecx = 20 dwords (10 pairs)
+        a.raw(b'\x31\xC0')                                     # eax = 0
+        a.raw(b'\xF3\xAB')                                     # rep stosd
+        a.raw(b'\xBF' + le32(bot_seek_va))                     # edi = bot_seek
+        a.raw(b'\xB9' + le32(16))                              # ecx = MAX_BOT_SLOTS
+        a.raw(b'\xF3\xAB')                                     # rep stosd
     # No graph? leave INF and bail.
     a.raw(b'\xA1' + le32(vcount_va))                           # eax = vertex_count
     a.raw(b'\x85\xC0'); a.jz('bfr_done')
+    if seek:
+        # Bind each live switch to its nearest graph node (the seek routing
+        # target). wp_find_nearest reads wp_scratch, returns ebx; it may
+        # clobber the loop register, so spill the index in bfs_u.
+        a.raw(b'\xC7\x05' + le32(bfs_u_va) + le32(0))          # s = 0
+        a.label('bfr_sbn_loop')
+        a.raw(b'\xA1' + le32(bfs_u_va))                        # eax = s
+        a.raw(b'\x3B\x05' + le32(switch_count_va))             # s >= switch_count?
+        a.jae('bfr_sbn_done')
+        a.raw(b'\x83\xF8' + bytes([cfg.SWITCH_TABLE_MAX]))     # s >= table max?
+        a.jae('bfr_sbn_done')
+        a.raw(b'\x8B\x0C\xC5' + le32(switch_table_va))         # ecx = switch.x
+        a.raw(b'\x89\x0D' + le32(wp_scratch_va))               # wp_scratch.x
+        a.raw(b'\x8B\x0C\xC5' + le32(switch_table_va + 4))     # ecx = switch.y
+        a.raw(b'\x89\x0D' + le32(wp_scratch_va + 4))           # wp_scratch.y
+        a.call_lbl('wp_find_nearest')                          # ebx = nearest or -1
+        a.raw(b'\xA1' + le32(bfs_u_va))                        # eax = s
+        a.raw(b'\x89\x1C\x85' + le32(switch_node_va))          # switch_node[s] = ebx
+        a.raw(b'\xFF\x05' + le32(bfs_u_va))                    # ++s
+        a.jmp('bfr_sbn_loop')
+        a.label('bfr_sbn_done')
     a.raw(b'\xC7\x05' + le32(bfr_i_va) + le32(0))             # bfr_i = 0
 
     a.label('bfr_loop')
@@ -431,6 +507,17 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xFF\x05' + le32(bfr_i_va))                   # i++
         a.jmp('ror_loop')
         a.label('ror_done')
+        if seek:
+            # Door state changed: every seek premise (which doors are blocked,
+            # which switches are viable, the seek field itself) is stale.
+            # Clear the whole per-team block INCLUDING the timeout blacklist
+            # (a blacklisted switch deserves a retry once the world changed);
+            # bots re-request on their next arrival if still blocked. The
+            # epoch bump below already forces every routed bot to re-acquire.
+            a.raw(b'\xBF' + le32(seek_active_va))             # edi = seek state block
+            a.raw(b'\xB9\x14\x00\x00\x00')                    # ecx = 20 dwords
+            a.raw(b'\x31\xC0')                                # eax = 0
+            a.raw(b'\xFC\xF3\xAB')                            # cld; rep stosd
         # Bump the route epoch so every routed bot re-acquires its node on the
         # next think and re-runs ctf_next_hop against the freshly rebuilt open
         # field. Without this, routing only re-evaluates on node arrival, so a
@@ -578,6 +665,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x89\x0D' + le32(route_cur_va))               # route_cur = ecx (cur)
     a.raw(b'\x83\x3D' + le32(routing_active_va) + b'\x00') # cmp [flag_routing_active], 0
     a.jz('cnh_fail')
+    if seek:
+        # Participation is re-earned at every arrival: cleared here, set again
+        # below only when this hop actually descends the seek field.
+        a.raw(b'\x8B\x0D' + le32(bot_slot_va))            # ecx = slot
+        a.raw(b'\xC7\x04\x8D' + le32(bot_seek_va) + le32(0))  # bot_seek[slot] = 0
     a.call_lbl('ctf_pick_goal')                           # sets route_goal_flag
     a.raw(b'\xA1' + le32(route_goal_va))                  # eax = goal flag idx
     a.raw(b'\x83\xF8\xFF'); a.jz('cnh_fail')             # no goal base
@@ -608,8 +700,66 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x8D\xA8' + le32(flag_dist_open_va))     # lea ebp, [eax + flag_dist_open]
         a.raw(b'\x8B\x1D' + le32(route_cur_va))          # ebx = cur
         a.raw(b'\x8B\x4C\x9D\x00')                        # ecx = open_dist[cur]
-        a.raw(b'\x83\xF9\xFF')                            # reachable for this team?
-        a.jnz('cnh_field_ok')
+        if seek:
+            # --- Switch-seek gate. Two triggers: the goal is open-field
+            # UNREACHABLE from here (sealed base), or reachable only via a
+            # detour SHORTCUT_GAIN+ hops worse than the full field's
+            # closed-door path (the "inside switch" shortcut). While a team
+            # seek is ACTIVE and this node reaches the switch, descend the
+            # seek field instead; otherwise request an eval and keep the
+            # normal open-or-full behaviour meanwhile.
+            a.raw(b'\x83\xF9\xFF')                        # open unreachable?
+            a.jz('cnh_seek_gate')
+            a.raw(b'\x89\xFA')                            # edx = edi (goal row offset)
+            a.raw(b'\x81\xC2' + le32(flag_dist_va))       # edx = full row base
+            a.raw(b'\x8B\x14\x9A')                        # edx = full_dist[cur]
+            a.raw(b'\x83\xFA\xFF')                        # full unreachable?
+            a.jz('cnh_field_ok')                          # keep open field
+            a.raw(b'\x83\xC2' + bytes([cfg.SWITCH_SEEK_SHORTCUT_GAIN]))
+            a.raw(b'\x39\xCA')                            # cmp full+GAIN, open
+            a.jb('cnh_seek_gate')                         # big detour -> try seek
+            a.jmp('cnh_field_ok')
+
+            a.label('cnh_seek_gate')
+            # team from door_mask_i (1 = team0, 4 = team1; set above)
+            a.raw(b'\x31\xD2')                            # edx = 0
+            a.raw(b'\x83\x3D' + le32(door_mask_i_va) + b'\x01')
+            a.jz('cnh_seek_t0')
+            a.raw(b'\x42')                                # edx = 1
+            a.label('cnh_seek_t0')
+            a.raw(b'\x8B\x0C\x95' + le32(seek_active_va)) # ecx = seek_active[team]
+            a.raw(b'\x85\xC9')
+            a.jnz('cnh_seek_have')
+            # No active seek: request an eval (once) and route normally.
+            a.raw(b'\x83\x3C\x95' + le32(seek_pending_va) + b'\x00')
+            a.jnz('cnh_seek_fb')
+            a.raw(b'\xC7\x04\x95' + le32(seek_pending_va) + le32(1))
+            a.raw(b'\x89\x1C\x95' + le32(seek_req_node_va))   # req_node = cur
+            a.raw(b'\xA1' + le32(route_goal_va))              # eax = goal idx
+            a.raw(b'\x89\x04\x95' + le32(seek_req_goal_va))   # req_goal = goal
+            a.raw(b'\xC7\x04\x95' + le32(seek_best_va) + le32(0))  # fresh eval round
+            a.jmp('cnh_seek_fb')
+
+            a.label('cnh_seek_have')
+            a.raw(b'\x89\xD0')                            # eax = team
+            a.raw(b'\x69\xC0' + le32(SEEK_ROW))           # eax *= SEEK_ROW
+            a.raw(b'\x05' + le32(seek_dist_va))           # eax = seek row base
+            a.raw(b'\x8B\x0C\x98')                        # ecx = seek_dist[cur]
+            a.raw(b'\x83\xF9\xFF')                        # switch reachable from here?
+            a.jz('cnh_seek_fb')
+            a.raw(b'\x89\xC5')                            # ebp = seek row
+            a.raw(b'\x8B\x15' + le32(bot_slot_va))        # edx = slot
+            a.raw(b'\xC7\x04\x95' + le32(bot_seek_va) + le32(1))  # bot_seek[slot] = 1
+            a.jmp('cnh_field_ok')                         # ecx = cur seek dist
+
+            a.label('cnh_seek_fb')
+            # Fallback = the original open-or-full selection (ebp = open row).
+            a.raw(b'\x8B\x4C\x9D\x00')                    # ecx = open_dist[cur]
+            a.raw(b'\x83\xF9\xFF')
+            a.jnz('cnh_field_ok')                         # shortcut case: open field
+        else:
+            a.raw(b'\x83\xF9\xFF')                        # reachable for this team?
+            a.jnz('cnh_field_ok')
         a.raw(b'\xC7\x05' + le32(route_use_open_va) + le32(0))
         a.raw(b'\x8D\xAF' + le32(flag_dist_va))          # lea ebp, [edi + flag_dist]
         a.raw(b'\x8B\x4C\x9D\x00')                        # ecx = full_dist[cur]
@@ -699,3 +849,215 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('cnh_fail')
     a.raw(b'\xB8\xFF\xFF\xFF\xFF')                      # eax = -1
     a.raw(b'\xC3')
+
+    # =====================================================================
+    # switch_seek_eval: per-frame (page flip) seek servicing. For each team:
+    # an ACTIVE seek ticks its timeout (expiry blacklists the switch until
+    # the next door-state change); a PENDING request evaluates AT MOST ONE
+    # candidate per frame — the untried door-opening switch with a currently
+    # BLOCKED paired door, a bound node, and the smallest full-field distance
+    # to the requester's goal — by running one team-door-gated bfs_run rooted
+    # at the switch node into this team's seek_dist row. Requester reachable
+    # => activate; unreachable => mark tried, next frame tries the next
+    # candidate; none left => drop the request (bots keep today's fallback).
+    # One BFS per frame keeps the page flip smooth. pushad/popad.
+    # =====================================================================
+    if not seek:
+        a.label('switch_seek_eval')
+        a.raw(b'\xC3')
+    else:
+        a.label('switch_seek_eval')
+        a.raw(b'\x60')                                          # pushad
+        a.raw(b'\x83\x3D' + le32(routing_active_va) + b'\x00')  # CTF routing live?
+        a.jz('sse_out')
+        a.raw(b'\x31\xED')                                      # ebp = 0 (team)
+
+        a.label('sse_team_loop')
+        a.raw(b'\x8B\x04\xAD' + le32(seek_active_va))           # eax = seek_active[team]
+        a.raw(b'\x85\xC0')
+        a.jz('sse_check_pending')
+        # Active: tick the timeout.
+        a.raw(b'\x8B\x0C\xAD' + le32(seek_timer_va))            # ecx = timer
+        a.raw(b'\x85\xC9'); a.jz('sse_expire')                  # defensive
+        a.raw(b'\x49')                                          # dec ecx
+        a.raw(b'\x89\x0C\xAD' + le32(seek_timer_va))            # store back
+        a.jnz('sse_next_team')                                  # still ticking
+        a.label('sse_expire')
+        a.raw(b'\x48')                                          # eax = switch idx
+        a.raw(b'\x89\xC1')                                      # ecx = idx
+        a.raw(b'\xBA\x01\x00\x00\x00')                          # edx = 1
+        a.raw(b'\xD3\xE2')                                      # shl edx, cl
+        a.raw(b'\x09\x14\xAD' + le32(seek_fail_va))             # fail |= 1 << idx
+        a.raw(b'\xC7\x04\xAD' + le32(seek_active_va) + le32(0))
+        a.jmp('sse_next_team')
+
+        a.label('sse_check_pending')
+        a.raw(b'\x83\x3C\xAD' + le32(seek_pending_va) + b'\x00')
+        a.jz('sse_next_team')
+        # ---- find the FIRST untried viable candidate (cheap filters run in
+        # one frame; the BFS below is at most ONE per frame). Every candidate
+        # is scored by the DETOUR metric seek_walk(requester -> switch) +
+        # full_dist(switch -> goal); the best is activated once all have been
+        # evaluated. Cheap-rejects are marked tried immediately so the scan
+        # never revisits them.
+        a.raw(b'\x31\xF6')                                      # esi = 0 (s)
+        a.label('sse_cand_loop')
+        a.raw(b'\x3B\x35' + le32(switch_count_va))              # s >= switch_count?
+        a.jae('sse_no_more')
+        a.raw(b'\x83\xFE' + bytes([cfg.SWITCH_TABLE_MAX]))      # s >= table max?
+        a.jae('sse_no_more')
+        # tried/blacklisted?
+        a.raw(b'\x89\xF1')                                      # ecx = s
+        a.raw(b'\xBA\x01\x00\x00\x00')                          # edx = 1
+        a.raw(b'\xD3\xE2')                                      # shl edx, cl (1<<s)
+        a.raw(b'\x8B\x04\xAD' + le32(seek_tried_va))            # eax = tried[team]
+        a.raw(b'\x0B\x04\xAD' + le32(seek_fail_va))             # eax |= fail[team]
+        a.raw(b'\x85\xD0')                                      # test eax, edx
+        a.jnz('sse_cand_next')
+        # door-opening class?
+        a.raw(b'\xF6\x04\x35' + le32(switch_flags_va) + b'\x01')  # flags[s] & OPENS?
+        a.jz('sse_cand_tried')
+        # node bound?
+        a.raw(b'\x8B\x04\xB5' + le32(switch_node_va))           # eax = switch_node[s]
+        a.raw(b'\x83\xF8\xFF')
+        a.jz('sse_cand_tried')
+        # any paired door currently blocked? (also the toggle-safety gate:
+        # a toggler whose doors are all open must never be bumped shut)
+        a.raw(b'\x31\xC9')                                      # ecx = 0 (pair idx)
+        a.label('sse_pair_loop')
+        a.raw(b'\x3B\x0D' + le32(switch_pair_count_va))         # pairs done?
+        a.jae('sse_cand_tried')                                 # none blocked -> reject
+        a.raw(b'\x8B\x14\x8D' + le32(switch_pairs_va))          # edx = pair record
+        a.raw(b'\x0F\xB7\xC2')                                  # movzx eax, dx (switch idx)
+        a.raw(b'\x39\xF0')                                      # cmp eax, esi
+        a.jnz('sse_pair_next')
+        a.raw(b'\xC1\xEA\x10')                                  # edx >>= 16 (door idx)
+        a.raw(b'\x3B\x15' + le32(door_count_va))                # stale idx?
+        a.jae('sse_pair_next')
+        a.raw(b'\x83\x3C\x95' + le32(door_blocked_va) + b'\x00')
+        a.jnz('sse_have_cand')
+        a.label('sse_pair_next')
+        a.raw(b'\x41')                                          # ++pair idx
+        a.jmp('sse_pair_loop')
+        a.label('sse_cand_tried')
+        # Cheap reject: mark tried so tomorrow's scan skips it, keep scanning.
+        a.raw(b'\x89\xF1')                                      # ecx = s
+        a.raw(b'\xBA\x01\x00\x00\x00')                          # edx = 1
+        a.raw(b'\xD3\xE2')                                      # shl edx, cl
+        a.raw(b'\x09\x14\xAD' + le32(seek_tried_va))            # tried |= 1<<s
+        a.label('sse_cand_next')
+        a.raw(b'\x46')                                          # ++s
+        a.jmp('sse_cand_loop')
+
+        a.label('sse_have_cand')
+        # One team-gated BFS rooted at candidate esi's node into seek_dist[team].
+        a.raw(b'\x89\x35' + le32(bfs_u_va))                     # spill candidate s
+        a.raw(b'\x89\xE8')                                      # eax = team
+        a.raw(b'\x69\xC0' + le32(SEEK_ROW))                     # eax *= SEEK_ROW
+        a.raw(b'\x05' + le32(seek_dist_va))                     # eax = seek row
+        a.raw(b'\xA3' + le32(bfs_disti_va))                     # bfs_disti = row
+        a.raw(b'\x89\xC7')                                      # edi = row
+        a.raw(b'\xB9' + le32(VMAX))                             # ecx = VMAX
+        a.raw(b'\xB8\xFF\xFF\xFF\xFF')                          # eax = -1
+        a.raw(b'\xFC\xF3\xAB')                                  # cld; rep stosd (clear row)
+        a.raw(b'\xC7\x05' + le32(bfs_skip_va) + le32(1))        # skip blocked edges
+        a.raw(b'\x8D\x4C\x2D\x00')                              # lea ecx, [ebp+ebp] (team*2)
+        a.raw(b'\xBA\x01\x00\x00\x00')                          # edx = 1
+        a.raw(b'\xD3\xE2')                                      # shl edx, cl
+        a.raw(b'\x89\x15' + le32(door_mask_i_va))               # door_mask_i = 1<<team*2
+        a.raw(b'\x01\xD2')                                      # edx += edx
+        a.raw(b'\x89\x15' + le32(door_mask_j_va))               # door_mask_j = 2<<team*2
+        a.raw(b'\xA1' + le32(bfs_u_va))                         # eax = candidate s
+        a.raw(b'\x8B\x04\x85' + le32(switch_node_va))           # eax = switch_node[s]
+        a.raw(b'\xA3' + le32(bfs_start_va))                     # bfs_start = node
+        a.raw(b'\x89\x2D' + le32(bfr_i_va))                     # spill team (bfs clobbers GPRs)
+        a.call_lbl('bfs_run')
+        a.raw(b'\x8B\x2D' + le32(bfr_i_va))                     # ebp = team
+        # Mark tried regardless of the outcome.
+        a.raw(b'\x8B\x0D' + le32(bfs_u_va))                     # ecx = candidate s
+        a.raw(b'\xBA\x01\x00\x00\x00')                          # edx = 1
+        a.raw(b'\xD3\xE2')                                      # shl edx, cl
+        a.raw(b'\x09\x14\xAD' + le32(seek_tried_va))            # tried |= 1<<s
+        # Requester reachable?
+        a.raw(b'\x8B\x04\xAD' + le32(seek_req_node_va))         # eax = req node
+        a.raw(b'\x3B\x05' + le32(vcount_va))                    # defensive range
+        a.jae('sse_next_team')
+        a.raw(b'\x89\xE9')                                      # ecx = team
+        a.raw(b'\x69\xC9' + le32(SEEK_ROW))                     # ecx *= SEEK_ROW
+        a.raw(b'\x81\xC1' + le32(seek_dist_va))                 # ecx = seek row
+        a.raw(b'\x8B\x0C\x81')                                  # ecx = seek_dist[req node]
+        a.raw(b'\x83\xF9\xFF')
+        a.jz('sse_next_team')                                   # unreachable -> next frame
+        # score2 = seek walk + full_dist(switch_node -> req_goal)
+        a.raw(b'\x8B\x04\xAD' + le32(seek_req_goal_va))         # eax = req_goal
+        a.raw(b'\x83\xF8' + bytes([RMAX]))                      # defensive range
+        a.jae('sse_next_team')
+        a.raw(b'\x69\xC0' + le32(ROW))                          # eax *= ROW
+        a.raw(b'\x05' + le32(flag_dist_va))                     # eax = full row base
+        a.raw(b'\x8B\x15' + le32(bfs_u_va))                     # edx = candidate s
+        a.raw(b'\x8B\x14\x95' + le32(switch_node_va))           # edx = switch_node[s]
+        a.raw(b'\x8B\x04\x90')                                  # eax = full[switch node]
+        a.raw(b'\x83\xF8\xFF')                                  # goal unreachable from switch?
+        a.jz('sse_next_team')
+        a.raw(b'\x01\xC1')                                      # ecx += eax (score2)
+        # Better than the round's best so far? (best==0 = none yet)
+        a.raw(b'\x8B\x04\xAD' + le32(seek_best_va))             # eax = best idx+1
+        a.raw(b'\x85\xC0'); a.jz('sse_take')
+        a.raw(b'\x3B\x0C\xAD' + le32(seek_best_score_va))       # cmp score2, best score
+        a.jae('sse_next_team')
+        a.label('sse_take')
+        a.raw(b'\x8B\x15' + le32(bfs_u_va))                     # edx = candidate s
+        a.raw(b'\x42')                                          # edx = s+1
+        a.raw(b'\x89\x14\xAD' + le32(seek_best_va))             # best = s+1
+        a.raw(b'\x89\x0C\xAD' + le32(seek_best_score_va))       # best score = score2
+        a.jmp('sse_next_team')
+
+        a.label('sse_no_more')
+        # Every candidate evaluated: activate the round's best, or drop.
+        a.raw(b'\x8B\x04\xAD' + le32(seek_best_va))             # eax = best idx+1
+        a.raw(b'\x85\xC0'); a.jz('sse_drop')
+        a.raw(b'\x48')                                          # eax = best idx
+        a.raw(b'\xA3' + le32(bfs_u_va))                         # spill
+        # Re-run the winner's BFS (the row currently holds the LAST candidate).
+        a.raw(b'\x89\xE8')                                      # eax = team
+        a.raw(b'\x69\xC0' + le32(SEEK_ROW))                     # eax *= SEEK_ROW
+        a.raw(b'\x05' + le32(seek_dist_va))                     # eax = seek row
+        a.raw(b'\xA3' + le32(bfs_disti_va))                     # bfs_disti = row
+        a.raw(b'\x89\xC7')                                      # edi = row
+        a.raw(b'\xB9' + le32(VMAX))                             # ecx = VMAX
+        a.raw(b'\xB8\xFF\xFF\xFF\xFF')                          # eax = -1
+        a.raw(b'\xFC\xF3\xAB')                                  # cld; rep stosd
+        a.raw(b'\xC7\x05' + le32(bfs_skip_va) + le32(1))
+        a.raw(b'\x8D\x4C\x2D\x00')                              # lea ecx, [ebp+ebp]
+        a.raw(b'\xBA\x01\x00\x00\x00')                          # edx = 1
+        a.raw(b'\xD3\xE2')                                      # shl edx, cl
+        a.raw(b'\x89\x15' + le32(door_mask_i_va))
+        a.raw(b'\x01\xD2')
+        a.raw(b'\x89\x15' + le32(door_mask_j_va))
+        a.raw(b'\xA1' + le32(bfs_u_va))                         # eax = winner s
+        a.raw(b'\x8B\x04\x85' + le32(switch_node_va))           # eax = its node
+        a.raw(b'\xA3' + le32(bfs_start_va))
+        a.raw(b'\x89\x2D' + le32(bfr_i_va))                     # spill team
+        a.call_lbl('bfs_run')
+        a.raw(b'\x8B\x2D' + le32(bfr_i_va))                     # ebp = team
+        # ACTIVATE.
+        a.raw(b'\xA1' + le32(bfs_u_va))                         # eax = winner s
+        a.raw(b'\x8B\x0C\x85' + le32(switch_node_va))           # ecx = its node
+        a.raw(b'\x89\x0C\xAD' + le32(seek_node_va))             # seek_node[team] = node
+        a.raw(b'\x40')                                          # eax = s+1
+        a.raw(b'\x89\x04\xAD' + le32(seek_active_va))           # seek_active[team] = s+1
+        a.raw(b'\xC7\x04\xAD' + le32(seek_timer_va)
+              + le32(cfg.SWITCH_SEEK_TIMEOUT_FRAMES))
+        a.label('sse_drop')
+        a.raw(b'\xC7\x04\xAD' + le32(seek_pending_va) + le32(0))
+        a.raw(b'\xC7\x04\xAD' + le32(seek_tried_va) + le32(0))
+        a.raw(b'\xC7\x04\xAD' + le32(seek_best_va) + le32(0))
+        a.raw(b'\xC7\x04\xAD' + le32(seek_best_score_va) + le32(0))
+
+        a.label('sse_next_team')
+        a.raw(b'\x45')                                          # ++team
+        a.raw(b'\x83\xFD\x02')                                  # team < 2?
+        a.jb('sse_team_loop')
+        a.label('sse_out')
+        a.raw(b'\x61')                                          # popad
+        a.raw(b'\xC3')

@@ -233,6 +233,17 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         emit_chunk(layout.va('tag_switch'),
                    b'\xB8' + le32(layout.va('switch_count')),
                    switch_dump_len, 'snap_skip_switch')
+    # Switch-seek state: switch_node bindings + the whole per-team block
+    # (active/node/pending/req/tried/fail/timer/best) + bot_seek — one R
+    # press pins which switch a team is seeking, why (req node/goal), and
+    # which bots are participating. seek_dist is omitted (2KB of field).
+    if layout.has_field('tag_seek') and layout.has_field('switch_node'):
+        seek_dump_len = (layout.field('bot_seek').offset
+                         + layout.field('bot_seek').size
+                         - layout.field('switch_node').offset)
+        emit_chunk(layout.va('tag_seek'),
+                   b'\xB8' + le32(layout.va('switch_node')),
+                   seek_dump_len, 'snap_skip_seek')
 
     # Waypoint-graph probe. wp_compute populates wp_diag_data[0..7]:
     #   [+0x00] MGR, [+0x04] WM, [+0x08] LV, [+0x0C] WPM,

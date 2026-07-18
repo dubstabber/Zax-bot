@@ -1299,6 +1299,53 @@ def build_scratch_layout(
                 'tag_switch', sw_off, 0x10,
                 'diag: switch-table dump chunk tag',
             ))
+            sw_off += 0x10
+
+            # --- Switch-seek routing state -----------------------------
+            # Per-team (2 entries each): a bot whose goal is open-field
+            # unreachable (or far cheaper through a closed door) requests a
+            # seek; the page-flip eval picks the best viable door-opening
+            # switch (paired door blocked, node bound, best full-field score
+            # toward the requester's goal), BFS-fills seek_dist rooted at its
+            # node with this team's door gating, and activates. ctf_next_hop
+            # then descends seek_dist; at the switch node the follower
+            # final-approaches the switch center to BUMP it.
+            overlay_fields.append(ScratchField(
+                'switch_node', sw_off, switch_table_max_capped * 4,
+                'seek: nearest graph node per live switch (-1 = unbound)',
+            ))
+            sw_off += switch_table_max_capped * 4
+            for name, desc in (
+                ('seek_active',   'seek: [team] active switch idx+1 (0 = none)'),
+                ('seek_node',     'seek: [team] graph node of the active switch'),
+                ('seek_pending',  'seek: [team] 1 = a bot requested an eval'),
+                ('seek_req_node', 'seek: [team] requesting bot\'s node'),
+                ('seek_req_goal', 'seek: [team] requesting bot\'s goal base idx'),
+                ('seek_tried',    'seek: [team] eval-round tried-candidate bitmask'),
+                ('seek_fail',     'seek: [team] timeout blacklist bitmask (cleared on rebuild)'),
+                ('seek_timer',    'seek: [team] frames before the active seek expires'),
+                ('seek_best',     'seek: [team] eval-round best candidate idx+1 (0 = none)'),
+                ('seek_best_score', 'seek: [team] best combined walk+goal score so far'),
+            ):
+                overlay_fields.append(ScratchField(name, sw_off, 0x08, desc))
+                sw_off += 0x08
+            overlay_fields.append(ScratchField(
+                'bot_seek', sw_off, MAX_BOT_SLOTS * 4,
+                'seek: per-bot 1 = descending the seek field this leg',
+            ))
+            sw_off += MAX_BOT_SLOTS * 4
+            if overlay_vertex_max_capped > 0:
+                overlay_fields.append(ScratchField(
+                    'seek_dist', sw_off,
+                    2 * overlay_vertex_max_capped * 4,
+                    'seek: per-team BFS hop field rooted at the active switch node',
+                ))
+                sw_off += 2 * overlay_vertex_max_capped * 4
+            overlay_fields.append(ScratchField(
+                'tag_seek', sw_off, 0x10,
+                'diag: switch-seek state dump chunk tag',
+            ))
+            sw_off += 0x10
 
     fields.extend(overlay_fields)
     return ScratchLayout(base_va, scratch_size, fields)

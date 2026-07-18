@@ -49,6 +49,8 @@ DUMP_TAGS = (
     ('tag_rstate', 'rstate'),
     # Switch tables (count/pairs/live table prefix) for switch detection.
     ('tag_switch', 'switch'),
+    # Switch-seek state (switch_node bindings + per-team state + bot_seek).
+    ('tag_seek', 'seek'),
 )
 
 

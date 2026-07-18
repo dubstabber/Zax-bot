@@ -718,6 +718,29 @@ DOOR_ROUTE_PHYSICAL_STATE = False
 # time and copied per match by load_switches. DETECTION layer only — overlay
 # markers + tables; switch-seek routing consumes these later.
 SWITCH_DETECT_ENABLED = True
+# --- Switch-seek routing (consumes the detection tables) -------------------
+# When a routed CTF bot's goal is OPEN-FIELD UNREACHABLE from its node (sealed
+# Torture Chamber base) or reachable only via a detour SHORTCUT_GAIN+ hops
+# longer than the full field's closed-door path (Battle on the Ice: a red bot
+# inside the blue base with the team-gated blue door shut), it requests a
+# switch seek. The page-flip eval (one candidate BFS per frame, cheap) picks
+# the best viable candidate: OPENS_DOORS class, a currently-BLOCKED paired
+# door (also the toggle-safety gate — never bump a toggler whose doors are
+# open, it would CLOSE them), a bound graph node, and the smallest full-field
+# distance to the requester's goal (selects the switch by the blocked
+# frontier, not across the map); viable = the requester's node reaches the
+# switch node in a team-door-gated BFS rooted at the switch (the Battle on
+# the Ice reachability constraint: the blue-base switch is reachable for red
+# only from inside). Activation is per team; participating bots descend the
+# seek field and final-approach the switch center to BUMP it (all MP switches
+# are player-bump). The opened door then flows through the normal
+# door_dirty -> rebuild -> route-epoch machinery, which also CLEARS all seek
+# state (fields are stale the moment doors change); bots re-request if still
+# blocked. A seek that makes no door change for TIMEOUT frames blacklists
+# that switch until the next door-state change.
+SWITCH_SEEK_ENABLED = True
+SWITCH_SEEK_TIMEOUT_FRAMES = 900   # ~15 s at 60 Hz before an active seek expires
+SWITCH_SEEK_SHORTCUT_GAIN  = 8    # full+GAIN < open hops => worth a switch trip
 SWITCH_TABLE_MAX        = 20    # live per-map switches (Foundry peaks at 19)
 SWITCH_PAIR_MAX         = 160   # live per-map (switch, door) pairs (Curse: 158)
 SWITCH_STATIC_MAP_MAX   = 20    # shipped Data.dat has 17 MP switch/door maps

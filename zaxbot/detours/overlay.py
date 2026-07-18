@@ -286,6 +286,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
             a.jz('ov_door_rr_done')                           # non-CTF: state only
             a.call_lbl('rebuild_open_routes')
             a.label('ov_door_rr_done')
+    # Switch-seek servicing: tick active seek timeouts and evaluate at most
+    # ONE pending candidate (one bounded BFS) per frame. Self-gated on
+    # flag_routing_active inside; inert stub on non-seek builds.
+    if cfg.SWITCH_SEEK_ENABLED and layout.has_field('seek_active'):
+        a.call_lbl('switch_seek_eval')
     # Far CTF capture support. The bot force-tick above keeps the carrier
     # moving, but capture itself is driven by the base "checker" trigger at the
     # destination. Those entities are also camera-gated by the engine, so a bot

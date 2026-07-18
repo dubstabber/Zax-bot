@@ -529,11 +529,11 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     so `ctf_next_hop` re-plans door-aware from the reachable node (offline-
     verified: 15→14 across closed door 9 re-plans 15→16; 5→6 across closed door
     15 re-plans 5→1). Fires only in that exact stuck state — door open or
-    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~1.5 KB below
-    `SCRATCH_OFF` (hook_entry_size 27155 of 28672 after the switch-detection
-    layer; the boundary moved 0x6800→0x7000 with the section at 0x14000). When
-    it runs out again, bump `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build
-    asserts on overflow). The `rstate`
+    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~246 B below
+    `SCRATCH_OFF` (hook_entry_size 28426 of 28672 after the switch-seek
+    layer; the boundary moved 0x6800→0x7000 with the section at 0x14000). The
+    next code addition needs `SCRATCH_OFF`+`NEW_SECTION_SIZE` bumped together
+    (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
     `flag_routing_active`) was added for diagnosing route commitment.
 - Switches are DETECTED (`cfg.SWITCH_DETECT_ENABLED`; static pipeline mirror
@@ -565,8 +565,36 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     second double-radius ring (same B-driven palette caveat as doors — the
     ring, not the hue, is the signal). R-snapshot chunk `switch` dumps the
     whole live block (counts + centers + pairs + flags).
-  - **Not yet behavior**: bots do not seek/bump switches on purpose — see
-    Open work (switch-seek routing consumes these tables next).
+  - **SWITCH-SEEK routing** (`cfg.SWITCH_SEEK_ENABLED`, flag-route block):
+    when a routed CTF bot's goal is OPEN-FIELD UNREACHABLE from its node
+    (sealed Torture Chamber base) or the open detour is
+    `SWITCH_SEEK_SHORTCUT_GAIN`+ hops worse than the full field (a red bot
+    inside the blue base with the team-gated blue door shut), `ctf_next_hop`
+    requests a per-team seek. The page-flip eval (`switch_seek_eval`, ONE
+    bounded BFS per frame) walks candidates — OPENS_DOORS class, ≥1 paired
+    door currently BLOCKED (doubles as toggle-safety: a toggler with open
+    doors is never bumped shut), bound graph node — and scores each viable
+    one by the DETOUR metric `seek_walk(requester→switch) +
+    full_dist(switch→goal)`, where viability = the requester's node reaches
+    the switch in a team-door-gated `bfs_run` rooted at the switch node (the
+    Battle on the Ice constraint: the blue-base switch is reachable for a
+    red bot only from inside). Best-of-round activates (`seek_active[team]` =
+    idx+1, field re-built for the winner); participating bots
+    (`bot_seek[slot]`, re-earned each arrival) descend `seek_dist[team]` and
+    FINAL-APPROACH the switch center at its node to physically bump it. The
+    opened door then flows through door_dirty → `rebuild_open_routes`, which
+    CLEARS all seek state (stale by definition) and bumps the epoch — bots
+    re-request if still blocked, which also CHAINS seeks (Torture: a sealed
+    blue bot first opens its own base's toggler, escapes, then the next
+    round handles the far side). A seek with no door change for
+    `SWITCH_SEEK_TIMEOUT_FRAMES` blacklists that switch until the next
+    door-state change. Offline-verified on the shipped graphs (pinned in
+    tests): sealed Torture bot → own-base toggler (3-hop walk; after it, the
+    route to the enemy base is fully open); red-at-blue-base carrier → the
+    blue-door switch 1 hop away, NOT the red-door switch across the map.
+    Known noise: an attacker near its own base may bump a near switch whose
+    door its team could open anyway (harmless 1-2 hop detour; the opened
+    door excludes the switch from the next round).
 - General world-entity enumeration (`detours/entity_scan.py:scan_entities`,
   gated by `cfg.SCAN_ENTITIES_ENABLED`). The long-standing blocker for object
   detection was that there is no flat entity list: `mgr+0x290` is players,
@@ -759,17 +787,15 @@ Older emitted labels or disabled detours are not active unless they appear in
   `BOT_PARTICIPANT_POS_ENABLED` each bot is an engine-native activation
   source, so walk-up/touch/proximity door triggers near a far bot think and
   fire exactly as if a real player walked up (no message sender needed).
-  Remaining: SWITCH-SEEK behavior. Detection is DONE (see the switch bullet:
-  positions, classes, and per-map (switch, door) pair bindings are live in
-  `switch_table`/`switch_flags`/`switch_pairs`, and every MP switch is
-  player-bump so a bot triggers one just by steering into it). What's left is
-  the routing layer: when the open-field BFS can't reach the goal (sealed
-  Torture Chamber base), pick a REACHABLE switch whose pairs include a door
-  on the sealed frontier, route to it, bump it, and let the existing
-  door_dirty/epoch reroute machinery pick up the opened door. Mind the
-  TOGGLE flag: bumping a toggler while its doors are OPEN closes them —
-  gate the seek on the paired door being currently blocked, and mind trap
-  switches (CLOSES_DOORS) targeting doors on someone's route. Do NOT
-  blanket-wake door triggers near bots (Active-bit forcing) — same hazard
-  class as the checker re-arm bug; the participant-rect path is safe because
-  the grid collect masks on the Active bit.
+  SWITCH-SEEK is DONE (see the switch bullet in "Current state"): sealed or
+  door-shortcut-blocked bots route to the best reachable door-opening switch,
+  bump it, and the door_dirty/epoch machinery re-plans through the opened
+  door — chaining across rounds. Remaining refinements: the final-approach
+  wedge (goal node reachable but the last straight leg to the flag blocked
+  by a pillar) does not trigger a seek directly, only the wedge/suspension
+  roam; and the pair-blocked candidate filter could additionally skip doors
+  the bot's own team can already open per `edge_pass` (minor attacker-side
+  detour noise). Do NOT blanket-wake door triggers near bots (Active-bit
+  forcing) — same hazard class as the checker re-arm bug; the
+  participant-rect path is safe because the grid collect masks on the
+  Active bit.

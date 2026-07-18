@@ -363,6 +363,125 @@ class PortalDataTests(unittest.TestCase):
         self.assertLessEqual(max(len(m.switch_pairs) for m in maps.values()),
                              cfg.SWITCH_PAIR_MAX)
 
+    def test_switch_seek_scenarios_on_shipped_graphs(self):
+        # Offline simulation of the emitted switch-seek algorithm on the
+        # shipped waypoint graphs + parsed door/switch topology, with all
+        # doors CLOSED (authored default). Physical door semantics — exact
+        # for these scenarios (Torture pillars have no bot-usable opener;
+        # the Battle on the Ice team doors are impassable for the tested
+        # wrong team). Mirrors: seek gate (open unreachable OR
+        # full+GAIN < open), viability (team-gated BFS from the switch node
+        # reaches the requester), and the DETOUR score
+        # seek_walk + full_dist(switch -> goal) with best-of-round activation.
+        import struct as _struct
+        from pathlib import Path
+        from zaxbot.door_data import resolve_door_topology, SWITCH_FLAG_OPENS_DOORS
+        from zaxbot.flag_data import resolve_flag_data
+
+        def load_graph(map_name):
+            p = (Path(__file__).resolve().parents[1] / 'waypoints'
+                 / (map_name.replace('/', '_') + '.zwpt'))
+            d = p.read_bytes()
+            magic, _ver, vc, ec = _struct.unpack('<4sIII', d[:16])
+            self.assertEqual(magic, b'ZWPT')
+            verts = [_struct.unpack('<ff', d[16 + i*8:24 + i*8]) for i in range(vc)]
+            eoff = 16 + vc*8
+            edges = []
+            for e in range(ec):
+                w = _struct.unpack('<I', d[eoff + e*4:eoff + e*4 + 4])[0]
+                edges.append((w & 0xFFFF, w >> 16))
+            return verts, edges
+
+        def seg_d2(px, py, ax, ay, bx, by):
+            vx, vy = bx - ax, by - ay
+            wx, wy = px - ax, py - ay
+            L2 = vx*vx + vy*vy
+            t = 0.0 if L2 == 0 else max(0.0, min(1.0, (wx*vx + wy*vy) / L2))
+            ddx, ddy = px - (ax + t*vx), py - (ay + t*vy)
+            return ddx*ddx + ddy*ddy
+
+        def bfs(verts, edges, edge_door, blocked, start, skip):
+            dist = [-1] * len(verts)
+            dist[start] = 0
+            q = [start]
+            while q:
+                u = q.pop(0)
+                for e, (i, j) in enumerate(edges):
+                    if skip and edge_door[e] is not None and blocked[edge_door[e]]:
+                        continue
+                    v = j if i == u else (i if j == u else None)
+                    if v is None or dist[v] != -1:
+                        continue
+                    dist[v] = dist[u] + 1
+                    q.append(v)
+            return dist
+
+        def nearest(verts, x, y):
+            return min(range(len(verts)),
+                       key=lambda k: (verts[k][0]-x)**2 + (verts[k][1]-y)**2)
+
+        def run(map_key, start_team, goal_team, opened=()):
+            topo = {m.map_name.split('/')[-1]: m for m in resolve_door_topology()}
+            m = topo[map_key]
+            full_name = [n for n, _ in resolve_flag_data() if map_key in n][0]
+            verts, edges = load_graph(full_name)
+            flags = {n.split('/')[-1]: pts for n, pts in resolve_flag_data()}
+            blocked = [True] * len(m.doors)
+            for s in opened:
+                for (si, d) in m.switch_pairs:
+                    if si == s:
+                        blocked[d] = False
+            edge_door = [None] * len(edges)
+            for e, (i, j) in enumerate(edges):
+                best, bd = None, cfg.DOOR_EDGE_RADIUS_SQ
+                for di, (dx, dy) in enumerate(m.doors):
+                    d2 = seg_d2(dx, dy, *verts[i], *verts[j])
+                    if d2 < bd:
+                        bd, best = d2, di
+                edge_door[e] = best
+            base_node = {t: nearest(verts, x, y) for (x, y, t) in flags[map_key]}
+            start, goal = base_node[start_team], base_node[goal_team]
+            full = bfs(verts, edges, edge_door, blocked, goal, False)
+            open_ = bfs(verts, edges, edge_door, blocked, goal, True)
+            gate = open_[start] == -1 or (
+                full[start] != -1
+                and full[start] + cfg.SWITCH_SEEK_SHORTCUT_GAIN < open_[start])
+            if not gate:
+                return ('no-gate', full[start], open_[start])
+            sw_nodes = [nearest(verts, x, y) for (x, y, _f) in m.switches]
+            best, best_score = None, None
+            for s, (_x, _y, fl) in enumerate(m.switches):
+                if not (fl & SWITCH_FLAG_OPENS_DOORS):
+                    continue
+                if not any(blocked[d] for (si, d) in m.switch_pairs if si == s):
+                    continue
+                if full[sw_nodes[s]] == -1:
+                    continue
+                seek = bfs(verts, edges, edge_door, blocked, sw_nodes[s], True)
+                if seek[start] == -1:
+                    continue
+                score = seek[start] + full[sw_nodes[s]]
+                if best is None or score < best_score:
+                    best, best_score = s, score
+            return ('seek', best, best_score)
+
+        # Torture Chamber: a blue bot sealed in its base by the closed pillar
+        # walls picks its OWN base toggler (switches to the enemy base are
+        # sealed away), 3-hop walk; after that group opens, the route to the
+        # red base is fully open and the gate stops firing.
+        self.assertEqual(run('Torture Chamber.zax', 0, 1), ('seek', 0, 8))
+        self.assertEqual(run('Torture Chamber.zax', 0, 1, opened=(0,))[0], 'no-gate')
+        self.assertEqual(run('Torture Chamber.zax', 1, 0), ('seek', 1, 7))
+        # Battle on the Ice: a red bot at the BLUE base heading home (the
+        # live-reported scenario) picks the blue-door switch INSIDE the blue
+        # base 1 hop away — not the red-door switch across the map — because
+        # the detour score weighs the walk to the switch.
+        self.assertEqual(run('Battle on the Ice.zax', 0, 1), ('seek', 1, 21))
+        # A red attacker from its own base picks the near red-door switch
+        # (harmless 2-hop detour; once bumped its door opens, the candidate
+        # filter excludes it, and the next round picks the blue-door switch).
+        self.assertEqual(run('Battle on the Ice.zax', 1, 0), ('seek', 0, 23))
+
     def test_door_opener_topology_is_extracted(self):
         # Openers drive DIRECTIONAL closed-door passability: bot-usable
         # walk-in triggers only (touching/pass-through, authored active;
@@ -528,8 +647,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '9c826610895af0a9d87761acaf32fea9edb7115426e7ff91528a76ecd7aaa77a'
-    HOOK_ENTRY_SIZE = 27155
+    SECTION_SHA256 = '77a701339a00e8c535bae364ff2cd3a04c33947248c12e57f7073df1b1e92a3a'
+    HOOK_ENTRY_SIZE = 28512
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(
