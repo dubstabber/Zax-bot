@@ -417,8 +417,15 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
       unbound/stale row falls back to normal goal routing with the latch
       dormant. Opportunistic latches silently drop beyond
       `CTF_DROP_ABANDON_RADIUS_SQ`; objective bots are exempt.
-    - **DIRECT phase** (within 160 px, or standing on the drop's own bound
-      node): steer straight at the copy through the standard watchdog with
+    - **DIRECT phase** (within 160 px, or targeting the drop's own bound
+      node AND physically within the stuck-arrival radius of it — the
+      arrival gate is load-bearing: `cur == drop node` alone fires the
+      moment the routed hop ASSIGNS the node, and live snapshots caught a
+      fresh-out-of-teleport bot straight-steering from the exit pocket past
+      the return pad, wedging on the pad veto until the slide sweep crossed
+      the trigger sliver → engine re-teleport → cross-arena re-route →
+      infinite teleport ping-pong when the drop lay near a pad): steer
+      straight at the copy through the standard watchdog with
       its own progress tracker (`bot_drop_best` — wp_best_dsq stays with
       the node logic) and PRESS PATIENCE (`CTF_DROP_PRESS_PATIENCE` fresh
       cycles, mirror of the door/pad patience) before

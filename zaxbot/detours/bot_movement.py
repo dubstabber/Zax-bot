@@ -1016,14 +1016,39 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xDD\xD8')                                # fstp st0 (drop dsq)
         a.jmp('s542360_drp_clear')
         a.label('s542360_drp_phase')                      # ST0 = dsq
-        # Phase split: DIRECT iff within the direct radius OR standing on the
-        # drop's own bound node (the graph can take it no closer from there).
+        # Phase split: DIRECT iff within the direct radius, OR the bot's
+        # target node IS the drop's bound node AND it has PHYSICALLY arrived
+        # near it (within the stuck-arrival radius). The physical check is
+        # load-bearing: `cur == drop node` alone fires the moment the routed
+        # hop ASSIGNS that node — live ping-pong snapshots on Hydro caught a
+        # bot fresh out of a teleport, still in the exit pocket 243 px away
+        # with cur already advanced to the drop node, straight-steering a
+        # line that grazed the return pad; the post-teleport veto wedged it
+        # until the wall-slide sweep crossed the pad's trigger sliver — an
+        # engine re-teleport, and the cross-arena latch routed it straight
+        # back: an infinite teleport ping-pong. Until the bot genuinely
+        # reaches the node, the ROUTED phase steers node-to-node along the
+        # authored edge, which skirts the teleporter prop exactly like a
+        # normal carrier leaving the exit pocket.
         a.raw(b'\xD9\x05' + le32(drop_direct_va))         # fld direct (ST0=d, ST1=dsq)
         a.raw(b'\xDF\xF1')                                # fcomip d:dsq (pop d)
         a.jae('s542360_drp_direct')                       # d >= dsq -> inside
         a.raw(b'\x8B\x14\x8D' + le32(current_wp_va))      # edx = current_wp[slot]
         a.raw(b'\x3B\x14\x85' + le32(flag_drop_node_mv_va))  # cur == drop node?
-        a.jz('s542360_drp_direct')
+        a.jnz('s542360_drp_routed')
+        a.raw(b'\x8D\x14\xD5' + le32(overlay_vertices_va))  # lea edx, [edx*8 + verts]
+        a.raw(b'\xD9\x02')                                # fld node.x
+        a.raw(b'\xD8\x25' + le32(bot_pos_va))             # fsub bot.x
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xD9\x42\x04')                            # fld node.y
+        a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))         # fsub bot.y
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xDE\xC1')                                # faddp -> ST0=node_dsq, ST1=drop dsq
+        a.raw(b'\xD9\x05' + le32(wp_stuck_reached_radius_sq_va))  # fld arrival thr
+        a.raw(b'\xDF\xF1')                                # fcomip thr:node_dsq (pop thr)
+        a.raw(b'\xDD\xD8')                                # fstp st0 (pop node_dsq; EFLAGS kept)
+        a.jae('s542360_drp_direct')                       # thr >= node_dsq -> arrived
+        a.label('s542360_drp_routed')
         # ROUTED phase: the node machinery moves the bot (drop_next_hop
         # overrides its next-hop at each arrival). Park the direct trackers
         # so entering direct later starts fresh.
