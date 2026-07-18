@@ -1665,10 +1665,17 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x09\xFE')                               # or esi, edi
         a.raw(b'\x39\xDE')                               # cmp esi, ebx
         a.jz('s542360_wp_bad_edge_fallback')
-        # Clean routed hop while a marker exists: routing is progressing on a
-        # different edge, so the ping-pong counter starts over.
-        a.raw(b'\x8B\x35' + le32(bot_slot_tmp_va))       # esi = slot
-        a.raw(b'\xC7\x04\xB5' + le32(route_block_hits_va) + le32(0))
+        # Clean routed hop while a marker exists: DO NOT reset the ping-pong
+        # counter. It used to start over here ("consecutive" forced-fallback
+        # semantics), which a two-node shuttle defeats BY CONSTRUCTION: live
+        # CE on a Hydro dropped-flag pursuit caught the descent alternating
+        # forced-off-the-marker (36: marker (34,36) -> random -> 37) with a
+        # clean descent hop (37 -> 36) every cycle, so hits ping-ponged
+        # 0<->1 forever and the marker never expired — the bot shuffled
+        # between the two nodes until a human took the flag. The budget now
+        # counts TOTAL forced events per marker lifetime; every existing
+        # reset (marker re-set, blind retry, reacquire, suspension expiry,
+        # door fast-clear, respawn, match change) still applies.
         a.jmp('s542360_wp_have_next')
         a.label('s542360_wp_bad_edge_fallback')
         # Routing insists on the marked edge (it IS the shortest path). Count

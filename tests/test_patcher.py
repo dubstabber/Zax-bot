@@ -935,8 +935,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '7825d49058ba28d115e2c8eea3a8ada07d451dde9305f903e64ac7764da5c535'
-    HOOK_ENTRY_SIZE = 32496
+    SECTION_SHA256 = '3b8abeda3f55655dcb03f768164ec7a38ec25ba26a2fd5db0466211370c7078a'
+    HOOK_ENTRY_SIZE = 32479
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(
