@@ -174,6 +174,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         seek_timer_va        = layout.va('seek_timer')
         seek_best_va         = layout.va('seek_best')
         seek_best_score_va   = layout.va('seek_best_score')
+        seek_eval_s_va       = layout.va('seek_eval_s')
         seek_dist_va         = layout.va('seek_dist')
         bot_seek_va          = layout.va('bot_seek')
         SEEK_ROW = VMAX * 4            # seek_dist stride per team
@@ -951,7 +952,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
 
         a.label('sse_have_cand')
         # One team-gated BFS rooted at candidate esi's node into seek_dist[team].
-        a.raw(b'\x89\x35' + le32(bfs_u_va))                     # spill candidate s
+        a.raw(b'\x89\x35' + le32(seek_eval_s_va))               # spill candidate s (NOT bfs_u: bfs_run clobbers it)
         a.raw(b'\x89\xE8')                                      # eax = team
         a.raw(b'\x69\xC0' + le32(SEEK_ROW))                     # eax *= SEEK_ROW
         a.raw(b'\x05' + le32(seek_dist_va))                     # eax = seek row
@@ -967,14 +968,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x89\x15' + le32(door_mask_i_va))               # door_mask_i = 1<<team*2
         a.raw(b'\x01\xD2')                                      # edx += edx
         a.raw(b'\x89\x15' + le32(door_mask_j_va))               # door_mask_j = 2<<team*2
-        a.raw(b'\xA1' + le32(bfs_u_va))                         # eax = candidate s
+        a.raw(b'\xA1' + le32(seek_eval_s_va))                   # eax = candidate s
         a.raw(b'\x8B\x04\x85' + le32(switch_node_va))           # eax = switch_node[s]
         a.raw(b'\xA3' + le32(bfs_start_va))                     # bfs_start = node
         a.raw(b'\x89\x2D' + le32(bfr_i_va))                     # spill team (bfs clobbers GPRs)
         a.call_lbl('bfs_run')
         a.raw(b'\x8B\x2D' + le32(bfr_i_va))                     # ebp = team
         # Mark tried regardless of the outcome.
-        a.raw(b'\x8B\x0D' + le32(bfs_u_va))                     # ecx = candidate s
+        a.raw(b'\x8B\x0D' + le32(seek_eval_s_va))               # ecx = candidate s
         a.raw(b'\xBA\x01\x00\x00\x00')                          # edx = 1
         a.raw(b'\xD3\xE2')                                      # shl edx, cl
         a.raw(b'\x09\x14\xAD' + le32(seek_tried_va))            # tried |= 1<<s
@@ -994,7 +995,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.jae('sse_next_team')
         a.raw(b'\x69\xC0' + le32(ROW))                          # eax *= ROW
         a.raw(b'\x05' + le32(flag_dist_va))                     # eax = full row base
-        a.raw(b'\x8B\x15' + le32(bfs_u_va))                     # edx = candidate s
+        a.raw(b'\x8B\x15' + le32(seek_eval_s_va))               # edx = candidate s
         a.raw(b'\x8B\x14\x95' + le32(switch_node_va))           # edx = switch_node[s]
         a.raw(b'\x8B\x04\x90')                                  # eax = full[switch node]
         a.raw(b'\x83\xF8\xFF')                                  # goal unreachable from switch?
@@ -1006,7 +1007,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x3B\x0C\xAD' + le32(seek_best_score_va))       # cmp score2, best score
         a.jae('sse_next_team')
         a.label('sse_take')
-        a.raw(b'\x8B\x15' + le32(bfs_u_va))                     # edx = candidate s
+        a.raw(b'\x8B\x15' + le32(seek_eval_s_va))               # edx = candidate s
         a.raw(b'\x42')                                          # edx = s+1
         a.raw(b'\x89\x14\xAD' + le32(seek_best_va))             # best = s+1
         a.raw(b'\x89\x0C\xAD' + le32(seek_best_score_va))       # best score = score2
@@ -1017,7 +1018,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x8B\x04\xAD' + le32(seek_best_va))             # eax = best idx+1
         a.raw(b'\x85\xC0'); a.jz('sse_drop')
         a.raw(b'\x48')                                          # eax = best idx
-        a.raw(b'\xA3' + le32(bfs_u_va))                         # spill
+        a.raw(b'\xA3' + le32(seek_eval_s_va))                   # spill (survives bfs_run)
         # Re-run the winner's BFS (the row currently holds the LAST candidate).
         a.raw(b'\x89\xE8')                                      # eax = team
         a.raw(b'\x69\xC0' + le32(SEEK_ROW))                     # eax *= SEEK_ROW
@@ -1034,14 +1035,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x89\x15' + le32(door_mask_i_va))
         a.raw(b'\x01\xD2')
         a.raw(b'\x89\x15' + le32(door_mask_j_va))
-        a.raw(b'\xA1' + le32(bfs_u_va))                         # eax = winner s
+        a.raw(b'\xA1' + le32(seek_eval_s_va))                   # eax = winner s
         a.raw(b'\x8B\x04\x85' + le32(switch_node_va))           # eax = its node
         a.raw(b'\xA3' + le32(bfs_start_va))
         a.raw(b'\x89\x2D' + le32(bfr_i_va))                     # spill team
         a.call_lbl('bfs_run')
         a.raw(b'\x8B\x2D' + le32(bfr_i_va))                     # ebp = team
         # ACTIVATE.
-        a.raw(b'\xA1' + le32(bfs_u_va))                         # eax = winner s
+        a.raw(b'\xA1' + le32(seek_eval_s_va))                   # eax = winner s
         a.raw(b'\x8B\x0C\x85' + le32(switch_node_va))           # ecx = its node
         a.raw(b'\x89\x0C\xAD' + le32(seek_node_va))             # seek_node[team] = node
         a.raw(b'\x40')                                          # eax = s+1

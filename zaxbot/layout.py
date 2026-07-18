@@ -1334,6 +1334,15 @@ def build_scratch_layout(
                 'seek: per-bot 1 = descending the seek field this leg',
             ))
             sw_off += MAX_BOT_SLOTS * 4
+            # Candidate-index spill for switch_seek_eval. MUST NOT be bfs_u:
+            # bfs_run uses bfs_u as its dequeued-node scratch and overwrites
+            # it, which mis-attributed every eval result to a NODE id (live
+            # R-dump: tried-bit 14 / best 47 on a 2-switch map).
+            overlay_fields.append(ScratchField(
+                'seek_eval_s', sw_off, 0x04,
+                'seek: eval candidate index spill (survives bfs_run)',
+            ))
+            sw_off += 0x04
             if overlay_vertex_max_capped > 0:
                 overlay_fields.append(ScratchField(
                     'seek_dist', sw_off,
