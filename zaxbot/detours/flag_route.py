@@ -157,6 +157,35 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         and layout.has_field('switch_pairs')
         and layout.has_field('bot_seek')
     )
+    # Portal routing: teleport pads with build-time-resolved destinations are
+    # DIRECTED graph edges (source pad node -> destination node). bfs_run
+    # relaxes them in every field it fills (the BFS runs from the goal
+    # outward, so a portal whose DEST node is the dequeued u lowers its
+    # SOURCE node: the bot at source walks INTO the pad and comes out at
+    # dest). ctf_next_hop then reports a "portal hop" (route_portal_hop =
+    # pad idx+1) whenever the pad bound to the current node carries a
+    # strictly smaller distance through its destination than any neighbour —
+    # the follower latches a pad final-approach off that. Live pad usability
+    # (portal_active) gates only the NEXT-HOP side; the fields themselves are
+    # not rebuilt on pad-state flips (a stale route into an inactive pad ends
+    # in the standard watchdog -> suspension -> roam machinery).
+    portal_route = (
+        door_route
+        and cfg.PORTAL_ROUTING_ENABLED
+        and layout.has_field('portal_node')
+        and layout.has_field('portal_dest_node')
+        and layout.has_field('portal_has_dest')
+        and layout.has_field('route_portal_hop')
+    )
+    if portal_route:
+        portal_node_va       = layout.va('portal_node')
+        portal_dest_node_va  = layout.va('portal_dest_node')
+        portal_has_dest_va   = layout.va('portal_has_dest')
+        portal_count_va      = layout.va('portal_count')
+        route_portal_hop_va  = layout.va('route_portal_hop')
+        portal_active_va     = (layout.va('portal_active')
+                                if layout.has_field('portal_active') else 0)
+
     if seek:
         switch_node_va       = layout.va('switch_node')
         switch_table_va      = layout.va('switch_table')
@@ -389,7 +418,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
 
         a.label('bfsr_edge_loop')
         a.raw(b'\x3B\x35' + le32(ecount_va))                # cmp esi, edge_count
-        a.jae('bfsr_loop')                                  # edges done -> next BFS node
+        if portal_route:
+            a.jae('bfsr_portals')                           # edges done -> portal relax
+        else:
+            a.jae('bfsr_loop')                              # edges done -> next BFS node
         # Blocked-door precheck -> cnh_blk spill (the directional pass test
         # needs the traversal side, which is only known after decoding the
         # edge). Open doors and doorless edges are never gated.
@@ -456,6 +488,43 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.label('bfsr_edge_next')
         a.raw(b'\x46')                                    # inc esi
         a.jmp('bfsr_edge_loop')
+
+        if portal_route:
+            # --- Portal relax pass for the dequeued node u. A pad whose
+            # DESTINATION's nearest node is u gives its SOURCE node distance
+            # du+1 (the bot walks source -> pad -> comes out at dest). No
+            # door gating (pads are not doors) and no live-active gating
+            # (fields are per-match; see the portal_route comment above).
+            a.label('bfsr_portals')
+            a.raw(b'\x31\xFF')                            # edi = 0 (p)
+            a.label('bfsr_pp_loop')
+            a.raw(b'\x3B\x3D' + le32(portal_count_va))    # p >= portal_count?
+            a.jae('bfsr_loop')
+            a.raw(b'\x83\xFF' + bytes([cfg.PORTAL_TABLE_MAX]))
+            a.jae('bfsr_loop')
+            a.raw(b'\x83\x3C\xBD' + le32(portal_has_dest_va) + b'\x00')
+            a.jz('bfsr_pp_next')                          # no directed edge
+            a.raw(b'\x8B\x04\xBD' + le32(portal_dest_node_va))  # eax = dest node
+            a.raw(b'\x3B\x05' + le32(bfs_u_va))           # dest node == u?
+            a.jnz('bfsr_pp_next')
+            a.raw(b'\x8B\x04\xBD' + le32(portal_node_va)) # eax = source pad node
+            a.raw(b'\x83\xF8\xFF')                        # unbound?
+            a.jz('bfsr_pp_next')
+            a.raw(b'\x3B\x05' + le32(vcount_va))          # defensive range
+            a.jae('bfsr_pp_next')
+            a.raw(b'\x8B\x15' + le32(bfs_disti_va))       # edx = disti
+            a.raw(b'\x8B\x0C\x82')                        # ecx = disti[src]
+            a.raw(b'\x83\xF9\xFF')                        # visited?
+            a.jnz('bfsr_pp_next')
+            a.raw(b'\x8B\x0D' + le32(bfs_du_va))          # ecx = du
+            a.raw(b'\x41')                                # inc ecx (du+1)
+            a.raw(b'\x89\x0C\x82')                        # disti[src] = du+1
+            a.raw(b'\x8B\x0D' + le32(bfs_tail_va))        # ecx = tail
+            a.raw(b'\x89\x04\x8D' + le32(bfs_queue_va))   # queue[tail] = src
+            a.raw(b'\xFF\x05' + le32(bfs_tail_va))        # tail++
+            a.label('bfsr_pp_next')
+            a.raw(b'\x47')                                # ++p
+            a.jmp('bfsr_pp_loop')
 
         a.label('bfsr_done')
         a.raw(b'\xC3')
@@ -665,6 +734,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # =====================================================================
     a.label('ctf_next_hop')
     a.raw(b'\x89\x0D' + le32(route_cur_va))               # route_cur = ecx (cur)
+    if portal_route:
+        # Fresh per-arrival portal-hop output; the caller latches off it only
+        # when this call reports a hop, so a stale value must never survive.
+        a.raw(b'\xC7\x05' + le32(route_portal_hop_va) + le32(0))
     a.raw(b'\x83\x3D' + le32(routing_active_va) + b'\x00') # cmp [flag_routing_active], 0
     a.jz('cnh_fail')
     if seek:
@@ -847,6 +920,49 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.jmp('cnh_scan_loop')
 
     a.label('cnh_scan_done')
+    if portal_route:
+        # --- Portal hop. A pad bound to the CURRENT node whose destination
+        # node carries a strictly smaller distance in the ACTIVE field (ebp
+        # row — full/open/seek all relax portals identically) beats the best
+        # neighbour found above. Winner goes to route_portal_hop (pad idx+1)
+        # and the call returns CUR itself — the caller latches the pad
+        # final-approach instead of steering to a node. Gated on the LIVE
+        # pad usability flag so a deactivated teleporter is never entered.
+        # EBX = cur, EBP = field row, ECX = best_d, EDX = best node here.
+        a.raw(b'\x31\xF6')                              # esi = 0 (p)
+        a.label('cnh_pp_loop')
+        a.raw(b'\x3B\x35' + le32(portal_count_va))      # p >= portal_count?
+        a.jae('cnh_pp_done')
+        a.raw(b'\x83\xFE' + bytes([cfg.PORTAL_TABLE_MAX]))
+        a.jae('cnh_pp_done')
+        a.raw(b'\x83\x3C\xB5' + le32(portal_has_dest_va) + b'\x00')
+        a.jz('cnh_pp_next')
+        if portal_active_va:
+            a.raw(b'\x83\x3C\xB5' + le32(portal_active_va) + b'\x00')
+            a.jz('cnh_pp_next')                         # pad currently unusable
+        a.raw(b'\x8B\x04\xB5' + le32(portal_node_va))   # eax = pad node
+        a.raw(b'\x39\xD8')                              # pad at cur?
+        a.jnz('cnh_pp_next')
+        a.raw(b'\x8B\x04\xB5' + le32(portal_dest_node_va))  # eax = dest node
+        a.raw(b'\x83\xF8\xFF')                          # unbound?
+        a.jz('cnh_pp_next')
+        a.raw(b'\x3B\x05' + le32(vcount_va))            # defensive range
+        a.jae('cnh_pp_next')
+        a.raw(b'\x8B\x7C\x85\x00')                      # edi = dist[dest node]
+        a.raw(b'\x39\xCF')                              # cmp edi, best_d
+        a.jae('cnh_pp_next')                            # not strictly closer
+        a.raw(b'\x89\xF9')                              # best_d = edi
+        a.raw(b'\x8D\x46\x01')                          # lea eax, [esi+1]
+        a.raw(b'\xA3' + le32(route_portal_hop_va))      # route_portal_hop = p+1
+        a.label('cnh_pp_next')
+        a.raw(b'\x46')                                  # ++p
+        a.jmp('cnh_pp_loop')
+        a.label('cnh_pp_done')
+        a.raw(b'\x83\x3D' + le32(route_portal_hop_va) + b'\x00')
+        a.jz('cnh_node_ret')
+        a.raw(b'\x89\xD8')                              # eax = cur (latch drives movement)
+        a.raw(b'\xC3')
+        a.label('cnh_node_ret')
     a.raw(b'\x89\xD0')                                  # eax = edx (best, or -1)
     a.raw(b'\xC3')
 

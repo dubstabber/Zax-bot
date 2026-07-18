@@ -58,15 +58,17 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 
 - WM_KEYDOWN hook at `0x599A1A` redirects `call sub_599580` to
   `.zaxbot:hook_entry`, then tail-jumps back to `sub_599580`.
-- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x14000`, RWX (grown from
+- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x16000`, RWX (grown from
   `0xA000` for the CTF flag static tables, then to `0xC000` for the CTF routing
   BFS distance field, then to `0xD000` for far-base CTF flag entity force-ticks,
   then to `0xF000` for the door detection static tables, then to `0x11000` for
   the door-aware routing field + anchor-entity cache, then `0x12000` for its
-  per-team split, then to `0x14000` for the switch detection tables).
-- Scratch starts at `0x721000` (`SCRATCH_OFF = 0x7000`; the code/scratch
-  boundary moved from `0x5A00` at the door layer, then from `0x6800` when the
-  switch layer left only ~87 code bytes).
+  per-team split, then to `0x14000` for the switch detection tables, then to
+  `0x16000` for the portal routing layer).
+- Scratch starts at `0x722000` (`SCRATCH_OFF = 0x8000`; the code/scratch
+  boundary moved from `0x5A00` at the door layer, from `0x6800` at the switch
+  layer, then from `0x7000` when the portal routing layer landed with ~246
+  code bytes left).
 - B opens the bot menu via `sub_59B260`; R writes a runtime snapshot.
 - Digit selection calls `do_spawn_with_team`.
 - Spawn injects a synthetic DirectPlay "player added" queue entry at
@@ -198,10 +200,82 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     depth: catches any active teleporter the text parse missed and truly dynamic
     ones, the moment something teleports. Mirrors the pickup self-registration
     model; confirmed firing in-game (breakpoint at `0x4C11A0`, `ecx` = the two
-    `CTeleportAction`s). NOTE: both paths are DETECTION only (the pad enters
-    `portal_table`); routing bots INTO portals and re-acquiring the nearest
-    waypoint after the teleport jump are still open (the follower's
-    progress-timeout re-acquire partially covers the latter).
+    `CTeleportAction`s). Detection feeds the ROUTING layer below; runtime-
+    registered pads have no build-time destination so they stay wander-only.
+- Bots ROUTE THROUGH portals (`cfg.PORTAL_ROUTING_ENABLED`; the layer that
+  makes Hydro Vengence CTF playable — its two arenas connect ONLY via pads):
+  - **Destinations at build time**: `portal_data.resolve_portal_routes` also
+    resolves each warp action's `New Location` to a positioned Level Part
+    (Hydro's `warm 1/2`/`cold 1/2`; each pad's exit lands next to the paired
+    return pad). Script targets that don't resolve (Jungle Ruins
+    "Upper"/"Lower") keep dest=None → detect/wander-only. Packed as
+    `portal_static_dests`/`portal_static_hasdest` parallel to the source
+    points; `load_portals` copies them per match.
+  - **Per-match node bindings** (`bind_portal_nodes`, from `detour_df90`
+    after `wp_load`+`load_portals`, before `build_flag_routes`): nearest
+    graph node to each pad (`portal_node`) and to each resolved exit
+    (`portal_dest_node`); also clears the per-bot pad latches.
+  - **Directed BFS edges**: `bfs_run`'s portal pass relaxes
+    `dist[src_node] = dist[dest_node] + 1` for every dest-carrying pad in
+    EVERY field it fills (full, per-team open, switch-seek) — the BFS runs
+    from the goal outward, so a pad whose EXIT node is dequeued lowers its
+    ENTRY node. Not gated on live pad state (fields are per-match; a stale
+    route into a deactivated pad ends in the normal watchdog → suspension →
+    roam machinery). Offline-verified + pinned in tests on the shipped Hydro
+    graph: arenas disconnected without pads, enemy base 12 hops with them,
+    both departure-arena pads strictly descending (bots pick whichever their
+    path reaches).
+  - **Pad next-hop** (`ctf_next_hop`): after the neighbour scan, a pad bound
+    to the CURRENT node whose exit node carries a strictly smaller distance
+    in the active field wins; the pad idx+1 goes to `route_portal_hop`, the
+    call returns cur, and the follower latches `bot_portal_target[slot]`.
+    THIS side is gated on live `portal_active[]` (live-verified 1 for all 4
+    Hydro pads) so a deactivated teleporter is never entered.
+  - **Pad final-approach** (`bot_movement`, top of `s542360_wp_have_cur`):
+    a latched bot steers at the pad CENTER through the same watchdog as the
+    CTF flag final approach (stall ramps `wp_try` → wall-slide sweep). The
+    trigger is a THIN SLIVER on a collidable teleporter prop, so a watchdog
+    timeout first grants PAD-PRESS PATIENCE (`cfg.PORTAL_PRESS_PATIENCE`
+    fresh watchdog cycles of continued pressing/sweeping — mirror of the
+    door patience; live snapshots caught a carrier suspending at the pad
+    and only succeeding on its second visit) before the latch drops and
+    routing suspends. Latch also drops on respawn, death, match change,
+    stale idx, or the pad reading inactive.
+  - **Teleport-jump re-acquire** (stuck-detection stage): a per-think move
+    farther than `sqrt(cfg.PORTAL_JUMP_REACQUIRE_DIST_SQ)` (192 px; engine
+    step is ~1.7 px/frame, Hydro pads jump ~1600 px) can only be a teleport
+    — drop the whole nav latch (current/prev wp, markers, slide, pad latch;
+    NOT route_suspend) and cold-acquire the NEAREST node at the exit this
+    same think. Mode-independent, so bots knocked through script teleporters
+    they never chose also recover.
+  - **Post-teleport RETURN-PAD heading veto** (`s542360_portal_veto`, after
+    the wall-slide; the anti-ping-pong wall): the teleport drops the bot at
+    the exit marker inside a collision pocket around the teleporter prop,
+    ~28 px from the RETURN pad's thin trigger sliver; the wall-slide sweep
+    escapes the pocket but tries headings in fixed order, and any
+    sliver-ward heading that moves fires an ENGINE re-teleport (live proute
+    snapshots: carrier pinned at exact exit coords, then bounced
+    arena-to-arena every ~1-2 s — no bot decision involved, so the wander
+    gates couldn't stop it). While `bot_portal_cd` runs, any heading whose
+    `LAVA_LOOKAHEAD_PX` lookahead lands within
+    `sqrt(cfg.PORTAL_VETO_RADIUS_SQ)` (40 px) of a NON-LATCHED pad center is
+    rotated onward (lava-veto style) — pads become virtual walls; the
+    deliberately latched pad stays enterable (returning through a pad is
+    often the correct route).
+  - **Roam wander-entry** (`portal_wander_check`, from the `wp_advance`
+    fallback path): in DM — and for CTF bots roaming on a missing-flag
+    search — an arrival at a node hosting an active pad rolls
+    `RNG(0..99) < cfg.PORTAL_WANDER_CHANCE` (default 25) and occasionally
+    walks INTO the teleporter instead of picking a random neighbour. No
+    destination knowledge needed (the jump re-acquire recovers the graph).
+    Two gates, both live-diagnosed from R snapshots: NO roll while the
+    bot's routing is SUSPENDED (suspension roam is a local unstick; a
+    suspended CARRIER was caught bouncing arena-to-arena on this roll),
+    and NO roll for `cfg.PORTAL_WANDER_COOLDOWN_FRAMES` after any teleport
+    (each pad's exit node IS the return pad's node, so the very next
+    arrival re-rolled the coin — the observed pad ping-pong).
+  - R-snapshot chunk `proute` dumps dest tables + bindings + per-bot latches
+    (approach latch, wander cooldown, pad patience) + the last jump d².
 - CTF flags populate `flag_table` (drawn by the overlay in blue) via the SAME
   static Data.dat pipeline as portals (`flag_data.py` → `world_scan.py:
   load_flags`, per match). The build-time parse extracts each multiplayer
@@ -529,10 +603,10 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     so `ctf_next_hop` re-plans door-aware from the reachable node (offline-
     verified: 15→14 across closed door 9 re-plans 15→16; 5→6 across closed door
     15 re-plans 5→1). Fires only in that exact stuck state — door open or
-    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~246 B below
-    `SCRATCH_OFF` (hook_entry_size 28426 of 28672 after the switch-seek
-    layer; the boundary moved 0x6800→0x7000 with the section at 0x14000). The
-    next code addition needs `SCRATCH_OFF`+`NEW_SECTION_SIZE` bumped together
+    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~2.8 KB below
+    `SCRATCH_OFF` (hook_entry_size 29919 of 32768 after the portal-routing
+    layer; the boundary moved 0x7000→0x8000 with the section at 0x16000).
+    When it runs low again, bump `SCRATCH_OFF`+`NEW_SECTION_SIZE` together
     (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
     `flag_routing_active`) was added for diagnosing route commitment.
@@ -766,15 +840,17 @@ Older emitted labels or disabled detours are not active unless they appear in
 - Reintroduce hazard/pickup awareness as GRAPH-AWARE routing (route through
   nodes near pickups, around lava) rather than the removed vector-field
   perturbation that pushed the heading into walls.
-- Portal behavior on top of detection: `portal_table` now collects active
-  teleport pads (static + runtime `detour_4C11A0`), but bots don't yet ROUTE to
-  them. Add graph-aware portal routing (treat a portal pad as a graph node /
-  edge shortcut: steer to the nearest pad when the destination is "across" a
-  portal) and, after a teleport position-jump, force an immediate nearest-node
-  re-acquire instead of relying on the progress-timeout. Optionally capture the
-  teleport DESTINATION too (read the entity position again just after
-  `sub_4F4AC0`, or `action+0x08/+0x0C`) so a portal becomes a directed edge for
-  routing.
+- Portal routing — DONE for build-time-resolvable destinations (see the
+  portal-routing bullet in "Current state"): pads are directed BFS edges, CTF
+  bots route through them (Hydro Vengence cross-arena flag runs), roaming/DM
+  bots occasionally wander into them, and any per-think position jump >192px
+  cold-reacquires the nearest node. Remaining: destinations for RUNTIME-only
+  portals (Jungle Ruins' script "Upper"/"Lower" and anything only
+  `detour_4C11A0` sees) — capture the exit position just after `sub_4F4AC0`
+  (or read `action+0x08/+0x0C`) and write it into `portal_dest_table` +
+  `portal_has_dest` so those pads graduate from wander-only to routed edges
+  the first time something teleports; those are DM-only today, so nothing
+  currently routes through them anyway.
 - Populate or hook DirectPlay player data so PC2 sees chosen bot names
   (and team colors in CTF/SK).
 - Door awareness — DETECTION + DIRECTIONAL REROUTING DONE (see the door

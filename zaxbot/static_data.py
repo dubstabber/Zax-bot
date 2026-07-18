@@ -51,6 +51,8 @@ DUMP_TAGS = (
     ('tag_switch', 'switch'),
     # Switch-seek state (switch_node bindings + per-team state + bot_seek).
     ('tag_seek', 'seek'),
+    # Portal-routing state (dest tables, node bindings, per-bot pad latches).
+    ('tag_proute', 'proute'),
 )
 
 
@@ -89,12 +91,22 @@ def write_bot_color_table(section, scratch_off, layout, colors):
     layout.write(section, scratch_off, 'bot_colors', packed)
 
 
-def write_portal_static_table(section, scratch_off, layout, portal_maps, map_name_slot):
-    """Pack build-time portal map records and point coordinates into scratch."""
+def write_portal_static_table(section, scratch_off, layout, portal_maps, map_name_slot,
+                              portal_routes=()):
+    """Pack build-time portal map records and point coordinates into scratch.
+
+    ``portal_routes`` is the destination-carrying view from
+    ``resolve_portal_routes`` (parallel to ``portal_maps`` by construction);
+    when the routing layout fields exist, each point's resolved destination is
+    packed into ``portal_static_dests`` / ``portal_static_hasdest`` at the
+    SAME point index as its source in ``portal_static_points``."""
     if not layout.has_field('portal_static_map_count'):
         return
 
     portal_maps = tuple(portal_maps or ())
+    portal_dests = {}
+    for map_name, routes in tuple(portal_routes or ()):
+        portal_dests[map_name] = tuple(dest for _src, dest in routes)
     if not layout.has_field('portal_static_maps') and portal_maps:
         raise ValueError('portal map data present but layout has no portal_static_maps field')
     if not layout.has_field('portal_static_points') and any(points for _, points in portal_maps):
@@ -125,6 +137,8 @@ def write_portal_static_table(section, scratch_off, layout, portal_maps, map_nam
     map_stride = map_name_slot + 8
     packed_maps = bytearray(map_capacity * map_stride)
     packed_points = bytearray(point_capacity * 8)
+    packed_dests = bytearray(point_capacity * 8)
+    packed_hasdest = bytearray(point_capacity * 4)
     point_index = 0
     for map_idx, (map_name, points) in enumerate(portal_maps):
         name_bytes = map_name.encode('latin1')
@@ -134,12 +148,23 @@ def write_portal_static_table(section, scratch_off, layout, portal_maps, map_nam
             raise ValueError(
                 f'portal map name too long for {map_name_slot}-byte slot: {map_name!r}'
             )
+        dests = portal_dests.get(map_name, ())
+        if dests and len(dests) != len(points):
+            raise ValueError(
+                f'portal routes for {map_name!r} not parallel to points: '
+                f'{len(dests)} dests vs {len(points)} sources'
+            )
         rec_off = map_idx * map_stride
         packed_maps[rec_off:rec_off + len(name_bytes)] = name_bytes
         count_off = rec_off + map_name_slot
         packed_maps[count_off:count_off + 8] = struct.pack('<II', len(points), point_index)
-        for x, y in points:
+        for pt_idx, (x, y) in enumerate(points):
             struct.pack_into('<ff', packed_points, point_index * 8, float(x), float(y))
+            dest = dests[pt_idx] if pt_idx < len(dests) else None
+            if dest is not None:
+                struct.pack_into('<ff', packed_dests, point_index * 8,
+                                 float(dest[0]), float(dest[1]))
+                struct.pack_into('<I', packed_hasdest, point_index * 4, 1)
             point_index += 1
 
     layout.write(section, scratch_off, 'portal_static_map_count',
@@ -150,6 +175,27 @@ def write_portal_static_table(section, scratch_off, layout, portal_maps, map_nam
         layout.write(section, scratch_off, 'portal_static_maps', bytes(packed_maps))
     if layout.has_field('portal_static_points'):
         layout.write(section, scratch_off, 'portal_static_points', bytes(packed_points))
+    if layout.has_field('portal_static_dests'):
+        layout.write(section, scratch_off, 'portal_static_dests', bytes(packed_dests))
+        layout.write(section, scratch_off, 'portal_static_hasdest', bytes(packed_hasdest))
+    # Live routing tables start empty/unbound; load_portals + bind_portal_nodes
+    # refill them per match.
+    if layout.has_field('portal_dest_table'):
+        layout.write(section, scratch_off, 'portal_dest_table',
+                     b'\x00' * layout.field('portal_dest_table').size)
+        layout.write(section, scratch_off, 'portal_has_dest',
+                     b'\x00' * layout.field('portal_has_dest').size)
+        layout.write(section, scratch_off, 'portal_node',
+                     b'\xFF' * layout.field('portal_node').size)
+        layout.write(section, scratch_off, 'portal_dest_node',
+                     b'\xFF' * layout.field('portal_dest_node').size)
+        layout.write(section, scratch_off, 'bot_portal_target',
+                     b'\x00' * layout.field('bot_portal_target').size)
+        layout.write(section, scratch_off, 'bot_portal_cd',
+                     b'\x00' * layout.field('bot_portal_cd').size)
+        layout.write(section, scratch_off, 'bot_pad_try',
+                     b'\x00' * layout.field('bot_pad_try').size)
+        layout.write(section, scratch_off, 'route_portal_hop', struct.pack('<I', 0))
 
 
 def write_flag_static_table(section, scratch_off, layout, flag_maps, map_name_slot):
@@ -532,6 +578,10 @@ def write_static_scratch_data(
     lava_flee_frames=15,
     portal_maps=(),
     portal_map_name_slot=0,
+    portal_routes=(),
+    portal_wander_chance=0,
+    portal_jump_reacquire_sq=36864.0,
+    portal_veto_radius_sq=1600.0,
     flag_maps=(),
     flag_map_name_slot=0,
     door_maps=(),
@@ -770,7 +820,16 @@ def write_static_scratch_data(
             layout,
             portal_maps,
             portal_map_name_slot,
+            portal_routes=portal_routes,
         )
+    if layout.has_field('portal_wander_chance'):
+        layout.write(section, scratch_off, 'portal_wander_chance',
+                     struct.pack('<I', max(0, min(100, int(portal_wander_chance)))))
+        layout.write(section, scratch_off, 'portal_jump_sq',
+                     struct.pack('<f', portal_jump_reacquire_sq))
+    if layout.has_field('portal_veto_radius_sq'):
+        layout.write(section, scratch_off, 'portal_veto_radius_sq',
+                     struct.pack('<f', portal_veto_radius_sq))
     if layout.has_field('flag_static_map_count'):
         write_flag_static_table(
             section,

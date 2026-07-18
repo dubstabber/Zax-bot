@@ -12,7 +12,7 @@ without re-establishing a new byte-identity baseline."""
 from .. import config as cfg
 from ..asm import Asm
 from ..layout import build_scratch_layout
-from ..portal_data import resolve_portal_data
+from ..portal_data import resolve_portal_data, resolve_portal_routes
 from ..flag_data import resolve_flag_data
 from ..door_data import resolve_door_topology
 from ..static_data import write_static_scratch_data
@@ -270,6 +270,10 @@ def build_hook(section_va_abs):
         lava_flee_frames=cfg.LAVA_FLEE_FRAMES,
         portal_maps=portal_maps,
         portal_map_name_slot=cfg.PORTAL_MAP_NAME_SLOT,
+        portal_routes=resolve_portal_routes(),
+        portal_wander_chance=cfg.PORTAL_WANDER_CHANCE,
+        portal_jump_reacquire_sq=cfg.PORTAL_JUMP_REACQUIRE_DIST_SQ,
+        portal_veto_radius_sq=cfg.PORTAL_VETO_RADIUS_SQ,
         flag_maps=flag_maps,
         flag_map_name_slot=cfg.FLAG_MAP_NAME_SLOT,
         door_maps=door_maps,

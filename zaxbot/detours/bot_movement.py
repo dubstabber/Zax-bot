@@ -135,6 +135,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     _emit_waypoint_follow(a, layout)
     _emit_normalize_and_emit(a, layout)
     _emit_wall_slide(a, layout)
+    _emit_portal_veto(a, layout)
     _emit_plasma_veto(a, layout)
     _emit_dead_and_zero_return(a, layout)
     _emit_normal_fallthrough(a)
@@ -222,6 +223,11 @@ def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('route_block_hits')) + le32(0))  # reset blocked-edge retry count
     if layout.has_field('bot_seek'):
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_seek')) + le32(0))  # drop seek participation
+    if layout.has_field('bot_portal_target'):
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_portal_target')) + le32(0))  # drop pad approach
+    if layout.has_field('bot_portal_cd'):
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_portal_cd')) + le32(0))  # fresh wander cooldown
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pad_try')) + le32(0))    # fresh pad patience
     a.raw(b'\x89\x14\x8D' + le32(bot_last_char_va))       # bot_last_char[slot] = edx
     a.label('s542360_char_same')
 
@@ -234,13 +240,20 @@ def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
 def _emit_stuck_detection(a: Asm, layout: ScratchLayout) -> None:
     """d² between current and last position. Drives the wall-slide ramp (a
     wedged bot makes no progress so this climbs) and the pickup-divert
-    wall-wedge abandon."""
+    wall-wedge abandon. On portal-routing builds the same d² also feeds the
+    TELEPORT-JUMP detector: a move bigger than portal_jump_sq in one think can
+    only be a teleport (or an engine relocate), so the whole nav latch is
+    dropped and the follower cold-acquires the NEAREST node at the exit point
+    this very think — the post-teleport re-acquire the portal feature needs,
+    and it also catches bots knocked through script teleporters they never
+    chose."""
     bot_pos_va       = layout.va('bot_pos')
     bot_slot_tmp_va  = layout.va('bot_slot_tmp')
     last_x_va        = layout.va('bot_last_x')
     last_y_va        = layout.va('bot_last_y')
     stuck_count_va   = layout.va('bot_stuck_count')
     stuck_delta_sq_va = layout.va('stuck_delta_sq')
+    tp_jump = layout.has_field('tp_jump_d2') and layout.has_field('portal_jump_sq')
 
     a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
     a.raw(b'\xD9\x05' + le32(bot_pos_va))                 # fld pos.x
@@ -250,6 +263,8 @@ def _emit_stuck_detection(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xD8\x24\x8D' + le32(last_y_va))              # fsub last_y[slot]
     a.raw(b'\xD8\xC8')                                    # fmul st,st
     a.raw(b'\xDE\xC1')                                    # faddp -> ST0 = d²
+    if tp_jump:
+        a.raw(b'\xD9\x15' + le32(layout.va('tp_jump_d2')))  # fst tp_jump_d2 (keeps ST0)
     a.raw(b'\xD8\x1D' + le32(stuck_delta_sq_va))          # fcomp threshold (pops)
     a.raw(b'\xDF\xE0')                                    # fnstsw ax
     a.raw(b'\x9E')                                        # sahf
@@ -263,6 +278,42 @@ def _emit_stuck_detection(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x89\x04\x8D' + le32(last_x_va))
     a.raw(b'\xA1' + le32(bot_pos_va + 4))
     a.raw(b'\x89\x04\x8D' + le32(last_y_va))
+    if tp_jump and layout.has_field('bot_portal_cd'):
+        # Post-teleport wander-entry cooldown ticks down once per think.
+        a.raw(b'\x8B\x04\x8D' + le32(layout.va('bot_portal_cd')))  # eax = cd[slot]
+        a.raw(b'\x85\xC0'); a.jz('s542360_tp_cd0')
+        a.raw(b'\x48')                                    # dec eax
+        a.raw(b'\x89\x04\x8D' + le32(layout.va('bot_portal_cd')))
+        a.label('s542360_tp_cd0')
+    if tp_jump:
+        # Teleport-jump detect. Both values are non-negative IEEE floats, so
+        # the raw bit patterns compare correctly as unsigned ints — no FPU
+        # needed. The first think after a match change sees last=(0,0) and a
+        # huge delta; the resets below are all idempotent with the fresh
+        # state df90 just wrote, so no special-casing. route_suspend is left
+        # alone deliberately (a suspension must survive being teleported).
+        a.raw(b'\xA1' + le32(layout.va('tp_jump_d2')))    # eax = d² bits
+        a.raw(b'\x3B\x05' + le32(layout.va('portal_jump_sq')))
+        a.jbe('s542360_tp_done')                          # normal movement
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_current_wp')) + b'\xFF\xFF\xFF\xFF')
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_prev_wp')) + b'\xFF\xFF\xFF\xFF')
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pickup_y_cache')) + le32(0x7F7FFFFF))  # wp_best_dsq
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_wp_try')) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pickup_valid')) + le32(0))  # failed-edge marker
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_flee_ticks')) + le32(0))    # slide_turn
+        a.raw(b'\xC7\x04\x8D' + le32(stuck_count_va) + le32(0))
+        if layout.has_field('bot_portal_target'):
+            a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_portal_target')) + le32(0))
+        if layout.has_field('bot_portal_cd'):
+            # Teleported: arm the wander-entry cooldown so the roam roll at
+            # the exit node (which IS the return pad's node) can't bounce the
+            # bot straight back, and reset the pad-press patience budget.
+            a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_portal_cd'))
+                  + le32(cfg.PORTAL_WANDER_COOLDOWN_FRAMES))
+            a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pad_try')) + le32(0))
+        if layout.has_field('route_block_door'):
+            a.raw(b'\xC7\x04\x8D' + le32(layout.va('route_block_door')) + b'\xFF\xFF\xFF\xFF')
+        a.label('s542360_tp_done')
 
 
 def _emit_reactive_lava_flee(a: Asm, layout: ScratchLayout) -> None:
@@ -617,6 +668,27 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         overlay_edges_va     = layout.va('overlay_edges')
         overlay_edge_count_va = layout.va('overlay_edge_count')
 
+    # Portal pad approach + roam wander-entry. bot_portal_target[slot] (pad
+    # idx+1) is latched by a routed portal hop (ctf_next_hop via
+    # route_portal_hop) or by the roam-time portal_wander_check roll; while
+    # latched the follower steers at the PAD CENTER through the same watchdog
+    # as the flag final approach. The latch ends via the teleport-jump detect
+    # (the pad fired), a progress timeout (pad unreachable/inactive — clears
+    # the latch and suspends routing so the next arrivals roam), a stale pad
+    # index, or the pad reading inactive. Emitted whenever the portal-routing
+    # scratch fields exist; the runtime knobs gate behaviour.
+    portal_move = (layout.has_field('bot_portal_target')
+                   and layout.has_field('portal_node')
+                   and layout.has_field('portal_table')
+                   and layout.has_field('route_portal_hop'))
+    if portal_move:
+        bot_portal_target_va = layout.va('bot_portal_target')
+        portal_table_va      = layout.va('portal_table')
+        portal_count_va      = layout.va('portal_count')
+        route_portal_hop_va  = layout.va('route_portal_hop')
+        portal_active_mv_va  = (layout.va('portal_active')
+                                if layout.has_field('portal_active') else 0)
+
     # === Waypoint following =============================================
     a.raw(b'\x83\x3D' + le32(wp_follow_enabled_va) + b'\x00')
     a.jz('s542360_fallback_zero')
@@ -698,6 +770,82 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     # fall through to wp_have_cur
 
     a.label('s542360_wp_have_cur')
+    if portal_move:
+        # --- Portal pad final approach (latch-driven, mode-independent) -----
+        # Takes precedence over every node behaviour: a latched bot walks at
+        # the pad center until the teleport fires (the jump detect in the
+        # stuck stage then cold-reacquires at the exit) or the watchdog gives
+        # up. Fast path when unlatched: two loads + jz.
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8B\x04\x8D' + le32(bot_portal_target_va))  # eax = latch (idx+1)
+        a.raw(b'\x85\xC0'); a.jz('s542360_ptl_done')
+        a.raw(b'\x48')                                    # eax = pad idx
+        a.raw(b'\x3B\x05' + le32(portal_count_va))        # stale idx (map change)?
+        a.jae('s542360_ptl_clear')
+        if portal_active_mv_va:
+            a.raw(b'\x83\x3C\x85' + le32(portal_active_mv_va) + b'\x00')
+            a.jz('s542360_ptl_clear')                     # pad went inactive -> drop
+        # desired = pad center - bot
+        a.raw(b'\xD9\x04\xC5' + le32(portal_table_va))    # fld pad.x
+        a.raw(b'\xD8\x25' + le32(bot_pos_va))             # fsub bot.x
+        a.raw(b'\xD9\x1D' + le32(dx_accum_va))            # fstp dx_accum
+        a.raw(b'\xD9\x04\xC5' + le32(portal_table_va + 4))  # fld pad.y
+        a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))         # fsub bot.y
+        a.raw(b'\xD9\x1D' + le32(dy_accum_va))            # fstp dy_accum
+        # Watchdog — mirror of the CTF flag final approach: strict dsq
+        # improvement resets wp_try; stalling ramps it (drives the wall-slide
+        # sweep at the emit); a full progress-timeout drops the latch and
+        # suspends routing so deterministic re-picks don't loop.
+        a.raw(b'\xD9\x05' + le32(dx_accum_va))            # fld dx
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xD9\x05' + le32(dy_accum_va))            # fld dy
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xDE\xC1')                                # faddp -> ST0 = dsq(bot, pad)
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8B\x04\x8D' + le32(stuck_count_va))     # eax = stuck_count[slot]
+        a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES]))
+        a.jae('s542360_ptl_no_progress')                  # physically pinned
+        a.raw(b'\xD9\x04\x8D' + le32(wp_best_dsq_va))     # fld best (ST0=best, ST1=dsq)
+        a.raw(b'\xDF\xF1')                                # fcomip st0,st1 (best:dsq, pop)
+        a.jbe('s542360_ptl_no_progress')                  # best <= dsq -> no improvement
+        a.raw(b'\xD9\x1C\x8D' + le32(wp_best_dsq_va))     # best = dsq (pop)
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.jmp('s542360_emit')
+        a.label('s542360_ptl_no_progress')
+        a.raw(b'\xDD\xD8')                                # fstp st(0) (drop dsq)
+        a.raw(b'\xFF\x04\x8D' + le32(wp_try_va))          # ++wp_try[slot]
+        a.raw(b'\x8B\x04\x8D' + le32(wp_try_va))          # eax = wp_try
+        a.raw(b'\x3B\x05' + le32(wp_progress_timeout_va))
+        a.jb('s542360_emit')                              # keep pressing; slide sweeps
+        if layout.has_field('bot_pad_try'):
+            # PAD-PRESS PATIENCE (mirror of the door patience): the trigger
+            # is a thin sliver on a collidable teleporter prop, so one
+            # watchdog window often ends before the wall-slide sweep has
+            # walked a heading onto it (live snapshots caught a carrier
+            # suspending at the pad, roaming 240 thinks, then succeeding on
+            # the second visit). Restart the watchdog and keep pressing for
+            # up to PORTAL_PRESS_PATIENCE timeout cycles before giving up.
+            a.raw(b'\xFF\x04\x8D' + le32(layout.va('bot_pad_try')))  # ++pad_try
+            a.raw(b'\x83\x3C\x8D' + le32(layout.va('bot_pad_try'))
+                  + bytes([cfg.PORTAL_PRESS_PATIENCE]))
+            a.ja('s542360_ptl_impatient')                 # budget exhausted
+            a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))       # fresh watchdog
+            a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))
+            a.jmp('s542360_emit')                         # keep pressing the pad
+            a.label('s542360_ptl_impatient')
+            a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pad_try')) + le32(0))
+        if routing:
+            a.raw(b'\x83\x3D' + le32(routing_active_va) + b'\x00')
+            a.jz('s542360_ptl_to_clear')
+            a.raw(b'\xC7\x04\x8D' + le32(route_suspend_va)
+                  + le32(cfg.WP_ROUTE_SUSPEND_FRAMES))    # roam before re-picking the pad
+            a.label('s542360_ptl_to_clear')
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))
+        a.label('s542360_ptl_clear')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot (reload)
+        a.raw(b'\xC7\x04\x8D' + le32(bot_portal_target_va) + le32(0))
+        a.label('s542360_ptl_done')
     if door_reroute:
         # --- Closed-door commitment recovery -------------------------------
         # If the (prev -> cur) edge we are latched onto is bound to a currently
@@ -1189,6 +1337,23 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x59')                                   # pop ecx (cur)
         a.raw(b'\x83\xF8\xFF')                           # cmp eax, -1
         a.jz('s542360_wp_route_fallback')                # no route -> random neighbour
+        if portal_move:
+            # Routed PORTAL hop: ctf_next_hop parked the winning pad idx+1 in
+            # route_portal_hop (and returned cur). Latch the pad approach —
+            # the have_cur block takes over from the next think — and keep
+            # current_wp on the pad's node so the graph latch stays sane.
+            a.raw(b'\x83\x3D' + le32(route_portal_hop_va) + b'\x00')
+            a.jz('s542360_wp_no_portal_hop')
+            a.raw(b'\x8B\x1D' + le32(bot_slot_tmp_va))   # ebx = slot
+            a.raw(b'\x8B\x35' + le32(route_portal_hop_va))  # esi = pad idx+1
+            a.raw(b'\x89\x34\x9D' + le32(bot_portal_target_va))  # latch
+            a.raw(b'\xC7\x05' + le32(route_portal_hop_va) + le32(0))
+            a.raw(b'\xC7\x04\x9D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # fresh watchdog
+            a.raw(b'\xC7\x04\x9D' + le32(wp_try_va) + le32(0))
+            if layout.has_field('bot_pad_try'):
+                a.raw(b'\xC7\x04\x9D' + le32(layout.va('bot_pad_try')) + le32(0))
+            a.jmp('s542360_wp_steer')
+            a.label('s542360_wp_no_portal_hop')
         a.raw(b'\x8B\x1D' + le32(bot_slot_tmp_va))       # ebx = slot
         a.raw(b'\x8B\x1C\x9D' + le32(failed_edge_va))    # ebx = failed_edge_marker[slot]
         a.raw(b'\x85\xDB')                               # test ebx, ebx
@@ -1235,6 +1400,39 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.call_lbl('wp_advance')                         # fallback excluding the blocked edge
         a.jmp('s542360_wp_have_next')
         a.label('s542360_wp_route_fallback')
+        if portal_move:
+            # Roam wander-entry (DM matches, goal-less CTF bots): if the
+            # just-reached node hosts an active pad, roll
+            # portal_wander_chance and occasionally step INTO the teleporter
+            # instead of picking a random neighbour. cur/prev survive the
+            # helper via the stack (it calls the engine RNG). SKIPPED while
+            # this bot's routing is SUSPENDED (a suspension roam is a local
+            # unstick — live snapshots caught a suspended carrier bouncing
+            # arena-to-arena on this roll) and during the post-teleport
+            # cooldown (each pad's exit node IS the return pad's node, so
+            # the very next arrival would re-roll the coin — the observed
+            # teleport ping-pong).
+            a.raw(b'\x8B\x1D' + le32(bot_slot_tmp_va))   # ebx = slot
+            if routing:
+                a.raw(b'\x83\x3C\x9D' + le32(route_suspend_va) + b'\x00')
+                a.jnz('s542360_wp_no_wander')            # suspended -> local roam only
+            if layout.has_field('bot_portal_cd'):
+                a.raw(b'\x83\x3C\x9D' + le32(layout.va('bot_portal_cd')) + b'\x00')
+                a.jnz('s542360_wp_no_wander')            # just teleported -> no re-entry
+            a.raw(b'\x51')                               # push cur (ecx)
+            a.raw(b'\x52')                               # push prev (edx)
+            a.call_lbl('portal_wander_check')            # eax = pad idx+1 or 0 (in: ecx=cur)
+            a.raw(b'\x5A')                               # pop edx (prev)
+            a.raw(b'\x59')                               # pop ecx (cur)
+            a.raw(b'\x85\xC0'); a.jz('s542360_wp_no_wander')
+            a.raw(b'\x8B\x1D' + le32(bot_slot_tmp_va))   # ebx = slot
+            a.raw(b'\x89\x04\x9D' + le32(bot_portal_target_va))  # latch = pad idx+1
+            a.raw(b'\xC7\x04\x9D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))
+            a.raw(b'\xC7\x04\x9D' + le32(wp_try_va) + le32(0))
+            if layout.has_field('bot_pad_try'):
+                a.raw(b'\xC7\x04\x9D' + le32(layout.va('bot_pad_try')) + le32(0))
+            a.jmp('s542360_wp_steer')
+            a.label('s542360_wp_no_wander')
         a.call_lbl('wp_advance')                         # fallback: random/non-prev neighbour
         a.label('s542360_wp_have_next')
     else:
@@ -1475,7 +1673,7 @@ def _emit_wall_slide(a: Asm, layout: ScratchLayout) -> None:
     a.label('s542360_ws_have_turn')
 
     a.raw(b'\x8B\x04\x8D' + le32(slide_turn_va))          # eax = slide_turn[slot]
-    a.raw(b'\x85\xC0'); a.jz('s542360_plasma_veto')       # no deflection -> lava veto
+    a.raw(b'\x85\xC0'); a.jz('s542360_portal_veto')       # no deflection -> portal veto
     a.raw(b'\x8B\x54\x24\x28')                            # edx = out_angle (esp+0x28)
     a.raw(b'\x85\xD2'); a.jz('s542360_ret')               # no angle slot
     # angle += slide_turn * WP_SLIDE_TURN_STEP (engine uses cos/sin, no wrap
@@ -1486,7 +1684,124 @@ def _emit_wall_slide(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xD8\x0D' + le32(wp_slide_turn_step_va))      # fmul step -> deflection
     a.raw(b'\xD8\x02')                                    # fadd dword [edx]  (angle)
     a.raw(b'\xD9\x1A')                                    # fstp dword [edx]  (store angle)
-    a.jmp('s542360_plasma_veto')
+    a.jmp('s542360_portal_veto')
+
+
+def _emit_portal_veto(a: Asm, layout: ScratchLayout) -> None:
+    """Post-teleport RETURN-PAD heading veto — the anti-ping-pong wall.
+
+    Runs AFTER the wall-slide finalizes the emitted angle, only while this
+    bot's post-teleport cooldown (``bot_portal_cd``) is running. The teleport
+    drops the bot at the exit marker inside a collision pocket around the
+    teleporter prop, ~28 px from the RETURN pad's thin trigger sliver (live
+    proute snapshots caught a carrier pinned at the exact exit coords with
+    ``wp_try`` ramping, then bounced arena-to-arena every ~1-2 s). The
+    wall-slide sweep is what escapes the pocket — but it tries headings in
+    fixed order, and any sliver-ward heading that moves fires an ENGINE
+    re-teleport no bot-side gate can stop. So while the cooldown runs, any
+    candidate heading whose ``LAVA_LOOKAHEAD_PX`` lookahead point lands
+    within sqrt(``portal_veto_radius_sq``) of a pad center is rotated onward
+    (``lava_sweep_step`` per try, up to a full circle) — pads become virtual
+    walls. The pad the bot deliberately LATCHED (``bot_portal_target``) is
+    exempt: routing legitimately sends carriers back through a pad.
+
+    Reuses the lava-veto per-call temps (the two vetoes run sequentially in
+    the same call, never concurrently) and ``wp_seg_x/y`` (steer-stage
+    temps, dead by this point) for the lookahead point; ``pw_spill`` holds
+    the exempt pad index. FPU stays balanced; GPRs are popad-restored."""
+    bot_pos_va            = layout.va('bot_pos')
+    bot_slot_tmp_va       = layout.va('bot_slot_tmp')
+    lava_lookahead_px_va  = layout.va('lava_lookahead_px')
+    lava_sweep_step_va    = layout.va('lava_sweep_step')
+    veto_angle_va         = layout.va('lava_veto_angle')
+    veto_cos_va           = layout.va('lava_veto_cos')
+    veto_sin_va           = layout.va('lava_veto_sin')
+    lava_k_va             = layout.va('lava_k')
+    wp_seg_x_va           = layout.va('wp_seg_x')
+    wp_seg_y_va           = layout.va('wp_seg_y')
+
+    a.label('s542360_portal_veto')
+    ok = (layout.has_field('bot_portal_cd')
+          and layout.has_field('bot_portal_target')
+          and layout.has_field('portal_table')
+          and layout.has_field('portal_veto_radius_sq')
+          and layout.has_field('pw_spill'))
+    if not ok:
+        return                                              # fall through to plasma veto
+
+    bot_portal_cd_va     = layout.va('bot_portal_cd')
+    bot_portal_target_va = layout.va('bot_portal_target')
+    portal_table_va      = layout.va('portal_table')
+    portal_count_va      = layout.va('portal_count')
+    veto_radius_va       = layout.va('portal_veto_radius_sq')
+    pw_spill_va          = layout.va('pw_spill')
+
+    a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))              # ecx = slot
+    a.raw(b'\x83\x3C\x8D' + le32(bot_portal_cd_va) + b'\x00')  # cooldown running?
+    a.jz('s542360_plasma_veto')                             # no -> pads are fair game
+    a.raw(b'\x8B\x54\x24\x28')                              # edx = out_angle ptr
+    a.raw(b'\x85\xD2'); a.jz('s542360_plasma_veto')         # no angle slot
+    # Exempt pad = the deliberately latched one (idx, or -1 when unlatched).
+    a.raw(b'\x8B\x04\x8D' + le32(bot_portal_target_va))     # eax = latch (idx+1 / 0)
+    a.raw(b'\x48')                                          # eax = idx / -1
+    a.raw(b'\xA3' + le32(pw_spill_va))                      # pw_spill = exempt idx
+    a.raw(b'\x8B\x02')                                      # eax = base angle bits
+    a.raw(b'\xA3' + le32(veto_angle_va))                    # veto_angle = base heading
+    a.raw(b'\xC7\x05' + le32(lava_k_va) + le32(0))          # k = 0
+
+    a.label('s542360_pvt_loop')
+    # Lookahead point of the candidate heading.
+    a.raw(b'\xD9\x05' + le32(veto_angle_va))                # fld veto_angle
+    a.raw(b'\xD9\xFB')                                      # fsincos -> ST0=cos, ST1=sin
+    a.raw(b'\xD9\x1D' + le32(veto_cos_va))                  # fstp cos (-> ST0=sin)
+    a.raw(b'\xD9\x1D' + le32(veto_sin_va))                  # fstp sin (-> empty)
+    a.raw(b'\xD9\x05' + le32(lava_lookahead_px_va))         # fld look
+    a.raw(b'\xD8\x0D' + le32(veto_cos_va))                  # fmul cos
+    a.raw(b'\xD8\x05' + le32(bot_pos_va))                   # fadd bot.x
+    a.raw(b'\xD9\x1D' + le32(wp_seg_x_va))                  # fstp look.x
+    a.raw(b'\xD9\x05' + le32(lava_lookahead_px_va))         # fld look
+    a.raw(b'\xD8\x0D' + le32(veto_sin_va))                  # fmul sin
+    a.raw(b'\xD8\x05' + le32(bot_pos_va + 4))               # fadd bot.y
+    a.raw(b'\xD9\x1D' + le32(wp_seg_y_va))                  # fstp look.y
+    # Scan pads: blocked when the lookahead lands inside a non-exempt bubble.
+    a.raw(b'\x31\xF6')                                      # esi = 0 (p)
+    a.label('s542360_pvt_scan')
+    a.raw(b'\x3B\x35' + le32(portal_count_va))              # p >= portal_count?
+    a.jae('s542360_pvt_ok')
+    a.raw(b'\x83\xFE' + bytes([cfg.PORTAL_TABLE_MAX]))      # p >= table max?
+    a.jae('s542360_pvt_ok')
+    a.raw(b'\x3B\x35' + le32(pw_spill_va))                  # p == exempt (latched) pad?
+    a.jz('s542360_pvt_next')
+    a.raw(b'\xD9\x04\xF5' + le32(portal_table_va))          # fld pad.x
+    a.raw(b'\xD8\x25' + le32(wp_seg_x_va))                  # fsub look.x
+    a.raw(b'\xD8\xC8')                                      # fmul st,st
+    a.raw(b'\xD9\x04\xF5' + le32(portal_table_va + 4))      # fld pad.y
+    a.raw(b'\xD8\x25' + le32(wp_seg_y_va))                  # fsub look.y
+    a.raw(b'\xD8\xC8')                                      # fmul st,st
+    a.raw(b'\xDE\xC1')                                      # faddp -> ST0 = d²
+    a.raw(b'\xD8\x1D' + le32(veto_radius_va))               # fcomp radius² (pops)
+    a.raw(b'\xDF\xE0'); a.raw(b'\x9E')                      # fnstsw ax; sahf
+    a.jb('s542360_pvt_blocked')                             # d² < radius² -> pad-ward
+    a.label('s542360_pvt_next')
+    a.raw(b'\x46')                                          # ++p
+    a.jmp('s542360_pvt_scan')
+
+    a.label('s542360_pvt_blocked')
+    # Rotate the heading and retry, up to a full circle; if every heading is
+    # pad-ward (can't happen with a 40px bubble) keep the base angle.
+    a.raw(b'\xD9\x05' + le32(veto_angle_va))                # fld veto_angle
+    a.raw(b'\xD8\x05' + le32(lava_sweep_step_va))           # fadd sweep step
+    a.raw(b'\xD9\x1D' + le32(veto_angle_va))                # fstp veto_angle
+    a.raw(b'\xFF\x05' + le32(lava_k_va))                    # ++k
+    a.raw(b'\x83\x3D' + le32(lava_k_va) + bytes([LAVA_SWEEP_COUNT]))
+    a.jb('s542360_pvt_loop')
+    a.jmp('s542360_plasma_veto')                            # all vetoed -> keep base
+
+    a.label('s542360_pvt_ok')
+    a.raw(b'\x8B\x54\x24\x28')                              # edx = out_angle ptr
+    a.raw(b'\xA1' + le32(veto_angle_va))                    # eax = chosen angle bits
+    a.raw(b'\x89\x02')                                      # [edx] = pad-clear heading
+    # fall through to the plasma veto
 
 
 def _emit_plasma_veto(a: Asm, layout: ScratchLayout) -> None:
@@ -1589,6 +1904,10 @@ def _emit_dead_and_zero_return(a: Asm, layout: ScratchLayout) -> None:
     if door_gate:
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('route_block_door'))
               + b'\xFF\xFF\xFF\xFF')                                  # wedge-door latch = -1
+    if layout.has_field('bot_portal_target'):
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_portal_target')) + le32(0))  # drop pad approach
+    if layout.has_field('bot_pad_try'):
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pad_try')) + le32(0))
     # fall through to zero-vector return.
 
     # --- Zero-vector return (panic / NULL char / degenerate normalize) ---

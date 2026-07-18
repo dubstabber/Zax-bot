@@ -118,6 +118,12 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # overlay table. This is cheap and bounded: a fixed static map-name table
     # plus a small float[2] copy, no heap scan.
     a.call_lbl('load_portals')
+    # Bind every live pad (and its resolved teleport destination) to its
+    # nearest graph node so bfs_run can traverse pads as directed edges and
+    # the roam wander-entry can recognise pad nodes. Needs the graph, so it
+    # runs after wp_load; needs the pads, so after load_portals; and it must
+    # precede build_flag_routes below. Inert stub on non-portal-route builds.
+    a.call_lbl('bind_portal_nodes')
     # Copy this map's build-time parsed CTF flag-base anchors into the live
     # flag_table (overlay markers + future CTF bot routing). Same cheap bounded
     # static-table copy as load_portals; inert stub on non-flag builds.

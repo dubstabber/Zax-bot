@@ -3,9 +3,14 @@
 Zax's Data.dat is not a complete ZIP archive, but it stores assets as ZIP
 local-file records. The shipped .zax map payloads are uncompressed text. This
 module scans those records and finds touching-polygon triggers that perform a
-teleport/relocate action with a warp effect. The returned points are source
-trigger centers, not the post-teleport destinations, so bots can route into the
-actual portal volume.
+teleport/relocate action with a warp effect. The primary points are source
+trigger centers (so bots can route into the actual portal volume); when the
+action's ``New Location`` resolves to a positioned Level Part in the same file
+the DESTINATION is extracted too, which turns the portal into a directed edge
+the routing BFS can traverse (Hydro Vengence's four warm/cold pads). Script
+teleporters whose target is runtime-resolved (Jungle Ruins' "Upper"/"Lower")
+keep a ``None`` destination — they stay detect/wander-only and the follower's
+teleport-jump re-acquire handles the position change.
 """
 
 from __future__ import annotations
@@ -195,10 +200,33 @@ def _action_has_warp_effect(
     )
 
 
-def _parse_portals_from_zax(payload: bytes) -> list[tuple[float, float]]:
+def _parse_action_destination(
+    lines: list[str],
+    start: int,
+    end: int,
+    destinations: dict[str, list[tuple[float, float, bool]]],
+) -> tuple[float, float] | None:
+    """Resolve the action block's ``New Location`` to a Level Part position.
+
+    Returns ``None`` when the target name does not resolve in this file
+    (script/event teleporters whose destination is a runtime entity)."""
+    for raw in lines[start:end]:
+        line = raw.strip()
+        if line.startswith('New Location='):
+            entries = destinations.get(line.split('=', 1)[1])
+            if entries:
+                return entries[0][0], entries[0][1]
+            return None
+    return None
+
+
+def _parse_portals_from_zax(
+    payload: bytes,
+) -> list[tuple[tuple[float, float], tuple[float, float] | None]]:
     text = payload.decode('latin1', 'replace').replace('\r\n', '\n')
     lines = text.split('\n')
-    portals: list[tuple[float, float]] = []
+    destinations = _parse_level_part_destinations(lines)
+    portals: list[tuple[tuple[float, float], tuple[float, float] | None]] = []
     seen: set[tuple[int, int]] = set()
     idx = 0
 
@@ -240,7 +268,10 @@ def _parse_portals_from_zax(payload: bytes) -> list[tuple[float, float]]:
             key = (round(x * 1000), round(y * 1000))
             if key not in seen:
                 seen.add(key)
-                portals.append((x, y))
+                dest = _parse_action_destination(
+                    lines, action_start, action_end, destinations
+                )
+                portals.append(((x, y), dest))
             break
         idx = end
 
@@ -248,8 +279,16 @@ def _parse_portals_from_zax(payload: bytes) -> list[tuple[float, float]]:
 
 
 @lru_cache(maxsize=1)
-def resolve_portal_data(data_path: str | None = None) -> tuple[tuple[str, tuple[tuple[float, float], ...]], ...]:
-    """Return ``((map_name, ((x, y), ...)), ...)`` parsed from Data.dat.
+def resolve_portal_routes(
+    data_path: str | None = None,
+) -> tuple[tuple[str, tuple[tuple[tuple[float, float], tuple[float, float] | None], ...]], ...]:
+    """Return ``((map_name, (((sx, sy), (dx, dy) | None), ...)), ...)``.
+
+    Each entry pairs a portal's SOURCE trigger center with its resolved
+    teleport DESTINATION, or ``None`` when the action's ``New Location`` does
+    not resolve to a positioned Level Part in the same map file. Sources feed
+    portal detection/overlay exactly as before; resolved destinations turn a
+    portal into a directed routing edge (source pad -> destination point).
 
     Missing Data.dat is treated as "no static portal data" so unit tests and
     tooling can still build a patched section from just the executable.
@@ -270,7 +309,7 @@ def resolve_portal_data(data_path: str | None = None) -> tuple[tuple[str, tuple[
         return ()
 
     data = path.read_bytes()
-    maps: list[tuple[str, tuple[tuple[float, float], ...]]] = []
+    maps: list[tuple[str, tuple[tuple[tuple[float, float], tuple[float, float] | None], ...]]] = []
     for name, payload in _iter_local_files(data):
         if not name.lower().endswith('.zax'):
             continue
@@ -280,3 +319,14 @@ def resolve_portal_data(data_path: str | None = None) -> tuple[tuple[str, tuple[
         if portals:
             maps.append((name, tuple(portals)))
     return tuple(sorted(maps, key=lambda item: item[0].lower()))
+
+
+def resolve_portal_data(data_path: str | None = None) -> tuple[tuple[str, tuple[tuple[float, float], ...]], ...]:
+    """Return ``((map_name, ((x, y), ...)), ...)`` — source centers only.
+
+    Thin source-only view over ``resolve_portal_routes`` kept for the
+    consumers (overlay static table, tests) that only care about the pads."""
+    return tuple(
+        (name, tuple(src for src, _dest in routes))
+        for name, routes in resolve_portal_routes(data_path)
+    )

@@ -241,6 +241,106 @@ class PortalDataTests(unittest.TestCase):
         self.assertTrue(maps, 'expected at least the shipped MP portal maps')
         self.assertTrue(all('Multiplayer' in name for name in maps))
 
+    def test_portal_routes_resolve_hydro_destinations(self):
+        # Hydro Vengence's four pads carry CRelocateAction warps whose New
+        # Location ("warm 1/2", "cold 1/2") resolves to positioned Level Parts
+        # — the destinations that turn each pad into a directed routing edge.
+        # Pin them, and pin the pairing invariant: each destination lands in
+        # the OTHER arena right next to the paired return pad, so the pads
+        # form two two-way links between the arenas.
+        from zaxbot.portal_data import resolve_portal_routes
+
+        maps = dict(resolve_portal_routes())
+        hydro = maps['Levels/Multiplayer/CTF/Hydro Vengence.zax']
+        self.assertEqual(
+            [dest for _src, dest in hydro],
+            [(425.0, 291.0), (271.0, 1875.0), (946.0, 1928.0), (824.0, 176.0)],
+        )
+        srcs = [src for src, _dest in hydro]
+        for si, (_src, dest) in enumerate(hydro):
+            near = min(range(len(srcs)),
+                       key=lambda k: (srcs[k][0]-dest[0])**2 + (srcs[k][1]-dest[1])**2)
+            self.assertNotEqual(near, si, 'pad teleports onto itself')
+            d2 = (srcs[near][0]-dest[0])**2 + (srcs[near][1]-dest[1])**2
+            self.assertLess(d2, 50.0 * 50.0, 'exit not adjacent to a return pad')
+        # Jungle Ruins' script teleporters target runtime-resolved entities
+        # ("Upper"/"Lower") — no static destination, detect/wander-only.
+        jungle = maps['Levels/Multiplayer/DeathMatch/Jungle Ruins.zax']
+        self.assertTrue(all(dest is None for _src, dest in jungle))
+        # Sources view stays parallel to the routes view.
+        from zaxbot.portal_data import resolve_portal_data
+        self.assertEqual(
+            {n: tuple(s for s, _d in r) for n, r in maps.items()},
+            dict(resolve_portal_data()),
+        )
+
+    def test_portal_routing_connects_hydro_arenas(self):
+        # Offline simulation of the emitted portal BFS relax (bfs_run's
+        # bfsr_portals pass + ctf_next_hop's pad scan) on the shipped Hydro
+        # Vengence graph. The premise: the two arenas are DISCONNECTED in the
+        # plain edge list, so CTF routing could never reach the enemy base.
+        # With pads as directed edges (dest node relaxes source node during
+        # the goal-outward BFS) each base becomes reachable from the other,
+        # and at a departure-arena pad node the pad's destination carries a
+        # strictly smaller distance — exactly the condition ctf_next_hop
+        # latches the pad final-approach on.
+        import struct as _struct
+        from pathlib import Path
+        from zaxbot.portal_data import resolve_portal_routes
+        from zaxbot.flag_data import resolve_flag_data
+
+        name = 'Levels/Multiplayer/CTF/Hydro Vengence.zax'
+        d = (Path(__file__).resolve().parents[1] / 'waypoints'
+             / (name.replace('/', '_') + '.zwpt')).read_bytes()
+        magic, _ver, vc, ec = _struct.unpack('<4sIII', d[:16])
+        self.assertEqual(magic, b'ZWPT')
+        verts = [_struct.unpack('<ff', d[16 + i*8:24 + i*8]) for i in range(vc)]
+        eoff = 16 + vc*8
+        edges = []
+        for e in range(ec):
+            w = _struct.unpack('<I', d[eoff + e*4:eoff + e*4 + 4])[0]
+            edges.append((w & 0xFFFF, w >> 16))
+
+        def nearest(x, y):
+            return min(range(vc),
+                       key=lambda k: (verts[k][0]-x)**2 + (verts[k][1]-y)**2)
+
+        def bfs(goal, portal_edges):
+            dist = [-1] * vc
+            dist[goal] = 0
+            q = [goal]
+            while q:
+                u = q.pop(0)
+                for (i, j) in edges:
+                    v = j if i == u else (i if j == u else None)
+                    if v is not None and dist[v] == -1:
+                        dist[v] = dist[u] + 1
+                        q.append(v)
+                for (src_n, dest_n) in portal_edges:
+                    if dest_n == u and dist[src_n] == -1:
+                        dist[src_n] = dist[u] + 1
+                        q.append(src_n)
+            return dist
+
+        routes = dict(resolve_portal_routes())[name]
+        portal_edges = [(nearest(*src), nearest(*dest)) for src, dest in routes]
+        bases = {t: nearest(x, y) for (x, y, t) in dict(resolve_flag_data())[name]}
+
+        for goal_team in (0, 1):
+            start = bases[1 - goal_team]
+            plain = bfs(bases[goal_team], [])
+            self.assertEqual(plain[start], -1,
+                             'arenas connected without portals — premise changed '
+                             '(re-authored graph?); revisit this test')
+            dist = bfs(bases[goal_team], portal_edges)
+            self.assertNotEqual(dist[start], -1,
+                                'portal edges did not connect the arenas')
+            descending = [k for k, (sn, dn) in enumerate(portal_edges)
+                          if dist[sn] != -1 and dist[dn] != -1
+                          and dist[dn] < dist[sn]]
+            self.assertTrue(descending,
+                            'no pad offers a strictly-descending hop')
+
     def test_ctf_flag_spawns_are_extracted_from_data_dat(self):
         # Each CTF map authors two flag-base anchors ("Red Flag Spawn" /
         # "Blue Flag Spawn"); pin Hydro Vengence's pair (verified against the
@@ -652,8 +752,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '0aaacee48b5b6c3a27deaf9860325de57af71fdd1c29d49e282fbd61e207135b'
-    HOOK_ENTRY_SIZE = 28646
+    SECTION_SHA256 = 'd3e5dd73e1832b0343f2c3f12b157986a0ec554d537a5b41c45bb66a96efdafd'
+    HOOK_ENTRY_SIZE = 30383
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

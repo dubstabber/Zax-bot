@@ -244,6 +244,18 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         emit_chunk(layout.va('tag_seek'),
                    b'\xB8' + le32(layout.va('switch_node')),
                    seek_dump_len, 'snap_skip_seek')
+    # Portal-routing state: one contiguous chunk from portal_dest_table
+    # through pw_spill (dest coords, has-dest flags, pad/dest node bindings,
+    # per-bot pad latches, next-hop spill, wander/jump knobs, last jump d²) —
+    # one R press pins whether bind_portal_nodes bound the pads, which bots
+    # are pad-latched, and whether the jump detector saw the teleport.
+    if layout.has_field('tag_proute') and layout.has_field('portal_dest_table'):
+        proute_dump_len = (layout.field('pw_spill').offset
+                           + layout.field('pw_spill').size
+                           - layout.field('portal_dest_table').offset)
+        emit_chunk(layout.va('tag_proute'),
+                   b'\xB8' + le32(layout.va('portal_dest_table')),
+                   proute_dump_len, 'snap_skip_proute')
 
     # Waypoint-graph probe. wp_compute populates wp_diag_data[0..7]:
     #   [+0x00] MGR, [+0x04] WM, [+0x08] LV, [+0x0C] WPM,

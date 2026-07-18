@@ -133,8 +133,16 @@ Current limitations:
   change, marking portals PROACTIVELY at match start. As defence-in-depth, a
   runtime detour on the relocate/teleport executor (`detour_4C11A0`,
   `cfg.PORTAL_REGISTER_ENABLED`) also self-registers the source pad of any
-  `CTeleportAction` warp the moment it fires. Both are detection only for now;
-  routing bots into portals is future work.
+  `CTeleportAction` warp the moment it fires. On top of detection, pads whose
+  warp DESTINATION resolves at build time (`New Location` → a positioned Level
+  Part, e.g. Hydro Vengence's four warm/cold pads) are DIRECTED ROUTING EDGES:
+  `bind_portal_nodes` binds pad + exit to their nearest graph nodes per match,
+  `bfs_run` relaxes entry→exit in every CTF distance field (Hydro's two arenas
+  connect only through the pads), `ctf_next_hop` latches a pad final-approach
+  when the pad is the shortest hop, a >192px per-think position jump
+  cold-reacquires the nearest node at the exit, and roaming/DM bots
+  occasionally wander into an adjacent active pad
+  (`cfg.PORTAL_WANDER_CHANCE`). See the portal-routing bullet in AGENTS.md.
 - Doors are detected the same static way (`door_data.py` extracts every MP
   map's `Activity=CDoorAI` Level Parts — 10 maps / 333 doors — and
   `load_doors` copies the active map's centers in per match). Live open/closed
