@@ -697,7 +697,7 @@ DOOR_OPENER_STATIC_MAX = 96   # build-time records across all MP maps
 # team gating (a closed enemy-team door is avoided either way). Set False to
 # restore the directional edge_pass behaviour (route through doors your team
 # could open) — only worthwhile once bots can trigger far doors themselves.
-DOOR_ROUTE_PHYSICAL_STATE = True
+DOOR_ROUTE_PHYSICAL_STATE = False
 
 # --- CTF flag routing (bots navigate the waypoint graph toward flags) ----
 # Master gate. When on and the active match is CTF with a graph + flags, bots
@@ -775,6 +775,26 @@ BOT_FORCE_ACTIVE_ENABLED = True
 # bots and lets fire/aim suppress stray shots during the recovery tick. Requires
 # BOT_FORCE_ACTIVE_ENABLED because those entity stages still gate on Active.
 BOT_FORCE_TICK_ENABLED = True
+# THE fundamental anti-culling fix: make each bot an engine-native ACTIVATION
+# SOURCE, exactly like a real connected player. The MP world update
+# (sub_4F37E0, virtual) collects one point per participant — the floats at
+# participant+0xC0/+0xC4, on the participant whose layer index at +0xDC is
+# valid — and sub_4EA350 turns each point into a screen-sized activation rect;
+# sub_4E74A0 then updates every Active entity inside the union of (host
+# viewport rect + all participant rects) via the sub_57A100 grid collect. Real
+# clients stream their +0xC0 position over DirectPlay; nobody updates a bot's,
+# so it stays (0,0) (live-verified) and the world around a far bot is never
+# simulated — the root cause of far bots not opening their own team doors, not
+# stealing far flags, and freezing mid-route. This flag mirrors each live
+# bot's char position (char+0x4C/+0x50) into its participant's +0xC0/+0xC4
+# once per frame from the page-flip hook (inside the force-active 16-slot
+# loop, so it requires BOT_FORCE_ACTIVE_ENABLED). The engine then simulates
+# around bots natively: touch/proximity door triggers think and fire, far
+# flag steals/captures work, no force-wake needed. Safe by construction
+# against the checker re-arm hazard: sub_57A100 only collects entities whose
+# Active bit is SET, so script-deactivated CTF checkers stay asleep — this
+# path never touches any entity's Active bit.
+BOT_PARTICIPANT_POS_ENABLED = True
 
 # Runtime portal detection: a detour on the relocate/teleport executor
 # (sub_4C11A0) self-registers the SOURCE pad of every CTeleportAction warp into

@@ -570,6 +570,23 @@ ENTITY_SOLID_BIT       = 0x40000    # SOLID/collidable bit; a CLOSED door carrie
                                     # sub_4BD870) clears it — the clean passable/blocked readback
 ENTITY_VISIT_OFF       = 0x2C       # entity per-scan visit-id (dedup)
 ENTITY_VISIT_COUNTER_VA = 0x622200  # dword_622200: engine global visit-id counter
+ENTITY_POS_X_OFF       = 0x4C       # entity world position X (float)
+ENTITY_POS_Y_OFF       = 0x50       # entity world position Y (float)
+
+# --- Participant activation point (engine-native anti-culling) -------------
+# The MP world update sub_4F37E0 (virtual; vtables 0x5F909C/0x602EA4 slots)
+# walks ALL participants and, for each with a valid layer index at +0xDC,
+# appends the float pair at +0xC0/+0xC4 to a point list; sub_4EA350 turns each
+# point into a screen-sized rect and sub_4E74A0 updates every Active entity
+# inside the rect union (sub_57A100 grid collect, Active-bit-masked). Real
+# clients stream +0xC0/+0xC4 over DirectPlay; the host's own participant is
+# updated engine-side (live-verified tracking the host char). Bot participants
+# are never written by anyone -> stuck at (0,0) (live-verified), which is the
+# root cause of every far-from-host culling bug. The page-flip hook mirrors
+# each bot char's +0x4C/+0x50 into these fields per frame.
+PART_POS_X_OFF         = 0xC0       # participant "last known position" X (float)
+PART_POS_Y_OFF         = 0xC4       # participant "last known position" Y (float)
+PART_LAYER_IDX_OFF     = 0xDC       # participant layer index (-1 = not in world); bots get 0 at spawn
 
 # --- KERNEL32 IAT slots ----------------------------------------------------
 IMP_CREATEFILEA      = 0x5EA0D4

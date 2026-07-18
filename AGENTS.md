@@ -311,6 +311,29 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   (host/unused) is skipped. Both loops are cheap fixed 16-slot loops once per
   frame — do NOT hook `sub_4FADC0` itself (per entity per frame = the Windows FPS-regression hot
   path). See the `bot-far-from-camera-freeze` memory.
+- **Bots are engine-native ACTIVATION SOURCES** (`cfg.BOT_PARTICIPANT_POS_
+  ENABLED`, rides inside the force-active loop) — THE fundamental anti-culling
+  fix, addressing the whole class of "world near a far bot is frozen" bugs
+  (far team doors never opening for their own team's bot, far enemy-base flag
+  never stealable, checkers asleep). Decompiled chain: the MP world update
+  `sub_4F37E0` (virtual, vtable-referenced at `0x5F909C`/`0x602EA4`) walks ALL
+  participants and, for each with a valid layer index at `part+0xDC`, appends
+  the float pair `part+0xC0/+0xC4` as an activation POINT; `sub_4EA350` turns
+  each point into a screen-sized rect (static array `dword_6C1BDC`, count
+  `dword_6C1BE0`); `sub_4E74A0` collects every entity inside the union of the
+  host viewport rect + all participant rects via the `sub_57A100` grid collect
+  and runs `sub_57A030` on the collection. Real clients stream `+0xC0/+0xC4`
+  over DirectPlay; the host's is engine-maintained; a bot's stayed at (0,0)
+  forever (live-verified) so nothing near a far bot was ever simulated. The
+  page-flip loop now mirrors each live bot char's `+0x4C/+0x50` into its
+  participant's `+0xC0/+0xC4` each frame, and the ENGINE builds a live rect
+  around every bot exactly as for a real connected player (CE-verified: the
+  rect array tracked the bot mid-roam). Touch/proximity door triggers near
+  bots now think and fire natively. SAFE against the checker re-arm hazard by
+  construction: `sub_57A100` only collects entities whose Active bit is SET,
+  so script-deactivated CTF checkers stay asleep — this path never writes any
+  entity's Active bit. The force-active/force-tick loops above remain as
+  belt-and-braces (they no-op when the engine ticks the bot natively).
 - **Vanilla CTF rule = the checker state machine, and `flag_present[]` mirrors
   it exactly.** Every CTF-capable map (all 6 CTF maps + Hydroplant Bouncefest)
   authors a hidden `Red Checker` / `Blue Checker` `CTouchingOvalTriggerAI`
@@ -451,7 +474,8 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     and open to 28/29 when one gate is switched open (the live-reported
     reroute scenario); Doom ship's team doors split by team. No new patch
     sites.
-  - **PHYSICAL-STATE override** (`cfg.DOOR_ROUTE_PHYSICAL_STATE`, default ON):
+  - **PHYSICAL-STATE override** (`cfg.DOOR_ROUTE_PHYSICAL_STATE`, now default
+    OFF — superseded by `BOT_PARTICIPANT_POS_ENABLED`, see below):
     the directional `edge_pass` scheme above lets a bot route THROUGH a
     closed door its team could open — but a bot far from the host's camera
     can open NO door (touch/switch triggers are camera-gated and never fire
@@ -467,7 +491,11 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     (walk-at-door) exactly as before because those bases are truly sealed with
     no around-path. The two team fields build identically under this flag
     (`edge_pass`/`door_mask` become vestigial but the build machinery is kept
-    for flag-OFF). Turn OFF only once bots can trigger far doors themselves.
+    for flag-OFF). NOW OFF (default False): with `BOT_PARTICIPANT_POS_ENABLED`
+    the world near each bot is natively simulated, so walk-up/touch door
+    triggers fire for far bots and the directional `edge_pass` routing can use
+    team-openable closed doors again — live-verified working ("works
+    perfectly" on the team-gated doors that motivated the flag).
   - **Mid-life reroute epoch** (`route_epoch` global + `bot_route_epoch[slot]`;
     flag-route block): `ctf_next_hop` only runs on node ARRIVAL, so a bot
     committed to a full-field walk-at-the-door path (open field couldn't reach
@@ -499,9 +527,11 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     so `ctf_next_hop` re-plans door-aware from the reachable node (offline-
     verified: 15→14 across closed door 9 re-plans 15→16; 5→6 across closed door
     15 re-plans 5→1). Fires only in that exact stuck state — door open or
-    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is now ~128 B below
-    `SCRATCH_OFF`; the next code addition likely needs `SCRATCH_OFF`+
-    `NEW_SECTION_SIZE` bumped together (build asserts on overflow). The `rstate`
+    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is now ~87 B below
+    `SCRATCH_OFF` (hook_entry_size 26537 of 26624 after the participant-position
+    mirror + the physical-state-OFF directional gates); the next code addition
+    needs `SCRATCH_OFF`+`NEW_SECTION_SIZE` bumped together (build asserts on
+    overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
     `flag_routing_active`) was added for diagnosing route commitment.
 - General world-entity enumeration (`detours/entity_scan.py:scan_entities`,
@@ -621,6 +651,11 @@ Older emitted labels or disabled detours are not active unless they appear in
 | `CTeleportAction vtbl = 0x6033B0` | genuine warp teleporter (parent chain `CSwitchMapAction 0x6032C4` → `CRelocateAction 0x603338` → `CTeleportAction`); the portal detour filters `[action]` to this. |
 | `CTouchingPolygonTriggerAI vtbl = 0x5EDC20` / `CTouchingOvalTriggerAI = 0x5EDB58` | touch-trigger volumes (Enter Action @+0x20, Exit @+0x24, Repeat @+0x28; "Triggered By" filter bytes @+0x10..+0x14). Portals can be a trigger's Enter Action OR a script/event-driven `CTeleportAction` referenced by name — hence runtime execute-hooking instead of per-map structure walking. |
 | `sub_4FB0A0` | `__thiscall(char/entity, &out_pos)` world-position getter, `ret 4` |
+| `sub_4F37E0` | MP world update (virtual): builds one activation POINT per participant from `part+0xC0/+0xC4` (layer idx gate at `+0xDC`) |
+| `sub_4EA350` | point list → screen-sized activation rects (`dword_6C1BDC` array, `dword_6C1BE0` count) |
+| `sub_4E74A0` | layer update driver: `sub_57A100` grid-collects Active entities in viewport+participant rects, `sub_57A030` updates the collection |
+| `participant + 0xC0/+0xC4` | participant "last known position" floats — the activation point; bots' mirrored per frame from `char+0x4C/+0x50` (`BOT_PARTICIPANT_POS_ENABLED`) |
+| `participant + 0xDC` | participant layer index (-1 = not in world) |
 
 ## Constraints
 
@@ -662,10 +697,10 @@ Older emitted labels or disabled detours are not active unless they appear in
   empty capture base. The patch still does not route to the dropped position
   (the dropped copy is a script-created `CEntityAnimated` named
   `Red Flag`/`Blue Flag` with sequence `Not Home` — findable in the grid by
-  name+sequence if pursuit is ever added). Also open: an ATTACKER arriving at
-  a far ENEMY base cannot steal until the host wakes the area — the carrier
-  force-tick only covers the HOME checker; a symmetric enemy-base tick would
-  need the flag entity awake (and is legal in any flag state). SK bots still
+  name+sequence if pursuit is ever added). The old "attacker at a far ENEMY
+  base cannot steal until the host wakes the area" gap is CLOSED by
+  `BOT_PARTICIPANT_POS_ENABLED` (the bot's own activation rect keeps the
+  enemy-base flag + PassThrough steal trigger simulated). SK bots still
   need collector-aware return paths.
 - Reintroduce hazard/pickup awareness as GRAPH-AWARE routing (route through
   nodes near pickups, around lava) rather than the removed vector-field
@@ -687,10 +722,14 @@ Older emitted labels or disabled detours are not active unless they appear in
   cached-entity SOLID readback, overlay markers, failed-edge fast retry, and
   door-aware CTF rerouting (directional open-field BFS with full-field
   fallback; one-way doors traversable only from their opener side).
+  "Bots open far doors" is now handled the right way: with
+  `BOT_PARTICIPANT_POS_ENABLED` each bot is an engine-native activation
+  source, so walk-up/touch/proximity door triggers near a far bot think and
+  fire exactly as if a real player walked up (no message sender needed).
   Remaining: SWITCH-SEEKING (walk to a CollideTriggerAI wall switch and
   trigger it — switches are parsed but deliberately not counted as
   bot-usable openers; on switch-only maps like Torture Chamber a bot sealed
-  in with the flag still has no self-serve exit), and finding the built-in
-  touch-open message SENDER before any "bots open far doors" work. Do NOT
-  blanket-wake door triggers near bots — same hazard class as the checker
-  re-arm bug.
+  in with the flag still has no self-serve exit). Do NOT
+  blanket-wake door triggers near bots (Active-bit forcing) — same hazard
+  class as the checker re-arm bug; the participant-rect path is safe because
+  the grid collect masks on the Active bit.

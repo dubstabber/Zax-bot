@@ -130,6 +130,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # Active bit is always set anyway, so the spurious set is a harmless no-op).
     if cfg.BOT_FORCE_ACTIVE_ENABLED:
         bot_indices_va = layout.va('bot_indices')
+        bot_participants_va = layout.va('bot_participants')
         a.raw(b'\x60')                                        # pushad
         a.raw(b'\xA1' + le32(ax.MANAGER_GLOBAL_VA))           # eax = [mgr]
         a.raw(b'\x85\xC0'); a.jz('ov_ba_done')
@@ -146,6 +147,21 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x85\xC0'); a.jz('ov_ba_next')                # NULL char
         a.raw(b'\x81\x48' + bytes([ax.ENTITY_FLAGS_OFF])
               + le32(ax.ENTITY_ACTIVE_BIT))                   # or [char+0x1C], ACTIVE_BIT
+        if cfg.BOT_PARTICIPANT_POS_ENABLED:
+            # Mirror the bot char's live position into its PARTICIPANT
+            # (+0xC0/+0xC4) so the engine's own MP update (sub_4F37E0 ->
+            # sub_4EA350) builds an activation rect around the bot like it
+            # does for every real connected player (clients stream this pair
+            # over DirectPlay; bots have no client, so it froze at (0,0) and
+            # nothing near a far bot was ever simulated). idx==0 is the
+            # host/unused sentinel — the host's participant is engine-owned.
+            a.raw(b'\x85\xD2'); a.jz('ov_ba_next')            # idx==0 -> no bot participant
+            a.raw(b'\x8B\x0C\xB5' + le32(bot_participants_va))  # ecx = bot_participants[slot]
+            a.raw(b'\x85\xC9'); a.jz('ov_ba_next')            # NULL participant
+            a.raw(b'\x8B\x50' + bytes([ax.ENTITY_POS_X_OFF]))  # edx = [char+0x4C] (x)
+            a.raw(b'\x89\x91' + le32(ax.PART_POS_X_OFF))      # [part+0xC0] = x
+            a.raw(b'\x8B\x50' + bytes([ax.ENTITY_POS_Y_OFF]))  # edx = [char+0x50] (y)
+            a.raw(b'\x89\x91' + le32(ax.PART_POS_Y_OFF))      # [part+0xC4] = y
         a.label('ov_ba_next')
         a.raw(b'\x46')                                        # inc esi
         a.raw(b'\x83\xFE' + bytes([cfg.MAX_BOT_SLOTS]))       # cmp esi, MAX_BOT_SLOTS

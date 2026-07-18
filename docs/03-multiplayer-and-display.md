@@ -55,6 +55,33 @@ Useful participant helpers:
 | `sub_5BA790` (`0x5BA790`) | participant factory |
 | `sub_5BA820` (`0x5BA820`) | participant/index -> stats object, with sync |
 | `stats + 0x14` | team id |
+| `participant + 0xC0/+0xC4` | "last known position" float pair — the participant's engine-native ACTIVATION POINT (see below) |
+| `participant + 0xDC` | layer index (-1 = not in world); bots get 0 at spawn |
+
+## Participant activation points (engine-native anti-culling)
+
+The MP world update `sub_4F37E0` (virtual; referenced from vtables at
+`0x5F909C` / `0x602EA4`) walks ALL participants per layer and, for each whose
+layer index at `+0xDC` is valid, appends the float pair at `+0xC0/+0xC4` to a
+point list (`dword_6C26F0` block). `sub_4EA350` turns each point into a
+screen-sized rect (static rect array `dword_6C1BDC`, count `dword_6C1BE0`),
+and the layer driver `sub_4E74A0` collects every entity inside the union of
+the host viewport rect(s) (`layer+0x150` viewport array) + all participant
+rects via the `sub_57A100` grid collect, then updates ONLY that collection via
+`sub_57A030`. `sub_57A100` masks each candidate on the entity Active bit
+(`+0x1C & 0x800000`), so script-deactivated entities (e.g. CTF base checkers
+while the flag is away) are never collected — culling and script activation
+are orthogonal.
+
+This is how a real connected player keeps doors/triggers/flag areas simulated
+on the host far from the host's own camera: clients stream their `+0xC0/+0xC4`
+over DirectPlay; the host's own participant is engine-maintained. Nothing ever
+wrote a bot's pair, so it froze at (0,0) (live-verified) — the root cause of
+every "world near a far bot is dead" bug. The patch mirrors each live bot
+char's `+0x4C/+0x50` into its participant's `+0xC0/+0xC4` once per frame from
+the page-flip hook (`cfg.BOT_PARTICIPANT_POS_ENABLED`, inside the force-active
+loop), making bots first-class activation sources. CE-verified live: the
+engine's rect array immediately tracked the roaming bot.
 
 Current team behavior:
 - DM and SK are both free-for-all (SK gives every player their own collector
