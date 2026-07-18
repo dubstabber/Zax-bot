@@ -405,8 +405,15 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
       full-field semantics, bfs_skip=0) whenever that node changes; at
       each node arrival `drop_next_hop` descends the row INSTEAD of
       `ctf_next_hop` (respects `bot_route_suspend` — the suspension roam
-      still un-sticks wedges — and clears `route_portal_hop` so no stale
-      pad latch). Walls are routed AROUND; a graph-unreachable or
+      still un-sticks wedges) and EMITS PAD HOPS exactly like the ctf pass
+      (`route_portal_hop` + return cur). The pad pass is load-bearing, not
+      an optimization: a cross-arena drop descent on Hydro funnels into the
+      pad-entry node, whose only WALKABLE neighbour ascends — without the
+      pad hop, drop_next_hop returned -1 there, the random fallback bounced
+      the bot off the pad node and the next descent snapped it back — the
+      live-reported "moves between two waypoints only" shuttle (dpursuit
+      snapshot: 0↔25 orbit with failed-edge marker (0,25); offline sim
+      pinned in tests). Walls are routed AROUND; a graph-unreachable or
       unbound/stale row falls back to normal goal routing with the latch
       dormant. Opportunistic latches silently drop beyond
       `CTF_DROP_ABANDON_RADIUS_SQ`; objective bots are exempt.
@@ -667,11 +674,11 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     so `ctf_next_hop` re-plans door-aware from the reachable node (offline-
     verified: 15→14 across closed door 9 re-plans 15→16; 5→6 across closed door
     15 re-plans 5→1). Fires only in that exact stuck state — door open or
-    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~4.4 KB below
-    `SCRATCH_OFF` (hook_entry_size 32312 of 36864 after the dropped-flag
-    pursuit v2 layer; the boundary moved 0x8000→0x9000 with the section at
-    0x18000). When it runs low again, bump `SCRATCH_OFF`+`NEW_SECTION_SIZE`
-    together (build asserts on overflow). The `rstate`
+    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~4.3 KB below
+    `SCRATCH_OFF` (hook_entry_size 32450 of 36864 after the dropped-flag
+    pursuit layer + its pad-hop fix; the boundary moved 0x8000→0x9000 with
+    the section at 0x18000). When it runs low again, bump
+    `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
     `flag_routing_active`) was added for diagnosing route commitment.
 - Switches are DETECTED (`cfg.SWITCH_DETECT_ENABLED`; static pipeline mirror
@@ -893,13 +900,16 @@ Older emitted labels or disabled detours are not active unless they appear in
   pursuit bullet in "Current state"): the periodic grid walk name-matches
   the dropped copy while `flag_present[i] == 0`, binds it to a graph node,
   and latched bots descend a per-drop `bfs_run` row to it (straight steer
-  only within the 160 px direct radius, with press patience). Bots whose
-  GOAL flag is the drop route to it from anywhere. Remaining refinements:
-  `drop_next_hop` does not emit portal pad hops (a cross-pad drop descent
-  dead-ends into plain roaming — irrelevant while latching needs same-arena
-  proximity or an objective, but revisit if Hydro drop pursuit ever looks
-  passive); and the drop row uses full-field semantics (closed doors are
-  walked at, not routed around — the wedge machinery covers them). The old
+  only within the 160 px direct radius, with press patience), crossing
+  teleport pads via the same pad-hop emission as goal routing (the missing
+  pad pass was the live-reported two-waypoint shuttle at Hydro pad-entry
+  nodes — fixed). Bots whose GOAL flag is the drop route to it from
+  anywhere. Remaining refinements: the drop row uses full-field semantics
+  (closed doors are walked at, not routed around — the wedge machinery
+  covers them); and a drop lying inside a prop's collision pocket can be
+  physically untouchable from outside (live-observed once: closest approach
+  ~47 px across full sweep cycles) — pursuit retries every
+  `CTF_DROP_RETRY_COOLDOWN_FRAMES`, which bounds the cost. The old
   "attacker at a far ENEMY base cannot steal until the host wakes the area"
   gap is CLOSED by `BOT_PARTICIPANT_POS_ENABLED` (the bot's own activation
   rect keeps the enemy-base flag + PassThrough steal trigger simulated —

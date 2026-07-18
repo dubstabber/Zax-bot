@@ -475,11 +475,13 @@ ignore this knob (they skip `apply_lead` unconditionally).
 - Engine `CWayPointMap` integration. The active navigation path uses the
   patch's saved `waypoints/<map>.zwpt` overlay graph, not the shipped engine
   `CWayPointMap` / `CWayPointPath` data.
-- CTF dropped-flag pursuit is graph-routed (v2), but `drop_next_hop` emits
-  no portal pad hops (a cross-pad descent dead-ends into plain roaming) and
-  the drop row uses full-field semantics (closed doors are walked at, not
-  routed around). Future bot commands can choose roles on top of the current
-  attacker search/wait split and carrier search fallback.
+- CTF dropped-flag pursuit is graph-routed and pad-hopping (the missing pad
+  pass was the live two-waypoint shuttle at Hydro pad-entry nodes), but the
+  drop row uses full-field semantics (closed doors are walked at, not routed
+  around), and a drop inside a prop's collision pocket can be untouchable
+  from outside (bounded by the retry cooldown). Future bot commands can
+  choose roles on top of the current attacker search/wait split and carrier
+  search fallback.
 - SK objective AI: SK bots don't gather at their own collector yet.
 - Remote display name. Host writes the stats CString after spawn, but the
   synthetic DirectPlay player-data store is not populated for PC2.

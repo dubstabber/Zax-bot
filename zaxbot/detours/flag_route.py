@@ -1285,6 +1285,51 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x46')                                          # ++esi
         a.jmp('dnh_scan')
         a.label('dnh_done')
+        if portal_route:
+            # --- Pad hop on the drop row (mirror of cnh_pp). On Hydro a
+            # cross-arena drop descent funnels INTO the pad-entry node: the
+            # pad's exit carries row dist - 1, but no WALKABLE neighbour
+            # descends from there, so without this pass drop_next_hop
+            # returned -1 at the pad node, the random fallback bounced the
+            # bot off it, and the next arrival's descent snapped it back —
+            # the live-reported "moves between two waypoints only" shuttle
+            # (dpursuit snapshot: 0<->25 orbit with failed-edge marker
+            # (0,25); offline sim pinned in tests). EBX = cur, EBP = row,
+            # ECX = best_d, EDX = best node here — identical shape to cnh.
+            a.raw(b'\x31\xF6')                                  # esi = 0 (p)
+            a.label('dnh_pp_loop')
+            a.raw(b'\x3B\x35' + le32(portal_count_va))          # p >= portal_count?
+            a.jae('dnh_pp_done')
+            a.raw(b'\x83\xFE' + bytes([cfg.PORTAL_TABLE_MAX]))
+            a.jae('dnh_pp_done')
+            a.raw(b'\x83\x3C\xB5' + le32(portal_has_dest_va) + b'\x00')
+            a.jz('dnh_pp_next')                                 # no directed edge
+            if portal_active_va:
+                a.raw(b'\x83\x3C\xB5' + le32(portal_active_va) + b'\x00')
+                a.jz('dnh_pp_next')                             # pad currently unusable
+            a.raw(b'\x8B\x04\xB5' + le32(portal_node_va))       # eax = pad node
+            a.raw(b'\x39\xD8')                                  # pad at cur?
+            a.jnz('dnh_pp_next')
+            a.raw(b'\x8B\x04\xB5' + le32(portal_dest_node_va))  # eax = dest node
+            a.raw(b'\x83\xF8\xFF')                              # unbound?
+            a.jz('dnh_pp_next')
+            a.raw(b'\x3B\x05' + le32(vcount_va))                # defensive range
+            a.jae('dnh_pp_next')
+            a.raw(b'\x8B\x7C\x85\x00')                          # edi = row[dest node]
+            a.raw(b'\x39\xCF')                                  # cmp edi, best_d
+            a.jae('dnh_pp_next')                                # not strictly closer
+            a.raw(b'\x89\xF9')                                  # best_d = edi
+            a.raw(b'\x8D\x46\x01')                              # lea eax, [esi+1]
+            a.raw(b'\xA3' + le32(route_portal_hop_va))          # route_portal_hop = p+1
+            a.label('dnh_pp_next')
+            a.raw(b'\x46')                                      # ++p
+            a.jmp('dnh_pp_loop')
+            a.label('dnh_pp_done')
+            a.raw(b'\x83\x3D' + le32(route_portal_hop_va) + b'\x00')
+            a.jz('dnh_node_ret')
+            a.raw(b'\x89\xD8')                                  # eax = cur (latch drives movement)
+            a.raw(b'\xC3')
+            a.label('dnh_node_ret')
         a.raw(b'\x89\xD0')                                      # eax = best (or -1)
         a.raw(b'\xC3')
         a.label('dnh_fail')

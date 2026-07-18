@@ -690,6 +690,84 @@ class DroppedFlagTests(unittest.TestCase):
         flag_maps = {name for name, _points in resolve_flag_data()}
         self.assertEqual(set(named), flag_maps)
 
+    def test_hydro_cross_arena_drop_descent_uses_pads(self):
+        # Live-reported (dpursuit snapshots): a bot pursuing a cross-arena
+        # drop on Hydro Vengence shuttled between two waypoints — the 0<->25
+        # orbit with failed-edge marker (0,25). Root cause: the drop_dist
+        # descent funnels into the pad-entry node, whose only WALKABLE
+        # neighbour ASCENDS (the descent continues only through the pad), so
+        # a drop_next_hop without pad-hop emission returned -1 there and the
+        # random fallback bounced the bot off the pad node forever. Simulate
+        # the emitted semantics (neighbour descent + cnh_pp-style pad hop)
+        # on the shipped graph with the snapshot's own drop position and
+        # require the walk from the snapshot's bot position to reach the
+        # drop node, strictly descending, using at least one pad.
+        import struct as _struct
+        from zaxbot.portal_data import resolve_portal_routes
+
+        name = 'Levels/Multiplayer/CTF/Hydro Vengence.zax'
+        path = (Path(__file__).resolve().parents[1] / 'waypoints'
+                / (name.replace('/', '_') + '.zwpt'))
+        if not path.exists():
+            self.skipTest('shipped Hydro graph not present')
+        d = path.read_bytes()
+        magic, _ver, vc, ec = _struct.unpack('<4sIII', d[:16])
+        self.assertEqual(magic, b'ZWPT')
+        verts = [_struct.unpack('<ff', d[16 + i*8:24 + i*8]) for i in range(vc)]
+        eoff = 16 + vc*8
+        edges = []
+        for e in range(ec):
+            w = _struct.unpack('<I', d[eoff + e*4:eoff + e*4 + 4])[0]
+            edges.append((w & 0xFFFF, w >> 16))
+        routes = dict(resolve_portal_routes())[name]
+
+        def nearest(p):
+            return min(range(vc),
+                       key=lambda i: (verts[i][0]-p[0])**2 + (verts[i][1]-p[1])**2)
+
+        pads = [(nearest(src), nearest(dst)) for src, dst in routes]
+        drop_node = nearest((709.6, 1851.8))     # snapshot 6 drop position
+        start = nearest((619.0, 330.0))          # snapshot 6 bot position
+        INF = 0xFFFFFFFF
+        dist = [INF]*vc
+        dist[drop_node] = 0
+        q = [drop_node]
+        while q:
+            u = q.pop(0)
+            for i, j in edges:
+                v = j if i == u else (i if j == u else None)
+                if v is not None and dist[v] == INF:
+                    dist[v] = dist[u] + 1
+                    q.append(v)
+            for sn, dn in pads:                  # bfsr_portals relax
+                if dn == u and dist[sn] == INF:
+                    dist[sn] = dist[u] + 1
+                    q.append(sn)
+
+        self.assertNotEqual(dist[start], INF)
+        cur, used_pad = start, False
+        for _step in range(vc + 4):
+            if cur == drop_node:
+                break
+            best, best_d = -1, dist[cur]
+            for i, j in edges:                   # dnh neighbour scan
+                v = j if i == cur else (i if j == cur else None)
+                if v is not None and dist[v] < best_d:
+                    best_d, best = dist[v], v
+            pad_hop = -1
+            for p, (sn, dn) in enumerate(pads):  # dnh_pp pad pass
+                if sn == cur and dist[dn] < best_d:
+                    best_d, pad_hop = dist[dn], p
+            if pad_hop >= 0:
+                used_pad = True
+                cur = pads[pad_hop][1]           # teleport-jump re-acquire
+            else:
+                self.assertNotEqual(best, -1,
+                                    f'drop descent dead-ended at node {cur}')
+                cur = best
+        self.assertEqual(cur, drop_node)
+        self.assertTrue(used_pad, 'cross-arena descent should cross a pad')
+
     def test_drop_scratch_block_layout_invariants(self):
         # The `dpursuit` snapshot chunk dumps flag_drop_valid ..
         # drop_pursue_enabled as ONE contiguous range, and load_flags clears
@@ -857,8 +935,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = 'c9db86094cb787d1b6b966f490c6b2f33890cece4d190df9ed0fecc02df71cf0'
-    HOOK_ENTRY_SIZE = 32312
+    SECTION_SHA256 = 'd27f9175d766134360f42d6e3731d3691b9f2683140ad53a68da381c81b17d4b'
+    HOOK_ENTRY_SIZE = 32450
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

@@ -906,7 +906,10 @@ CTF_DROP_DIRECT_RADIUS_SQ = 160.0 * 160.0
 CTF_DROP_ABANDON_RADIUS_SQ = 700.0 * 700.0
 # Direct-phase press patience: a progress-timeout grants this many fresh
 # watchdog cycles (wall-slide keeps sweeping) before the retry cooldown.
-CTF_DROP_PRESS_PATIENCE = 2
+# Live snapshots caught a drop lying in a collision pocket where the bot's
+# closest approach was ~47 px across two cycles — a third cycle buys one
+# more full sweep before the 4 s blacklist (rare-awkward-drop mitigation).
+CTF_DROP_PRESS_PATIENCE = 3
 # After ENDING a pursuit by reaching the spot, don't re-latch for this many
 # thinks. MUST exceed PORTAL_ACTIVE_SCAN_INTERVAL: the consumed copy's stale
 # position survives in flag_drop_valid until the next scan clears it, and a
