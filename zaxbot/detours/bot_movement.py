@@ -228,6 +228,11 @@ def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
     if layout.has_field('bot_portal_cd'):
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_portal_cd')) + le32(0))  # fresh wander cooldown
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pad_try')) + le32(0))    # fresh pad patience
+    if layout.has_field('bot_drop_target'):
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_drop_target')) + le32(0))  # drop dropped-flag pursuit
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_drop_cd')) + le32(0))      # fresh pursuit cooldown
+        if layout.has_field('bot_drop_try'):
+            a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_drop_try')) + le32(0))  # fresh press patience
     a.raw(b'\x89\x14\x8D' + le32(bot_last_char_va))       # bot_last_char[slot] = edx
     a.label('s542360_char_same')
 
@@ -304,6 +309,11 @@ def _emit_stuck_detection(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC7\x04\x8D' + le32(stuck_count_va) + le32(0))
         if layout.has_field('bot_portal_target'):
             a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_portal_target')) + le32(0))
+        if layout.has_field('bot_drop_target'):
+            # A teleported bot's latched dropped flag is usually a whole arena
+            # away now — drop the pursuit (the entry scan re-latches if it is
+            # genuinely still nearby at the exit).
+            a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_drop_target')) + le32(0))
         if layout.has_field('bot_portal_cd'):
             # Teleported: arm the wander-entry cooldown so the roam roll at
             # the exit node (which IS the return pad's node) can't bounce the
@@ -689,6 +699,56 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         portal_active_mv_va  = (layout.va('portal_active')
                                 if layout.has_field('portal_active') else 0)
 
+    # Dropped-flag pursuit (v2 — two-phase). While a flag is away from its
+    # base the periodic grid walk records its dropped world copy's position +
+    # nearest graph node (name-matched, see entity_scan.py). A latched bot
+    # ROUTES to the drop through the graph (drop_next_hop descends the
+    # per-drop drop_dist BFS row at each node arrival — see flag_route.py)
+    # and only steers STRAIGHT at the copy within drop_direct_radius_sq or
+    # when standing on the drop's own bound node, through the standard
+    # watchdog with press-patience. Latching: within drop_pursue_radius_sq
+    # opportunistically, or from ANY distance when the drop is this bot's
+    # missing GOAL flag (route_missing_goal — attackers whose steal target
+    # dropped, carriers whose home flag dropped: the position is known, so
+    # the old blind search/wait roam is replaced by a real route). The v1
+    # straight-steer-only pursuit was live-diagnosed timing out after one
+    # 30-frame watchdog window and cooling down 4 s — the reported "runs at
+    # it, then ignores it" loop — and it beelined into walls when the drop
+    # sat behind one. Touching a dropped flag is beneficial for EITHER team,
+    # so there is no team/carry filter. Deliberately NOT gated on
+    # bot_route_suspend for the DIRECT phase (touching a nearby flag is pure
+    # upside); the ROUTED next-hop override does respect suspension (the
+    # suspension roam exists to unstick deterministic routing).
+    drop_move = (routing
+                 and cfg.CTF_DROPPED_FLAG_ENABLED
+                 and layout.has_field('flag_drop_valid')
+                 and layout.has_field('flag_drop_pos')
+                 and layout.has_field('flag_drop_node')
+                 and layout.has_field('bot_drop_target')
+                 and layout.has_field('bot_drop_cd')
+                 and layout.has_field('bot_drop_try')
+                 and layout.has_field('bot_drop_best')
+                 and layout.has_field('drop_pursue_enabled')
+                 and layout.has_field('route_missing_goal')
+                 and layout.has_field('flag_present')
+                 and layout.has_field('flag_count'))
+    if drop_move:
+        flag_drop_valid_mv_va = layout.va('flag_drop_valid')
+        flag_drop_pos_mv_va   = layout.va('flag_drop_pos')
+        flag_drop_node_mv_va  = layout.va('flag_drop_node')
+        bot_drop_target_va    = layout.va('bot_drop_target')
+        bot_drop_cd_va        = layout.va('bot_drop_cd')
+        bot_drop_try_va       = layout.va('bot_drop_try')
+        bot_drop_best_va      = layout.va('bot_drop_best')
+        drop_enabled_va       = layout.va('drop_pursue_enabled')
+        drop_radius_va        = layout.va('drop_pursue_radius_sq')
+        drop_reached_va       = layout.va('drop_reached_radius_sq')
+        drop_direct_va        = layout.va('drop_direct_radius_sq')
+        drop_abandon_va       = layout.va('drop_abandon_radius_sq')
+        drop_missing_goal_va  = layout.va('route_missing_goal')
+        flag_present_mv_va    = layout.va('flag_present')
+        flag_count_mv_va      = layout.va('flag_count')
+
     # === Waypoint following =============================================
     a.raw(b'\x83\x3D' + le32(wp_follow_enabled_va) + b'\x00')
     a.jz('s542360_fallback_zero')
@@ -846,6 +906,195 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot (reload)
         a.raw(b'\xC7\x04\x8D' + le32(bot_portal_target_va) + le32(0))
         a.label('s542360_ptl_done')
+    if drop_move:
+        # --- Dropped-flag pursuit (latch entry + ROUTED/DIRECT phase split;
+        # see drop_move above). Runs after the pad latch (a pad-latched bot
+        # finishes its teleport first). DIRECT phase jumps to the emit like
+        # the pad approach; ROUTED phase falls through so the node machinery
+        # moves the bot (drop_next_hop overrides the arrival next-hop below).
+        a.raw(b'\x83\x3D' + le32(drop_enabled_va) + b'\x00')
+        a.jz('s542360_drp_done')
+        a.raw(b'\x83\x3D' + le32(routing_active_va) + b'\x00')  # CTF match only
+        a.jz('s542360_drp_done')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        # Tick the per-bot pursuit cooldown; while it runs, no pursuit at all
+        # (after a grab so the stale pre-scan position can't re-latch, after
+        # exhausted patience so the bot stops grinding an unreachable drop).
+        a.raw(b'\x8B\x04\x8D' + le32(bot_drop_cd_va))     # eax = cd[slot]
+        a.raw(b'\x85\xC0'); a.jz('s542360_drp_cd0')
+        a.raw(b'\x48')                                    # dec eax
+        a.raw(b'\x89\x04\x8D' + le32(bot_drop_cd_va))
+        a.jmp('s542360_drp_done')
+        a.label('s542360_drp_cd0')
+        a.raw(b'\x8B\x04\x8D' + le32(bot_drop_target_va)) # eax = latch (idx+1 / 0)
+        a.raw(b'\x85\xC0'); a.jnz('s542360_drp_have')
+        # --- Entry scan: nearest valid away-flag drop. best is seeded with
+        # FLT_MAX; each candidate passes the pursue-radius gate UNLESS it is
+        # this bot's missing GOAL flag (route_missing_goal — the bot's whole
+        # objective lies on the ground, so it latches from any distance).
+        # ecx = slot survives the loop (only eax/esi/ebx/FPU are used).
+        a.raw(b'\xBB\xFF\xFF\xFF\xFF')                    # ebx = -1
+        a.raw(b'\xC7\x05' + le32(dx_accum_va) + le32(0x7F7FFFFF))
+        a.raw(b'\xD9\x05' + le32(dx_accum_va))            # fld FLT_MAX (best)
+        a.raw(b'\x31\xF6')                                # esi = 0 (flag i)
+        a.label('s542360_drp_scan')
+        a.raw(b'\x3B\x35' + le32(flag_count_mv_va))       # i >= flag_count?
+        a.jae('s542360_drp_scan_pop')
+        a.raw(b'\x83\xFE' + bytes([cfg.FLAG_TABLE_MAX]))  # i >= table max?
+        a.jae('s542360_drp_scan_pop')
+        a.raw(b'\x83\x3C\xB5' + le32(flag_drop_valid_mv_va) + b'\x00')
+        a.jz('s542360_drp_scan_next')                     # no known drop
+        a.raw(b'\x83\x3C\xB5' + le32(flag_present_mv_va) + b'\x00')
+        a.jnz('s542360_drp_scan_next')                    # returned home meanwhile
+        a.raw(b'\xD9\x04\xF5' + le32(flag_drop_pos_mv_va))     # fld drop.x
+        a.raw(b'\xD8\x25' + le32(bot_pos_va))             # fsub bot.x
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xD9\x04\xF5' + le32(flag_drop_pos_mv_va + 4)) # fld drop.y
+        a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))         # fsub bot.y
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xDE\xC1')                                # faddp -> ST0=dsq, ST1=best
+        a.raw(b'\x3B\x34\x8D' + le32(drop_missing_goal_va))  # i == missing goal[slot]?
+        a.jz('s542360_drp_scan_cmp')                      # objective -> no radius gate
+        a.raw(b'\xD9\x05' + le32(drop_radius_va))         # fld radius (ST0=r, ST1=dsq)
+        a.raw(b'\xDF\xF1')                                # fcomip r:dsq (pop r)
+        a.jb('s542360_drp_scan_skip')                     # r < dsq -> out of range
+        a.label('s542360_drp_scan_cmp')
+        a.raw(b'\xD8\xD1')                                # fcom st(1) (dsq:best)
+        a.raw(b'\xDF\xE0'); a.raw(b'\x9E')                # fnstsw ax; sahf
+        a.jae('s542360_drp_scan_skip')                    # dsq >= best -> keep best
+        a.raw(b'\xD9\xC9')                                # fxch (ST0=best, ST1=dsq)
+        a.raw(b'\xDD\xD8')                                # fstp st0 (pop old best)
+        a.raw(b'\x89\xF3')                                # ebx = i (new best)
+        a.jmp('s542360_drp_scan_next')
+        a.label('s542360_drp_scan_skip')
+        a.raw(b'\xDD\xD8')                                # fstp st0 (pop dsq)
+        a.label('s542360_drp_scan_next')
+        a.raw(b'\x46')                                    # ++i
+        a.jmp('s542360_drp_scan')
+        a.label('s542360_drp_scan_pop')
+        a.raw(b'\xDD\xD8')                                # fstp st0 (pop best; FPU empty)
+        a.raw(b'\x83\xFB\xFF')                            # candidate found?
+        a.jz('s542360_drp_done')
+        # LATCH: bot_drop_target = idx+1; direct-phase trackers parked (the
+        # node watchdog fields wp_try/wp_best_dsq stay with the node logic —
+        # the routed phase runs on them; direct entry resets its own below).
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8D\x43\x01')                            # lea eax, [ebx+1]
+        a.raw(b'\x89\x04\x8D' + le32(bot_drop_target_va))
+        a.raw(b'\xC7\x04\x8D' + le32(bot_drop_try_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(bot_drop_best_va) + le32(0x7F7FFFFF))
+        # fall through with eax = idx+1
+        a.label('s542360_drp_have')
+        a.raw(b'\x48')                                    # eax = flag idx
+        # Validate every think: stale idx (map change), drop consumed (scan
+        # cleared it), or flag back home (event-instant) -> drop the latch.
+        a.raw(b'\x3B\x05' + le32(flag_count_mv_va))
+        a.jae('s542360_drp_clear')
+        a.raw(b'\x83\x3C\x85' + le32(flag_drop_valid_mv_va) + b'\x00')
+        a.jz('s542360_drp_clear')
+        a.raw(b'\x83\x3C\x85' + le32(flag_present_mv_va) + b'\x00')
+        a.jnz('s542360_drp_clear')
+        # desired = drop position - bot (staged for the direct-phase emit)
+        a.raw(b'\xD9\x04\xC5' + le32(flag_drop_pos_mv_va))     # fld drop.x [eax*8]
+        a.raw(b'\xD8\x25' + le32(bot_pos_va))             # fsub bot.x
+        a.raw(b'\xD9\x1D' + le32(dx_accum_va))            # fstp dx_accum
+        a.raw(b'\xD9\x04\xC5' + le32(flag_drop_pos_mv_va + 4)) # fld drop.y
+        a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))         # fsub bot.y
+        a.raw(b'\xD9\x1D' + le32(dy_accum_va))            # fstp dy_accum
+        a.raw(b'\xD9\x05' + le32(dx_accum_va))            # fld dx
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xD9\x05' + le32(dy_accum_va))            # fld dy
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xDE\xC1')                                # faddp -> ST0 = dsq(bot, drop)
+        # Drifted far away (knockback, detour)? Opportunistic latches drop
+        # silently; a bot whose OBJECTIVE is this flag routes from anywhere.
+        a.raw(b'\x3B\x04\x8D' + le32(drop_missing_goal_va))  # idx == missing goal?
+        a.jz('s542360_drp_phase')                         # objective -> keep
+        a.raw(b'\xD9\x05' + le32(drop_abandon_va))        # fld abandon (ST0=a, ST1=dsq)
+        a.raw(b'\xDF\xF1')                                # fcomip a:dsq (pop a)
+        a.jae('s542360_drp_phase')                        # a >= dsq -> still close enough
+        a.raw(b'\xDD\xD8')                                # fstp st0 (drop dsq)
+        a.jmp('s542360_drp_clear')
+        a.label('s542360_drp_phase')                      # ST0 = dsq
+        # Phase split: DIRECT iff within the direct radius OR standing on the
+        # drop's own bound node (the graph can take it no closer from there).
+        a.raw(b'\xD9\x05' + le32(drop_direct_va))         # fld direct (ST0=d, ST1=dsq)
+        a.raw(b'\xDF\xF1')                                # fcomip d:dsq (pop d)
+        a.jae('s542360_drp_direct')                       # d >= dsq -> inside
+        a.raw(b'\x8B\x14\x8D' + le32(current_wp_va))      # edx = current_wp[slot]
+        a.raw(b'\x3B\x14\x85' + le32(flag_drop_node_mv_va))  # cur == drop node?
+        a.jz('s542360_drp_direct')
+        # ROUTED phase: the node machinery moves the bot (drop_next_hop
+        # overrides its next-hop at each arrival). Park the direct trackers
+        # so entering direct later starts fresh.
+        a.raw(b'\xDD\xD8')                                # fstp st0 (drop dsq)
+        a.raw(b'\xC7\x04\x8D' + le32(bot_drop_best_va) + le32(0x7F7FFFFF))
+        a.raw(b'\xC7\x04\x8D' + le32(bot_drop_try_va) + le32(0))
+        a.jmp('s542360_drp_done')
+        a.label('s542360_drp_direct')                     # ST0 = dsq
+        # Fresh direct entry (best still parked at FLT_MAX)? Reset wp_try so
+        # a stale node-phase stall can't instantly time the pursuit out.
+        a.raw(b'\x81\x3C\x8D' + le32(bot_drop_best_va) + le32(0x7F7FFFFF))
+        a.jnz('s542360_drp_reach')
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.label('s542360_drp_reach')
+        # Reached? The flag's own touch script consumes the copy on overlap
+        # (same-team return / enemy pickup); end the pursuit with the grab
+        # cooldown (longer than a scan interval so the stale position cannot
+        # re-latch) and emit one last frame toward it.
+        a.raw(b'\xD9\x05' + le32(drop_reached_va))        # fld reached (ST0=r, ST1=dsq)
+        a.raw(b'\xDF\xF1')                                # fcomip r:dsq (pop r)
+        a.jb('s542360_drp_watch')                         # r < dsq -> keep going
+        a.raw(b'\xDD\xD8')                                # fstp st0 (drop dsq)
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\xC7\x04\x8D' + le32(bot_drop_target_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(bot_drop_cd_va)
+              + le32(cfg.CTF_DROP_GRAB_COOLDOWN_FRAMES))
+        a.raw(b'\xC7\x04\x8D' + le32(bot_drop_try_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.jmp('s542360_emit')
+        a.label('s542360_drp_watch')                      # ST0 = dsq
+        # Direct-phase watchdog with PRESS PATIENCE (mirror of the door/pad
+        # patience): strict dsq improvement (vs bot_drop_best, the pursuit's
+        # own tracker) resets wp_try; stalling ramps it (drives the
+        # wall-slide sweep at the emit); each full progress-timeout grants a
+        # fresh cycle up to CTF_DROP_PRESS_PATIENCE before the retry
+        # cooldown blacklists the pursuit. The v1 single 30-frame window was
+        # the live-diagnosed "runs at it, then ignores it" loop.
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8B\x04\x8D' + le32(stuck_count_va))     # eax = stuck_count[slot]
+        a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES]))
+        a.jae('s542360_drp_no_progress')                  # physically pinned
+        a.raw(b'\xD9\x04\x8D' + le32(bot_drop_best_va))   # fld best (ST0=best, ST1=dsq)
+        a.raw(b'\xDF\xF1')                                # fcomip st0,st1 (best:dsq, pop)
+        a.jbe('s542360_drp_no_progress')                  # best <= dsq -> no improvement
+        a.raw(b'\xD9\x1C\x8D' + le32(bot_drop_best_va))   # best = dsq (pop)
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.jmp('s542360_emit')
+        a.label('s542360_drp_no_progress')
+        a.raw(b'\xDD\xD8')                                # fstp st0 (drop dsq)
+        a.raw(b'\xFF\x04\x8D' + le32(wp_try_va))          # ++wp_try[slot]
+        a.raw(b'\x8B\x04\x8D' + le32(wp_try_va))          # eax = wp_try
+        a.raw(b'\x3B\x05' + le32(wp_progress_timeout_va))
+        a.jb('s542360_emit')                              # keep steering; slide sweeps
+        a.raw(b'\xFF\x04\x8D' + le32(bot_drop_try_va))    # ++patience used
+        a.raw(b'\x83\x3C\x8D' + le32(bot_drop_try_va)
+              + bytes([cfg.CTF_DROP_PRESS_PATIENCE]))
+        a.ja('s542360_drp_impatient')                     # budget exhausted
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))     # fresh cycle
+        a.raw(b'\xC7\x04\x8D' + le32(bot_drop_best_va) + le32(0x7F7FFFFF))
+        a.jmp('s542360_emit')                             # keep pressing
+        a.label('s542360_drp_impatient')
+        a.raw(b'\xC7\x04\x8D' + le32(bot_drop_cd_va)
+              + le32(cfg.CTF_DROP_RETRY_COOLDOWN_FRAMES))
+        a.label('s542360_drp_clear')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot (reload)
+        a.raw(b'\xC7\x04\x8D' + le32(bot_drop_target_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(bot_drop_try_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # node logic starts clean
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.label('s542360_drp_done')
     if door_reroute:
         # --- Closed-door commitment recovery -------------------------------
         # If the (prev -> cur) edge we are latched onto is bound to a currently
@@ -1332,7 +1581,27 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     if cfg.CTF_FLAG_ROUTING_ENABLED:
         a.raw(b'\x51')                                   # push cur (ecx)
         a.raw(b'\x52')                                   # push prev (edx)
-        a.call_lbl('ctf_next_hop')                       # eax = goal next-hop or -1 (in: ecx=cur)
+        if drop_move:
+            # Dropped-flag route override: while this bot's pursuit latch is
+            # set and its routing is NOT suspended (the suspension roam
+            # exists to unstick deterministic routing — don't override it),
+            # descend the per-drop BFS row instead of the goal field. Falls
+            # back to ctf_next_hop when the row can't apply (helper returns
+            # -1: drop gone, row stale/unbuilt, node unreachable).
+            a.raw(b'\xA1' + le32(bot_slot_tmp_va))       # eax = slot
+            a.raw(b'\x83\x3C\x85' + le32(bot_drop_target_va) + b'\x00')
+            a.jz('s542360_wp_use_cnh')
+            a.raw(b'\x83\x3C\x85' + le32(route_suspend_va) + b'\x00')
+            a.jnz('s542360_wp_use_cnh')
+            a.call_lbl('drop_next_hop')                  # eax = drop hop or -1 (in: ecx=cur)
+            a.raw(b'\x83\xF8\xFF')
+            a.jnz('s542360_wp_hop_done')                 # got a drop hop
+            a.raw(b'\x8B\x4C\x24\x04')                   # ecx = cur (helper clobbered it)
+            a.label('s542360_wp_use_cnh')
+            a.call_lbl('ctf_next_hop')                   # eax = goal next-hop or -1 (in: ecx=cur)
+            a.label('s542360_wp_hop_done')
+        else:
+            a.call_lbl('ctf_next_hop')                   # eax = goal next-hop or -1 (in: ecx=cur)
         a.raw(b'\x5A')                                   # pop edx (prev)
         a.raw(b'\x59')                                   # pop ecx (cur)
         a.raw(b'\x83\xF8\xFF')                           # cmp eax, -1
@@ -1908,6 +2177,8 @@ def _emit_dead_and_zero_return(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_portal_target')) + le32(0))  # drop pad approach
     if layout.has_field('bot_pad_try'):
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pad_try')) + le32(0))
+    if layout.has_field('bot_drop_target'):
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_drop_target')) + le32(0))    # drop flag pursuit
     # fall through to zero-vector return.
 
     # --- Zero-vector return (panic / NULL char / degenerate normalize) ---

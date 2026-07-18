@@ -532,6 +532,26 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
             a.raw(b'\xB9' + le32(cfg.FLAG_TABLE_MAX))               # ecx = flag slots
             a.raw(b'\x31\xC0')                                      # eax = 0
             a.raw(b'\xFC\xF3\xAB')                                  # cld; rep stosd
+        if layout.has_field('flag_drop_valid') and layout.has_field('bot_drop_target'):
+            # Fresh dropped-flag state per match: no known drops, no per-bot
+            # pursuit latch/cooldown/patience/best (bot_drop_target through
+            # bot_drop_best are contiguous per-bot arrays — one clear covers
+            # all four), node binds and route roots back to -1 so a stale
+            # drop_dist row can never be consumed on the new map.
+            a.raw(b'\xBF' + le32(layout.va('flag_drop_valid')))     # edi = flag_drop_valid
+            a.raw(b'\xB9' + le32(cfg.FLAG_TABLE_MAX))               # ecx = flag slots
+            a.raw(b'\x31\xC0')                                      # eax = 0
+            a.raw(b'\xFC\xF3\xAB')                                  # cld; rep stosd
+            a.raw(b'\xBF' + le32(layout.va('bot_drop_target')))     # edi = bot_drop_target
+            a.raw(b'\xB9' + le32(4 * cfg.MAX_BOT_SLOTS))            # ecx = target+cd+try+best
+            a.raw(b'\xF3\xAB')                                      # rep stosd (eax still 0)
+            a.raw(b'\xBF' + le32(layout.va('flag_drop_node')))      # edi = flag_drop_node
+            a.raw(b'\xB9' + le32(cfg.FLAG_TABLE_MAX))               # ecx = flag slots
+            a.raw(b'\x83\xC8\xFF')                                  # eax = -1
+            a.raw(b'\xF3\xAB')                                      # rep stosd
+            a.raw(b'\xBF' + le32(layout.va('drop_route_root')))     # edi = drop_route_root
+            a.raw(b'\xB9\x02\x00\x00\x00')                          # ecx = 2 rows
+            a.raw(b'\xF3\xAB')                                      # rep stosd (eax still -1)
         a.raw(b'\xA1' + le32(ax.MAP_NAME_CSTRING_VA))               # eax = [map CString header]
         a.raw(b'\x85\xC0'); a.jz('lf_done')
         a.raw(b'\x83\xC0' + bytes([ax.MAP_NAME_ASCII_OFFSET]))      # eax = map name ASCII

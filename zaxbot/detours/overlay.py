@@ -253,6 +253,12 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC7\x05' + le32(portal_scan_count_va)
               + le32(pa_interval))                            # reset countdown
         a.call_lbl('scan_portal_active')
+        # Dropped-flag routing rows: the scan above is the only thing that
+        # changes flag_drop_node mid-match, so refresh the per-drop BFS rows
+        # right behind it (no-op unless a drop appeared/moved). pushad/popad;
+        # inert stub on builds without the drop-routing fields.
+        if cfg.CTF_DROPPED_FLAG_ENABLED and layout.has_field('drop_route_root'):
+            a.call_lbl('drop_route_refresh')
         a.label('ov_pa_skip')
     # Per-frame door state refresh + debounced open-route rebuild. The grid
     # scan above only maintains the door_entity anchor cache; the SOLID bit is
@@ -582,6 +588,55 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x8B\x1D' + le32(flag_count_va))             # ebx = count
         a.raw(b'\xB9' + le32(overlay_flag_color_va))         # ecx = color
         a.call_lbl('ov_draw_point_table')
+
+    # --- Draw dropped flags -------------------------------------------------
+    # A valid dropped-copy position (flag_drop_valid[i], maintained by the
+    # periodic grid walk's name match) renders as an oval PLUS a double-radius
+    # ring at the drop spot — the ring distinguishes it from the single-oval
+    # base anchors above (in the 8-bit palettized mode all B=255 markers share
+    # one hue, so the ring is the signal, as with closed doors).
+    if (flag_table_va and overlay_flag_color_va
+            and layout.has_field('flag_drop_valid')
+            and layout.has_field('flag_drop_pos')):
+        flag_drop_valid_ov_va = layout.va('flag_drop_valid')
+        flag_drop_pos_ov_va   = layout.va('flag_drop_pos')
+        drop_ring_radius = struct.unpack(
+            '<I', struct.pack('<f', cfg.OVERLAY_VERTEX_RADIUS * 2.0))[0]
+        a.raw(b'\x31\xF6')                                    # esi = flag idx
+        a.raw(b'\x8B\x1D' + le32(flag_count_va))              # ebx = count
+        a.raw(b'\x85\xDB'); a.jz('ov_after_drops')
+        a.label('ov_drop_loop')
+        a.raw(b'\x39\xDE'); a.jae('ov_after_drops')           # idx >= count
+        a.raw(b'\x83\x3C\xB5' + le32(flag_drop_valid_ov_va) + b'\x00')
+        a.jz('ov_drop_next')                                  # no drop known
+        a.raw(b'\xD9\x04\xF5' + le32(flag_drop_pos_ov_va))    # fld drop.x
+        a.raw(b'\xD8\x25' + le32(overlay_cam_x_va))           # fsub cam.x
+        a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va))          # fstp p1.x
+        a.raw(b'\xD9\x04\xF5' + le32(flag_drop_pos_ov_va + 4))  # fld drop.y
+        a.raw(b'\xD8\x25' + le32(overlay_cam_y_va))           # fsub cam.y
+        a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va + 4))      # fstp p1.y
+        _emit_point_cull(
+            a, overlay_tmp_p1_va,
+            overlay_cull_min_x_va, overlay_cull_max_x_va,
+            overlay_cull_min_y_va, overlay_cull_max_y_va,
+            'ov_drop_next',
+        )
+        a.raw(b'\xBA' + le32(overlay_tmp_p1_va))              # edx = &p1
+        a.raw(b'\x68' + le32(overlay_flag_color_va))          # push &color
+        a.raw(b'\xFF\x35' + le32(overlay_vertex_aspect_va))   # push aspect
+        a.raw(b'\xFF\x35' + le32(overlay_vertex_radius_va))   # push radius
+        a.raw(b'\x89\xF9')                                    # ecx = renderer
+        a.call_va(ax.SUB_4FCCC0_VA)
+        a.raw(b'\xBA' + le32(overlay_tmp_p1_va))              # edx = &p1
+        a.raw(b'\x68' + le32(overlay_flag_color_va))          # push &color
+        a.raw(b'\xFF\x35' + le32(overlay_vertex_aspect_va))   # push aspect
+        a.raw(b'\x68' + le32(drop_ring_radius))               # push 2x radius (imm float bits)
+        a.raw(b'\x89\xF9')                                    # ecx = renderer
+        a.call_va(ax.SUB_4FCCC0_VA)
+        a.label('ov_drop_next')
+        a.raw(b'\x46')                                        # ++idx
+        a.jmp('ov_drop_loop')
+        a.label('ov_after_drops')
 
     # --- Draw detected doors ----------------------------------------------
     # Populated once per match by load_doors from static Data.dat-derived map

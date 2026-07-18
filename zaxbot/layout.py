@@ -1437,5 +1437,76 @@ def build_scratch_layout(
             'diag: portal-routing state dump chunk tag',
         ))
 
+    # --- CTF dropped-flag pursuit -------------------------------------------
+    # Appended at the very tail (after the portal-routing block) so no existing
+    # scratch offset shifts. flag_drop_valid/pos/node are rebuilt by the
+    # periodic grid walk (name-matched world copies of away flags + their
+    # nearest graph node); drop_dist is a per-drop BFS hop field (bfs_run,
+    # rebuilt by drop_route_refresh when the drop's node changes) that the
+    # follower descends while pursuing beyond the direct radius. The block
+    # from flag_drop_valid through drop_pursue_enabled is CONTIGUOUS and
+    # dumped whole by the R-snapshot `dpursuit` chunk (tests pin the
+    # ordering); drop_dist sits after the tag and is excluded (2KB of field,
+    # like seek_dist).
+    if flag_table_max_capped > 0:
+        drop_base = max(
+            [f.end for f in fields] + [f.end for f in overlay_fields]
+        )
+        drop_base = (drop_base + 7) & ~7
+        overlay_fields.extend([
+            ScratchField('flag_drop_valid', drop_base,
+                         flag_table_max_capped * 4,
+                         'drop: 1 = a dropped world copy of flag i was seen last scan'),
+            ScratchField('flag_drop_pos',
+                         drop_base + flag_table_max_capped * 4,
+                         flag_table_max_capped * 8,
+                         'drop: float[2] dropped-copy position per flag (raw +0x4C/+0x50)'),
+            ScratchField('flag_drop_node',
+                         drop_base + flag_table_max_capped * 12,
+                         flag_table_max_capped * 4,
+                         'drop: nearest graph node to the dropped copy (-1 = unbound)'),
+            ScratchField('bot_drop_target',
+                         drop_base + flag_table_max_capped * 16,
+                         MAX_BOT_SLOTS * 4,
+                         'drop: per-bot latched pursuit (flag idx+1, 0 = none)'),
+            ScratchField('bot_drop_cd',
+                         drop_base + flag_table_max_capped * 16 + MAX_BOT_SLOTS * 4,
+                         MAX_BOT_SLOTS * 4,
+                         'drop: per-bot pursuit cooldown (thinks; after grab or timeout)'),
+            ScratchField('bot_drop_try',
+                         drop_base + flag_table_max_capped * 16 + MAX_BOT_SLOTS * 8,
+                         MAX_BOT_SLOTS * 4,
+                         'drop: per-bot direct-phase press-patience cycles used'),
+            ScratchField('bot_drop_best',
+                         drop_base + flag_table_max_capped * 16 + MAX_BOT_SLOTS * 12,
+                         MAX_BOT_SLOTS * 4,
+                         'drop: per-bot direct-phase min dsq-to-drop (float; FLT_MAX outside direct)'),
+        ])
+        drop_off = drop_base + flag_table_max_capped * 16 + MAX_BOT_SLOTS * 16
+        overlay_fields.extend([
+            ScratchField('drop_route_root', drop_off + 0x00, 0x08,
+                         'drop: node each drop_dist row is currently built from (-1 = row invalid)'),
+            ScratchField('drop_pursue_radius_sq', drop_off + 0x08, 0x04,
+                         'drop: opportunistic divert trigger radius^2 (float)'),
+            ScratchField('drop_reached_radius_sq', drop_off + 0x0C, 0x04,
+                         'drop: divert arrival radius^2 (float)'),
+            ScratchField('drop_direct_radius_sq', drop_off + 0x10, 0x04,
+                         'drop: straight-steer (direct phase) radius^2 (float)'),
+            ScratchField('drop_abandon_radius_sq', drop_off + 0x14, 0x04,
+                         'drop: silently unlatch beyond this d^2 (float; objective bots exempt)'),
+            ScratchField('drop_pursue_enabled', drop_off + 0x18, 0x04,
+                         'drop: master enable flag (runtime)'),
+            ScratchField('drop_names', drop_off + 0x1C, 0x20,
+                         'drop: expected entity names, 16B slots by team (0 "Blue Flag", 1 "Red Flag")'),
+            ScratchField('tag_dpursuit', drop_off + 0x3C, 0x10,
+                         'diag: dropped-flag pursuit dump chunk tag'),
+        ])
+        if overlay_vertex_max_capped > 0:
+            overlay_fields.append(ScratchField(
+                'drop_dist', drop_off + 0x4C,
+                2 * overlay_vertex_max_capped * 4,
+                'drop: per-drop BFS hop field rooted at flag_drop_node (rows 0/1)',
+            ))
+
     fields.extend(overlay_fields)
     return ScratchLayout(base_va, scratch_size, fields)

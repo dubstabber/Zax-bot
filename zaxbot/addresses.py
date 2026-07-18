@@ -569,6 +569,11 @@ ENTITY_SOLID_BIT       = 0x40000    # SOLID/collidable bit; a CLOSED door carrie
                                     # open path (CDoorAI update slot 25 / COpenDoorAction apply
                                     # sub_4BD870) clears it — the clean passable/blocked readback
 ENTITY_VISIT_OFF       = 0x2C       # entity per-scan visit-id (dedup)
+ENTITY_NAME_CSTR_OFF   = 0x18       # entity name CString header ptr; ASCII at [hdr]+8
+                                    # (sub_4FBF20 -> sub_4E13A0: return *(ent+0x18) + 8; the
+                                    # engine's own by-name finder sub_57A7E0 reads names this
+                                    # way for every grid entity). Header may be NULL/garbage on
+                                    # odd entities — range-check before deref.
 ENTITY_VISIT_COUNTER_VA = 0x622200  # dword_622200: engine global visit-id counter
 ENTITY_POS_X_OFF       = 0x4C       # entity world position X (float)
 ENTITY_POS_Y_OFF       = 0x50       # entity world position Y (float)

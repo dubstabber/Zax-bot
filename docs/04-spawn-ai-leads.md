@@ -292,12 +292,25 @@ anchor. Temporarily writing those exact-anchor entity pointers into
 the capture path was correct and the cache selection was wrong.
 
 The live flag state is now exact for all three states (home / carried /
-dropped), but routing still does not chase the dropped position. If pursuit is
-ever added: the dropped copy is a script-created entity named `Red Flag` /
-`Blue Flag` with sequence `Not Home`, findable in the spatial grid. Do not add
-BFS/pathfinding toward a dropped flag without a deliberate live position table
-and role policy; random graph walking is the intended search behavior until
-that is built.
+dropped), and a dropped copy is a ROUTED pursuit target: while
+`flag_present[i] == 0` the periodic grid walk name-matches the script-created
+copy (named exactly `Red Flag` / `Blue Flag`; name read via `[ent+0x18]+8`,
+the `sub_4FBF20` CString chain) into `flag_drop_pos[]`/`flag_drop_valid[]`
+and binds its nearest graph node; `drop_route_refresh` fills a per-drop
+`bfs_run` hop row when that node changes, and a latched bot descends it at
+each node arrival (`drop_next_hop` overrides `ctf_next_hop`), steering
+straight only within `CTF_DROP_DIRECT_RADIUS_SQ` or at the drop's own node
+(with press patience before the retry cooldown). Latching is opportunistic
+within `CTF_DROP_PURSUE_RADIUS_SQ`, and unconditional-distance when the drop
+is the bot's missing GOAL flag (`route_missing_goal`) — the known position
+replaces the blind search/wait roam. No team filter: a same-team touch
+returns the flag, an enemy touch steals it. The `flag_present` gate is what
+makes the name unambiguous: the only AUTHORED entities carrying those names
+are the 7 at-base blue pickup flags, consumed the moment the flag is stolen
+(census pinned in tests). The v1 straight-steer-only pursuit was
+live-diagnosed via `dpursuit` snapshots timing out ~250 px short at a wall
+and cooling down 4 s — the "runs at it, then ignores it" loop — which is why
+the routed phase exists.
 
 ### Movement calibration recipe
 
@@ -462,9 +475,10 @@ ignore this knob (they skip `apply_lead` unconditionally).
 - Engine `CWayPointMap` integration. The active navigation path uses the
   patch's saved `waypoints/<map>.zwpt` overlay graph, not the shipped engine
   `CWayPointMap` / `CWayPointPath` data.
-- CTF dropped-flag pursuit: `flag_present[]` detects carried flags and exact
-  dropped flag world items away from home, but bots still do not route to the
-  dropped position. Future bot commands can choose roles on top of the current
+- CTF dropped-flag pursuit is graph-routed (v2), but `drop_next_hop` emits
+  no portal pad hops (a cross-pad descent dead-ends into plain roaming) and
+  the drop row uses full-field semantics (closed doors are walked at, not
+  routed around). Future bot commands can choose roles on top of the current
   attacker search/wait split and carrier search fallback.
 - SK objective AI: SK bots don't gather at their own collector yet.
 - Remote display name. Host writes the stats CString after spawn, but the

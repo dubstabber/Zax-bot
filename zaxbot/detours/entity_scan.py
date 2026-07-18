@@ -286,6 +286,34 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     door_entity_va        = layout.va('door_entity') if door_scan_enabled else 0
     door_match_radius_va  = layout.va('door_match_radius_sq') if door_scan_enabled else 0
     door_entity_slots     = max(1, cfg.DOOR_ENTITY_SLOTS_PER_DOOR)
+    # Dropped-flag detection piggybacks the same walk: while a flag is AWAY
+    # from its base (flag_present[i] == 0), the world copy the drop-on-death
+    # canned script creates is the only entity named exactly "Red Flag" /
+    # "Blue Flag" (the 7 authored at-base blue icons carrying that name are
+    # consumed the moment the flag is stolen — census pinned in tests), so an
+    # exact name match against [ent+0x18]+8 (the sub_4FBF20 CString chain)
+    # identifies it and its raw +0x4C/+0x50 is the dropped position. Present
+    # flags cost two loads per entity; the compare only runs while a flag is
+    # away. Runs AFTER the character shield below, so a player renamed like a
+    # flag can never register as one.
+    drop_scan_enabled = (
+        cfg.CTF_DROPPED_FLAG_ENABLED
+        and flag_scan_enabled
+        and layout.has_field('flag_present')
+        and layout.has_field('flag_team')
+        and layout.has_field('flag_drop_valid')
+        and layout.has_field('flag_drop_pos')
+        and layout.has_field('drop_names')
+    )
+    flag_present_ds_va = layout.va('flag_present') if drop_scan_enabled else 0
+    flag_team_ds_va    = layout.va('flag_team') if drop_scan_enabled else 0
+    flag_drop_valid_va = layout.va('flag_drop_valid') if drop_scan_enabled else 0
+    flag_drop_pos_va   = layout.va('flag_drop_pos') if drop_scan_enabled else 0
+    drop_names_va      = layout.va('drop_names') if drop_scan_enabled else 0
+    flag_drop_node_va  = (layout.va('flag_drop_node')
+                          if drop_scan_enabled and layout.has_field('flag_drop_node') else 0)
+    wp_scratch_ds_va   = (layout.va('wp_scratch')
+                          if drop_scan_enabled and layout.has_field('wp_scratch') else 0)
     portal_max      = cfg.PORTAL_TABLE_MAX
     radius_bits     = struct.unpack('<I', struct.pack('<f', cfg.PORTAL_ACTIVE_MATCH_RADIUS_SQ))[0]
 
@@ -332,6 +360,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         # half-built cache.
         a.raw(b'\xBF' + le32(door_entity_va))               # edi = door_entity
         a.raw(b'\xB9' + le32(cfg.DOOR_TABLE_MAX * door_entity_slots))
+        a.raw(b'\x31\xC0')                                  # eax = 0
+        a.raw(b'\xFC\xF3\xAB')                              # cld; rep stosd
+    if drop_scan_enabled:
+        # Dropped-flag positions restart unknown each scan; the walk below
+        # re-proves every drop. Clear + rebuild happen synchronously inside
+        # this one call, so consumers never see a half-built table.
+        a.raw(b'\xBF' + le32(flag_drop_valid_va))           # edi = flag_drop_valid
+        a.raw(b'\xB9' + le32(cfg.FLAG_TABLE_MAX))           # ecx = flag slots
         a.raw(b'\x31\xC0')                                  # eax = 0
         a.raw(b'\xFC\xF3\xAB')                              # cld; rep stosd
 
@@ -530,6 +566,69 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x46')                                      # inc esi
         a.jmp('spa_flag_match')
         a.label('spa_after_flag_match')
+
+    if drop_scan_enabled:
+        # --- Dropped-flag name match. Only flags currently AWAY from their
+        # base are candidates (flag_present gate — also what makes the name
+        # unambiguous, see the drop_scan_enabled comment above). The compare
+        # is an exact NUL-terminated byte match of the entity name against
+        # this flag team's expected string (drop_names + team*16).
+        a.raw(b'\x31\xF6')                                  # xor esi, esi (flag i)
+        a.label('spa_drop_match')
+        a.raw(b'\x3B\x35' + le32(flag_count_va))            # i >= flag_count?
+        a.jae('spa_drop_done')
+        a.raw(b'\x83\xFE' + bytes([cfg.FLAG_TABLE_MAX]))    # i >= table max?
+        a.jae('spa_drop_done')
+        a.raw(b'\x83\x3C\xB5' + le32(flag_present_ds_va) + b'\x00')  # flag home?
+        a.jnz('spa_drop_next')                              # present -> no dropped copy
+        # entity name ASCII = [ent+0x18] + 8, range-checked like every deref.
+        a.raw(b'\xA1' + le32(cur_va))                       # eax = ent
+        a.raw(b'\x8B\x40' + bytes([ax.ENTITY_NAME_CSTR_OFF]))  # eax = name CString hdr
+        a.raw(b'\x3D\x00\x00\x40\x00'); a.jb('spa_drop_done')   # unnamed -> no flag matches
+        a.raw(b'\x3D\x00\x00\x00\x70'); a.jae('spa_drop_done')
+        a.raw(b'\x8D\x50\x08')                              # lea edx, [eax+8] (ASCII)
+        # expected = drop_names + (flag_team[i] & 1) * 16
+        a.raw(b'\x8B\x04\xB5' + le32(flag_team_ds_va))      # eax = flag_team[i]
+        a.raw(b'\x83\xE0\x01')                              # and eax, 1 (defensive)
+        a.raw(b'\xC1\xE0\x04')                              # shl eax, 4 (16B name slots)
+        a.raw(b'\x8D\x98' + le32(drop_names_va))            # lea ebx, [eax + drop_names]
+        a.label('spa_drop_cmp')
+        a.raw(b'\x8A\x02')                                  # al = [entity name]
+        a.raw(b'\x3A\x03')                                  # cmp al, [expected]
+        a.jnz('spa_drop_next')                              # mismatch -> not this flag
+        a.raw(b'\x84\xC0'); a.jz('spa_drop_hit')            # both NUL -> exact match
+        a.raw(b'\x42\x43')                                  # inc edx; inc ebx
+        a.jmp('spa_drop_cmp')
+        a.label('spa_drop_hit')
+        # Record the dropped copy's raw position (the authored/created entity
+        # position IS +0x4C/+0x50, same convention as the flag/door anchors).
+        a.raw(b'\xA1' + le32(cur_va))                       # eax = ent
+        a.raw(b'\x8B\x48' + bytes([ax.ENTITY_POS_X_OFF]))   # ecx = raw x bits
+        a.raw(b'\x89\x0C\xF5' + le32(flag_drop_pos_va))     # flag_drop_pos[i].x
+        a.raw(b'\x8B\x48' + bytes([ax.ENTITY_POS_Y_OFF]))   # ecx = raw y bits
+        a.raw(b'\x89\x0C\xF5' + le32(flag_drop_pos_va + 4)) # flag_drop_pos[i].y
+        a.raw(b'\xC7\x04\xB5' + le32(flag_drop_valid_va) + le32(1))
+        if flag_drop_node_va and wp_scratch_ds_va:
+            # Bind the drop to its nearest graph node — the root of the
+            # drop_dist BFS row the follower descends while pursuing beyond
+            # the direct radius. wp_find_nearest clobbers GPRs; the flag idx
+            # is spilled into scan_d2 (dead here — its portal-match use ended
+            # earlier in this entity's pass).
+            a.raw(b'\x89\x35' + le32(d2_va))                # spill flag idx (esi)
+            a.raw(b'\x8B\x04\xF5' + le32(flag_drop_pos_va)) # eax = drop.x
+            a.raw(b'\xA3' + le32(wp_scratch_ds_va))         # wp_scratch.x
+            a.raw(b'\x8B\x04\xF5' + le32(flag_drop_pos_va + 4))
+            a.raw(b'\xA3' + le32(wp_scratch_ds_va + 4))     # wp_scratch.y
+            a.call_lbl('wp_find_nearest')                   # ebx = nearest or -1
+            a.raw(b'\x8B\x35' + le32(d2_va))                # esi = flag idx
+            a.raw(b'\x89\x1C\xB5' + le32(flag_drop_node_va))  # flag_drop_node[i] = ebx
+        # An entity carries ONE name, so it can match at most one flag —
+        # after a hit the remaining flags cannot match; end the flag loop.
+        a.jmp('spa_drop_done')
+        a.label('spa_drop_next')
+        a.raw(b'\x46')                                      # inc esi
+        a.jmp('spa_drop_match')
+        a.label('spa_drop_done')
 
     if door_scan_enabled:
         # Door anchor-entity caching. Characters never reach here (the

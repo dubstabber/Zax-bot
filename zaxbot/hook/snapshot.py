@@ -256,6 +256,17 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         emit_chunk(layout.va('tag_proute'),
                    b'\xB8' + le32(layout.va('portal_dest_table')),
                    proute_dump_len, 'snap_skip_proute')
+    # Dropped-flag pursuit state: one contiguous chunk from flag_drop_valid
+    # through drop_pursue_enabled (per-flag drop valid/position, per-bot
+    # pursuit latch + cooldown, the radius/reached/enabled knobs) — one R
+    # press pins whether the scan sees a dropped copy and who is pursuing.
+    if layout.has_field('tag_dpursuit') and layout.has_field('flag_drop_valid'):
+        dpursuit_dump_len = (layout.field('drop_pursue_enabled').offset
+                             + layout.field('drop_pursue_enabled').size
+                             - layout.field('flag_drop_valid').offset)
+        emit_chunk(layout.va('tag_dpursuit'),
+                   b'\xB8' + le32(layout.va('flag_drop_valid')),
+                   dpursuit_dump_len, 'snap_skip_dpursuit')
 
     # Waypoint-graph probe. wp_compute populates wp_diag_data[0..7]:
     #   [+0x00] MGR, [+0x04] WM, [+0x08] LV, [+0x0C] WPM,

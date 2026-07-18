@@ -58,17 +58,18 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 
 - WM_KEYDOWN hook at `0x599A1A` redirects `call sub_599580` to
   `.zaxbot:hook_entry`, then tail-jumps back to `sub_599580`.
-- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x16000`, RWX (grown from
+- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x18000`, RWX (grown from
   `0xA000` for the CTF flag static tables, then to `0xC000` for the CTF routing
   BFS distance field, then to `0xD000` for far-base CTF flag entity force-ticks,
   then to `0xF000` for the door detection static tables, then to `0x11000` for
   the door-aware routing field + anchor-entity cache, then `0x12000` for its
   per-team split, then to `0x14000` for the switch detection tables, then to
-  `0x16000` for the portal routing layer).
-- Scratch starts at `0x722000` (`SCRATCH_OFF = 0x8000`; the code/scratch
+  `0x16000` for the portal routing layer, then to `0x18000` for the
+  dropped-flag pursuit layer).
+- Scratch starts at `0x723000` (`SCRATCH_OFF = 0x9000`; the code/scratch
   boundary moved from `0x5A00` at the door layer, from `0x6800` at the switch
-  layer, then from `0x7000` when the portal routing layer landed with ~246
-  code bytes left).
+  layer, from `0x7000` at the portal routing layer, then from `0x8000` when
+  the dropped-flag ROUTED pursuit landed with ~456 code bytes left).
 - B opens the bot menu via `sub_59B260`; R writes a runtime snapshot.
 - Digit selection calls `do_spawn_with_team`.
 - Spawn injects a synthetic DirectPlay "player added" queue entry at
@@ -289,7 +290,8 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   anchors successfully: bots go to the enemy base, grab the flag, return home,
   and capture. `flag_present[]` ("is that team's flag at its base?") is
   EVENT-DRIVEN — see the checker state machine below; it is NOT derived from
-  the grid scan anymore, and it is still not a dropped-flag routing target.
+  the grid scan anymore. DROPPED flags are now a pursuit target — see the
+  dropped-flag pursuit bullet below.
   NOTE: in the
   8-bit palettized overlay the hue
   is driven by the BLUE byte alone, so flags
@@ -364,6 +366,68 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     resets the budget, and the roam suspension engages). The marker is also
     cleared when a suspension expires. Hits reset on clean routed hops,
     marker re-set, reacquire, and respawn.
+- CTF bots PURSUE DROPPED FLAGS (`cfg.CTF_DROPPED_FLAG_ENABLED`; the "don't
+  walk past the flag lying on the ground" layer). Two halves:
+  - **Detection** (`entity_scan.py`, inside the `scan_portal_active` periodic
+    grid walk): while a flag is AWAY (`flag_present[i] == 0`), the dropped
+    world copy the drop-on-death canned script creates is the ONLY entity
+    named exactly `"Red Flag"` / `"Blue Flag"` — the 7 authored at-base blue
+    icons that carry the same name are the pickup flags themselves, consumed
+    the moment the flag is stolen (census pinned in tests; red at-base flags
+    are authored unnamed). The walk exact-matches each entity's name
+    (`[ent+0x18]+8`, the `sub_4FBF20` CString chain — see
+    `ax.ENTITY_NAME_CSTR_OFF`) against `drop_names[team]` and records the
+    copy's raw `+0x4C/+0x50` into `flag_drop_pos[i]`/`flag_drop_valid[i]`.
+    Valid flags are cleared+rebuilt each scan, so a consumed drop goes stale
+    for at most one `PORTAL_ACTIVE_SCAN_INTERVAL`. Runs AFTER the walk's
+    character shield, so a player named like a flag can never register. The
+    name compare only executes while a flag is away (two loads per entity
+    otherwise); no new patch sites.
+  - **Pursuit — TWO-PHASE, graph-routed** (`bot_movement.py` +
+    `flag_route.py: drop_next_hop / drop_route_refresh`). v1 steered
+    STRAIGHT at the drop from up to 350 px; live `dpursuit` snapshots
+    pinned its failure loop — one 30-frame no-improvement watchdog window
+    ended the pursuit ~250 px short (wall between), the 240-think retry
+    cooldown made the bot "ignore" the flag, then it re-latched and ground
+    the wall again ("runs at it, then ignores it"). v2:
+    - **Latch**: within `CTF_DROP_PURSUE_RADIUS_SQ` (350 px)
+      opportunistically — or from ANY distance when the drop is this bot's
+      missing GOAL flag (`route_missing_goal[slot]`: an attacker whose
+      steal target is dropped, a carrier whose home flag is dropped). The
+      position is known, so the blind search/wait roam is replaced by a
+      real route to it. No team/carry filter: touching a drop is
+      beneficial for either team, and a carrier returning its own dropped
+      flag is exactly the play that unlocks its capture.
+    - **ROUTED phase** (farther than `CTF_DROP_DIRECT_RADIUS_SQ`, 160 px):
+      the scan binds each drop to its nearest graph node
+      (`flag_drop_node`); `drop_route_refresh` (page flip, right after the
+      periodic scan) rebuilds a per-drop `bfs_run` hop row (`drop_dist`,
+      full-field semantics, bfs_skip=0) whenever that node changes; at
+      each node arrival `drop_next_hop` descends the row INSTEAD of
+      `ctf_next_hop` (respects `bot_route_suspend` — the suspension roam
+      still un-sticks wedges — and clears `route_portal_hop` so no stale
+      pad latch). Walls are routed AROUND; a graph-unreachable or
+      unbound/stale row falls back to normal goal routing with the latch
+      dormant. Opportunistic latches silently drop beyond
+      `CTF_DROP_ABANDON_RADIUS_SQ`; objective bots are exempt.
+    - **DIRECT phase** (within 160 px, or standing on the drop's own bound
+      node): steer straight at the copy through the standard watchdog with
+      its own progress tracker (`bot_drop_best` — wp_best_dsq stays with
+      the node logic) and PRESS PATIENCE (`CTF_DROP_PRESS_PATIENCE` fresh
+      cycles, mirror of the door/pad patience) before
+      `CTF_DROP_RETRY_COOLDOWN_FRAMES` blacklists it. Reaching
+      `CTF_DROP_REACHED_RADIUS_SQ` ends the pursuit with
+      `CTF_DROP_GRAB_COOLDOWN_FRAMES` (> one scan interval, so the
+      consumed copy's stale position cannot re-latch before the scan
+      clears it).
+    - Latch also drops on respawn/death/teleport-jump/match change, a
+      stale idx, the drop disappearing, or the flag returning home
+      (event-instant). Far bots work because `BOT_PARTICIPANT_POS_ENABLED`
+      keeps the drop's touch script simulated around them. Overlay: a
+      valid drop draws as an oval PLUS a double-radius ring (the ring —
+      not the hue — distinguishes it from the single-oval base anchors).
+    R-snapshot chunk `dpursuit` dumps drop valid/pos/node + per-bot
+    latch/cd/patience/best + route roots + knobs.
 - Bots are kept SIMULATED when far from the host's camera
   (`cfg.BOT_FORCE_ACTIVE_ENABLED`). The engine deactivates entities far from the
   local camera, and the per-entity component advance `sub_4FADC0` gates ALL
@@ -603,11 +667,11 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     so `ctf_next_hop` re-plans door-aware from the reachable node (offline-
     verified: 15→14 across closed door 9 re-plans 15→16; 5→6 across closed door
     15 re-plans 5→1). Fires only in that exact stuck state — door open or
-    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~2.8 KB below
-    `SCRATCH_OFF` (hook_entry_size 29919 of 32768 after the portal-routing
-    layer; the boundary moved 0x7000→0x8000 with the section at 0x16000).
-    When it runs low again, bump `SCRATCH_OFF`+`NEW_SECTION_SIZE` together
-    (build asserts on overflow). The `rstate`
+    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~4.4 KB below
+    `SCRATCH_OFF` (hook_entry_size 32312 of 36864 after the dropped-flag
+    pursuit v2 layer; the boundary moved 0x8000→0x9000 with the section at
+    0x18000). When it runs low again, bump `SCRATCH_OFF`+`NEW_SECTION_SIZE`
+    together (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
     `flag_routing_active`) was added for diagnosing route commitment.
 - Switches are DETECTED (`cfg.SWITCH_DETECT_ENABLED`; static pipeline mirror
@@ -825,18 +889,22 @@ Older emitted labels or disabled detours are not active unless they appear in
 - Graph authoring tools / coverage: place nodes at corners and junctions so
   the straight node-to-node segments stay in walkable space (corner-cutting is
   what triggers the wall-slide). Consider auto-densifying long edges.
-- CTF dropped-flag pursuit on top of the event-driven away/home resolver:
-  `flag_present[]` is now exact for stolen AND dropped flags (checker
-  activate/deactivate events); attackers randomly search or wait near that
-  base, while carriers with a missing home flag search instead of touching the
-  empty capture base. The patch still does not route to the dropped position
-  (the dropped copy is a script-created `CEntityAnimated` named
-  `Red Flag`/`Blue Flag` with sequence `Not Home` — findable in the grid by
-  name+sequence if pursuit is ever added). The old "attacker at a far ENEMY
-  base cannot steal until the host wakes the area" gap is CLOSED by
-  `BOT_PARTICIPANT_POS_ENABLED` (the bot's own activation rect keeps the
-  enemy-base flag + PassThrough steal trigger simulated). SK bots still
-  need collector-aware return paths.
+- CTF dropped-flag pursuit — GRAPH-ROUTED (v2) DONE (see the dropped-flag
+  pursuit bullet in "Current state"): the periodic grid walk name-matches
+  the dropped copy while `flag_present[i] == 0`, binds it to a graph node,
+  and latched bots descend a per-drop `bfs_run` row to it (straight steer
+  only within the 160 px direct radius, with press patience). Bots whose
+  GOAL flag is the drop route to it from anywhere. Remaining refinements:
+  `drop_next_hop` does not emit portal pad hops (a cross-pad drop descent
+  dead-ends into plain roaming — irrelevant while latching needs same-arena
+  proximity or an objective, but revisit if Hydro drop pursuit ever looks
+  passive); and the drop row uses full-field semantics (closed doors are
+  walked at, not routed around — the wedge machinery covers them). The old
+  "attacker at a far ENEMY base cannot steal until the host wakes the area"
+  gap is CLOSED by `BOT_PARTICIPANT_POS_ENABLED` (the bot's own activation
+  rect keeps the enemy-base flag + PassThrough steal trigger simulated —
+  and equally keeps a dropped copy's touch script simulated near a far
+  pursuing bot). SK bots still need collector-aware return paths.
 - Reintroduce hazard/pickup awareness as GRAPH-AWARE routing (route through
   nodes near pickups, around lava) rather than the removed vector-field
   perturbation that pushed the heading into walls.

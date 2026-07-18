@@ -53,6 +53,8 @@ DUMP_TAGS = (
     ('tag_seek', 'seek'),
     # Portal-routing state (dest tables, node bindings, per-bot pad latches).
     ('tag_proute', 'proute'),
+    # Dropped-flag pursuit state (drop positions/valid + per-bot latches).
+    ('tag_dpursuit', 'dpursuit'),
 )
 
 
@@ -592,6 +594,11 @@ def write_static_scratch_data(
     door_edge_radius_sq=1600.0,
     switch_map_name_slot=0,
     overlay_switch_color=(128, 255, 255, 255),
+    ctf_drop_pursue_enabled=False,
+    ctf_drop_pursue_radius_sq=122500.0,
+    ctf_drop_reached_radius_sq=576.0,
+    ctf_drop_direct_radius_sq=25600.0,
+    ctf_drop_abandon_radius_sq=490000.0,
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
     # meaningful — "spawn one bot"); CTF is the only team mode and accepts
@@ -838,6 +845,29 @@ def write_static_scratch_data(
             flag_maps,
             flag_map_name_slot,
         )
+    # Dropped-flag pursuit knobs + the expected entity names ("Blue Flag" /
+    # "Red Flag", 16-byte slots indexed by flag_team) matched by the periodic
+    # grid walk against [ent+0x18]+8 while a flag is away from its base.
+    if layout.has_field('drop_pursue_enabled'):
+        layout.write(section, scratch_off, 'drop_pursue_enabled',
+                     struct.pack('<I', 1 if ctf_drop_pursue_enabled else 0))
+        layout.write(section, scratch_off, 'drop_pursue_radius_sq',
+                     struct.pack('<f', ctf_drop_pursue_radius_sq))
+        layout.write(section, scratch_off, 'drop_reached_radius_sq',
+                     struct.pack('<f', ctf_drop_reached_radius_sq))
+        layout.write(section, scratch_off, 'drop_direct_radius_sq',
+                     struct.pack('<f', ctf_drop_direct_radius_sq))
+        layout.write(section, scratch_off, 'drop_abandon_radius_sq',
+                     struct.pack('<f', ctf_drop_abandon_radius_sq))
+        # Node binds / route roots start invalid; drop_dist rows are rebuilt
+        # by drop_route_refresh before first use (gated on root == node).
+        if layout.has_field('flag_drop_node'):
+            layout.write(section, scratch_off, 'flag_drop_node',
+                         b'\xFF' * layout.field('flag_drop_node').size)
+        if layout.has_field('drop_route_root'):
+            layout.write(section, scratch_off, 'drop_route_root', b'\xFF' * 8)
+        drop_names = b'Blue Flag\x00'.ljust(16, b'\x00') + b'Red Flag\x00'.ljust(16, b'\x00')
+        layout.write(section, scratch_off, 'drop_names', drop_names)
     if layout.has_field('door_static_map_count'):
         # door_maps may include switch-only records (empty doors) since the
         # parse keeps every map with doors OR switches; the door tables only

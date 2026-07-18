@@ -11,16 +11,19 @@ from .build import SectionSpec
 # --- new section parameters (.zaxbot) -------------------------------------
 NEW_SECTION_NAME   = b'.zaxbot\x00'
 NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
-NEW_SECTION_SIZE   = 0x16000       # 32KB code + 56KB scratch (grown for the door detection
+NEW_SECTION_SIZE   = 0x18000       # 36KB code + 60KB scratch (grown for the door detection
                                    # tables, the door-aware routing field, its per-team
-                                   # split, the switch detection tables, then the portal
-                                   # routing layer — dest tables + node bindings)
+                                   # split, the switch detection tables, the portal
+                                   # routing layer — dest tables + node bindings — then
+                                   # the dropped-flag pursuit layer: drop_dist BFS rows)
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
-SCRATCH_OFF        = 0x8000        # writable scratch buffer; 32KB code / 56KB scratch
+SCRATCH_OFF        = 0x9000        # writable scratch buffer; 36KB code / 60KB scratch
                                    # (boundary moved from 0x5A00 at the door layer, from
-                                   # 0x6800 at the switch layer, then from 0x7000 when the
-                                   # portal-routing layer landed with ~246 code bytes left)
+                                   # 0x6800 at the switch layer, from 0x7000 at the
+                                   # portal-routing layer, then from 0x8000 when the
+                                   # dropped-flag ROUTED pursuit landed with ~456 code
+                                   # bytes left)
 
 ZAXBOT_SECTION = SectionSpec(
     name=NEW_SECTION_NAME,
@@ -853,6 +856,67 @@ SWITCH_MAP_NAME_SLOT    = 96    # fixed ASCII bytes per map path, incl. NUL
 # live dropped-flag position remains future work. See ctf-flag-detection,
 # ctf-flag-carry-detection.
 CTF_FLAG_ROUTING_ENABLED = True
+# --- CTF dropped-flag pursuit ---------------------------------------------
+# When a flag is away from its base (flag_present[i] == 0) the periodic grid
+# walk (scan_portal_active cadence) also looks for the DROPPED world copy —
+# the script-created CEntityAnimated the drop-on-death canned script names
+# exactly "Red Flag" / "Blue Flag" (Data.dat "Does player have a flag";
+# entity name read via [ent+0x18]+8, the sub_4FBF20 CString chain) — and
+# records its position in flag_drop_pos[] / flag_drop_valid[] and binds its
+# nearest graph node into flag_drop_node[] (drop_route_refresh then fills a
+# per-drop BFS hop field, drop_dist, rooted at that node). Pursuit is
+# TWO-PHASE (v2 — the v1 straight-steer-only pursuit was live-diagnosed
+# giving up after one 30-frame watchdog window and cooling down 4 s, the
+# "runs at it, then ignores it" report; and it beelined into walls):
+#   * ROUTED: a latched bot beyond the direct radius descends drop_dist at
+#     every node arrival (drop_next_hop overrides ctf_next_hop while latched
+#     and not suspended), so walls are routed AROUND via the graph.
+#   * DIRECT: within CTF_DROP_DIRECT_RADIUS_SQ — or standing on the drop's
+#     own graph node — steer straight at the copy through the standard
+#     watchdog, with CTF_DROP_PRESS_PATIENCE fresh cycles before giving up.
+# LATCHING: any bot within CTF_DROP_PURSUE_RADIUS_SQ opportunistically
+# diverts; a bot whose GOAL flag is the missing one (route_missing_goal —
+# attackers whose steal target is dropped, carriers whose home flag is
+# dropped) latches from ANY distance, replacing the blind search/wait roam
+# with a route to where the flag actually lies. Touching a dropped flag is
+# beneficial for EITHER team (same team returns it home, the enemy picks it
+# up), so there is no team filter. The name match is exact and gated on
+# flag_present[i]==0, which also excludes the 7 authored at-base blue-flag
+# icons that carry the same name — they are consumed the moment the flag is
+# stolen, so no world entity collides with the name while a flag is away
+# (census pinned in tests). Stale-position windows are bounded by one scan
+# interval (PORTAL_ACTIVE_SCAN_INTERVAL).
+CTF_DROPPED_FLAG_ENABLED = True
+# Opportunistic divert radius (squared px): a bot passing within sqrt(this)
+# of a drop takes it even when its own goal lies elsewhere.
+CTF_DROP_PURSUE_RADIUS_SQ = 350.0 * 350.0
+# The divert ends (touch assumed) within sqrt(this) — mirror of
+# PICKUP_REACHED_RADIUS_SQ: the flag's own PassThrough/touch script consumes
+# the copy on overlap, so the bot only needs to overlap it.
+CTF_DROP_REACHED_RADIUS_SQ = 24.0 * 24.0
+# Straight-steer phase radius (squared px). Beyond it the bot node-routes via
+# drop_dist; within it (or at the drop's own bound node, where the graph can
+# take it no closer) it walks straight at the copy. Keep near the waypoint
+# spacing scale — the v1 failure was straight-steering over 250+ px of
+# geometry.
+CTF_DROP_DIRECT_RADIUS_SQ = 160.0 * 160.0
+# A latched OPPORTUNISTIC pursuit is silently dropped beyond sqrt(this)
+# (knockback, detour drift). Objective bots (route_missing_goal == the drop)
+# are exempt — they route from anywhere.
+CTF_DROP_ABANDON_RADIUS_SQ = 700.0 * 700.0
+# Direct-phase press patience: a progress-timeout grants this many fresh
+# watchdog cycles (wall-slide keeps sweeping) before the retry cooldown.
+CTF_DROP_PRESS_PATIENCE = 2
+# After ENDING a pursuit by reaching the spot, don't re-latch for this many
+# thinks. MUST exceed PORTAL_ACTIVE_SCAN_INTERVAL: the consumed copy's stale
+# position survives in flag_drop_valid until the next scan clears it, and a
+# shorter cooldown would re-latch the bot onto the ghost.
+CTF_DROP_GRAB_COOLDOWN_FRAMES = 150
+# After direct-phase patience is exhausted (drop nearby but physically
+# unreachable even with the slide sweep), blacklist pursuing for this many
+# thinks so the bot resumes the graph. It retries automatically afterwards
+# if the flag still lies there.
+CTF_DROP_RETRY_COOLDOWN_FRAMES = 240
 # Guard the engine score action itself: a map-script capture point award is
 # suppressed when the scoring team's own flag is away from base or carried by a
 # player. Last-resort backstop behind the event-driven flag_present[] — with

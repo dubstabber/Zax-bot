@@ -2,6 +2,7 @@ import hashlib
 import os
 import struct
 import unittest
+from pathlib import Path
 
 import zax_patch
 from zaxbot import config as cfg
@@ -632,6 +633,110 @@ class PortalDataTests(unittest.TestCase):
                              cfg.DOOR_OPENER_TABLE_MAX)
 
 
+class DroppedFlagTests(unittest.TestCase):
+    """Pins the assumptions behind dropped-flag pursuit.
+
+    The runtime identifies a DROPPED flag by exact entity name ("Red Flag" /
+    "Blue Flag" — what the canned drop/recreate scripts stamp via New Name)
+    gated on ``flag_present[i] == 0``. That gate is only sound if every
+    AUTHORED entity carrying one of those names is the at-base flag pickup
+    itself (consumed the moment the flag is stolen, so it never coexists with
+    ``flag_present == 0``). Census the shipped Data.dat to keep that true."""
+
+    @staticmethod
+    def _authored_flag_named_parts():
+        from zaxbot.portal_data import _iter_local_files, _find_block
+
+        data_path = Path(zax_patch.__file__).resolve().parent / 'Data.dat'
+        if not data_path.exists():
+            return None
+        named = {}                       # map name -> [part names]
+        for name, payload in _iter_local_files(data_path.read_bytes()):
+            if not name.lower().endswith('.zax'):
+                continue
+            if '/multiplayer/' not in name.replace('\\', '/').lower():
+                continue
+            text = payload.decode('latin1', 'replace').replace('\r\n', '\n')
+            lines = text.split('\n')
+            idx = 0
+            while idx < len(lines):
+                if not lines[idx].strip().startswith('Level Part='):
+                    idx += 1
+                    continue
+                start, end = _find_block(lines, idx)
+                for raw in lines[start:end]:
+                    line = raw.strip()
+                    if line.startswith('Name='):
+                        part_name = line.split('=', 1)[1]
+                        if part_name in ('Red Flag', 'Blue Flag'):
+                            named.setdefault(name, []).append(part_name)
+                        break
+                idx = end
+        return named
+
+    def test_dropped_flag_name_census_is_pinned(self):
+        from zaxbot.flag_data import resolve_flag_data
+
+        named = self._authored_flag_named_parts()
+        if named is None:
+            self.skipTest('Data.dat not present')
+        # No MP map authors a part named "Red Flag" at all, and exactly the
+        # CTF-capable maps (the ones with flag anchors) author ONE part named
+        # "Blue Flag" — the at-base blue flag pickup itself. Anything else
+        # would be a standing entity that could alias a dropped flag while
+        # flag_present == 0, breaking the name-scan's gate.
+        self.assertTrue(all(parts == ['Blue Flag'] for parts in named.values()),
+                        f'unexpected authored flag-named parts: {named}')
+        flag_maps = {name for name, _points in resolve_flag_data()}
+        self.assertEqual(set(named), flag_maps)
+
+    def test_drop_scratch_block_layout_invariants(self):
+        # The `dpursuit` snapshot chunk dumps flag_drop_valid ..
+        # drop_pursue_enabled as ONE contiguous range, and load_flags clears
+        # bot_drop_target..bot_drop_best with ONE rep stosd — both rely on
+        # this physical ordering.
+        layout = build_scratch_layout(
+            zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA + zax_patch.SCRATCH_OFF,
+            zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF,
+            zax_patch.NUM_BOT_NAMES,
+            zax_patch.NAME_SLOT_SIZE,
+            zax_patch.NAME_SLOT_ASCII,
+            cfg.WEAPON_SPEEDS_MAX,
+            overlay_vertex_max=cfg.OVERLAY_VERTEX_MAX,
+            overlay_edge_max=cfg.OVERLAY_EDGE_MAX,
+            flag_table_max=cfg.FLAG_TABLE_MAX,
+            flag_static_map_max=cfg.FLAG_STATIC_MAP_MAX,
+            flag_static_point_max=cfg.FLAG_STATIC_POINT_MAX,
+            flag_map_name_slot=cfg.FLAG_MAP_NAME_SLOT,
+        )
+        valid = layout.field('flag_drop_valid')
+        pos = layout.field('flag_drop_pos')
+        node = layout.field('flag_drop_node')
+        target = layout.field('bot_drop_target')
+        cd = layout.field('bot_drop_cd')
+        try_ = layout.field('bot_drop_try')
+        best = layout.field('bot_drop_best')
+        roots = layout.field('drop_route_root')
+        self.assertEqual(pos.offset, valid.end)
+        self.assertEqual(node.offset, pos.end)
+        self.assertEqual(target.offset, node.end)
+        self.assertEqual(cd.offset, target.end)
+        self.assertEqual(try_.offset, cd.end)
+        self.assertEqual(best.offset, try_.end)
+        self.assertEqual(roots.offset, best.end)
+        self.assertEqual(roots.size, 8)
+        self.assertEqual(layout.field('drop_pursue_radius_sq').offset, roots.end)
+        self.assertEqual(layout.field('drop_reached_radius_sq').offset, roots.end + 4)
+        self.assertEqual(layout.field('drop_direct_radius_sq').offset, roots.end + 8)
+        self.assertEqual(layout.field('drop_abandon_radius_sq').offset, roots.end + 12)
+        self.assertEqual(layout.field('drop_pursue_enabled').offset, roots.end + 16)
+        # 16-byte name slots indexed by team (asm does `shl eax, 4`).
+        self.assertEqual(layout.field('drop_names').size, 0x20)
+        # Two BFS rows (drop_next_hop hard-caps the latch idx at 2).
+        self.assertEqual(layout.field('drop_dist').size,
+                         2 * cfg.OVERLAY_VERTEX_MAX * 4)
+
+
 class PatcherTests(unittest.TestCase):
     def test_patch_manifest_names_and_targets_are_valid(self):
         names = [patch.name for patch in zax_patch.ENABLED_PATCHES]
@@ -752,8 +857,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = 'd3e5dd73e1832b0343f2c3f12b157986a0ec554d537a5b41c45bb66a96efdafd'
-    HOOK_ENTRY_SIZE = 30383
+    SECTION_SHA256 = 'c9db86094cb787d1b6b966f490c6b2f33890cece4d190df9ed0fecc02df71cf0'
+    HOOK_ENTRY_SIZE = 32312
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(
