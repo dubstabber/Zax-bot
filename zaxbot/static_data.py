@@ -702,7 +702,8 @@ def write_static_scratch_data(
     ctf_drop_abandon_radius_sq=490000.0,
     sk_maps=(),
     sk_map_name_slot=0,
-    sk_return_carry_min=6,
+    sk_return_carry_rand_lo=30,
+    sk_return_carry_rand_hi=100,
     sk_pile_pursue_radius_sq=90000.0,
     sk_pile_reached_radius_sq=576.0,
     sk_pile_ttl_frames=2700,
@@ -1010,8 +1011,14 @@ def write_static_scratch_data(
     if layout.has_field('sk_static_map_count'):
         write_sk_static_table(section, scratch_off, layout, sk_maps,
                               sk_map_name_slot)
-        layout.write(section, scratch_off, 'sk_return_min',
-                     struct.pack('<I', max(1, int(sk_return_carry_min))))
+        # Per-bot RETURN-threshold roll bounds. LO >= 1 (0 is the per-bot
+        # "unrolled" sentinel) and HI >= LO so the engine RNG range is valid.
+        sk_lo = max(1, int(sk_return_carry_rand_lo))
+        sk_hi = max(sk_lo, int(sk_return_carry_rand_hi))
+        layout.write(section, scratch_off, 'sk_return_lo',
+                     struct.pack('<I', sk_lo))
+        layout.write(section, scratch_off, 'sk_return_hi',
+                     struct.pack('<I', sk_hi))
         layout.write(section, scratch_off, 'sk_pile_pursue_radius_sq',
                      struct.pack('<f', sk_pile_pursue_radius_sq))
         layout.write(section, scratch_off, 'sk_pile_reached_radius_sq',

@@ -1637,10 +1637,12 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xB9' + le32(cfg.SK_BIN_TABLE_MAX))                 # ecx = 16
         a.raw(b'\x31\xC0')                                          # eax = 0
         a.raw(b'\xF3\xAB')                                          # rep stosd
-        # Per-bot SK state block: bot_sk_return..bot_pile_best are 7
+        # Per-bot SK state block: bot_sk_return..bot_sk_thresh are 8
         # contiguous u32[16] arrays (layout-pinned) — one clear covers all.
+        # bot_sk_thresh = 0 is the "unrolled" sentinel, so every bot rolls a
+        # fresh RETURN threshold on its first pickup of the new match.
         a.raw(b'\xBF' + le32(layout.va('bot_sk_return')))           # edi = per-bot block
-        a.raw(b'\xB9' + le32(7 * cfg.MAX_BOT_SLOTS))                # ecx = 7 arrays
+        a.raw(b'\xB9' + le32(8 * cfg.MAX_BOT_SLOTS))                # ecx = 8 arrays
         a.raw(b'\xF3\xAB')                                          # rep stosd (eax = 0)
         a.raw(b'\xBF' + le32(layout.va('sk_pile_valid')))           # edi = pile TTLs
         a.raw(b'\xB9' + le32(cfg.SK_PILE_TABLE_MAX))                # ecx = ring slots

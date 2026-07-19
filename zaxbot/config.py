@@ -1020,9 +1020,10 @@ WP_ROUTE_BLOCK_RETRY_HITS = 3
 #     attempted) toward the nearest mineral zone; INSIDE a zone (dist == 0)
 #     fall back to the random roam, which sweeps the dense cluster and
 #     collects by walk-over overlap.
-#   * RETURN phase (carried >= SK_RETURN_CARRY_MIN, latched until the deposit
-#     empties the inventory): descend this bot's own-bin row (sk_bin_dist,
-#     one bfs_run per authored bin at match start, indexed by team id) and
+#   * RETURN phase (carried >= the bot's rolled threshold, latched until the
+#     deposit empties the inventory): descend this bot's own-bin row
+#     (sk_bin_dist, one bfs_run per authored bin at match start, indexed by
+#     team id) and
 #     final-approach the bin center at its node — bins are collidable props,
 #     so the press machinery (watchdog + patience) fires the CollideTrigger
 #     exactly like the switch wander-bump; the engine's canned action does
@@ -1030,10 +1031,17 @@ WP_ROUTE_BLOCK_RETRY_HITS = 3
 #     approach naturally.
 SK_ENABLED = True
 # Deposit threshold: a bot heads home once carrying this many minerals total
-# (Ore Deposits + Crystals). Low = frequent short banking runs (safe, less
-# efficient); high = long greedy runs that lose more on death. The engine
-# awards score per deposited mineral, so this is pacing, not value.
-SK_RETURN_CARRY_MIN = 6
+# (Ore Deposits + Crystals). RANDOMIZED per bot per run: each bot rolls a
+# fresh threshold in [LO, HI] via the engine RNG — lazily when it first
+# picks something up, and again every time a banked run completes (the
+# RETURN->empty transition in sk_update_phase, which fires the moment the
+# deposit scores; a death while latched re-rolls too — new life, new plan).
+# Low rolls = frequent short banking runs (safe, less efficient); high
+# rolls = long greedy runs that drop a fat stealable pile on death. The
+# engine awards score per deposited mineral, so this is pacing, not value.
+# LO must stay >= 1 (0 is the per-bot "unrolled" sentinel).
+SK_RETURN_CARRY_RAND_LO = 30
+SK_RETURN_CARRY_RAND_HI = 100
 # Live per-map mineral table (The Foundry authors 386 — the shipped max).
 SK_MINERAL_TABLE_MAX  = 400
 # Bins live table is indexed by TEAM id (== bin number - 1); 16 = MAX_BOT_SLOTS

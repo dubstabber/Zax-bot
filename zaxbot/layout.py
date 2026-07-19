@@ -1613,8 +1613,10 @@ def build_scratch_layout(
                   'sk: master runtime gate (mode==SK with graph + SK data this match)')
         _sk_field('sk_mineral_count', 0x04, 'sk: live mineral anchors this map')
         _sk_field('sk_bin_count', 0x04, 'sk: authored bins this map (== MaxPlayers)')
-        _sk_field('sk_return_min', 0x04,
-                  'sk: carried-minerals threshold that flips a bot to the RETURN phase')
+        _sk_field('sk_return_lo', 0x04,
+                  'sk: RETURN-threshold roll lower bound (per-bot roll in [lo, hi])')
+        _sk_field('sk_return_hi', 0x04,
+                  'sk: RETURN-threshold roll upper bound')
         _sk_field('sk_def_ore', 0x04,
                   'sk: resolved "Ore Deposits" item-def ptr (per match; 0 = unresolved)')
         _sk_field('sk_def_crystal', 0x04,
@@ -1636,7 +1638,7 @@ def build_scratch_layout(
         _sk_field('sk_bin_node', sk_bin_max_capped * 4,
                   'sk: nearest graph node per bin (-1 = unbound)')
         # Per-bot state: contiguous so load_sk clears it with one rep stosd
-        # and the R chunk dumps it in one block (7 parallel u32[16] arrays).
+        # and the R chunk dumps it in one block (8 parallel u32[16] arrays).
         _sk_field('bot_sk_return', MAX_BOT_SLOTS * 4,
                   'sk: per-bot RETURN-phase latch (1 until the deposit empties the load)')
         _sk_field('bot_sk_carry', MAX_BOT_SLOTS * 4,
@@ -1651,6 +1653,8 @@ def build_scratch_layout(
                   'sk: per-bot pile press-patience cycles used')
         _sk_field('bot_pile_best', MAX_BOT_SLOTS * 4,
                   'sk: per-bot pile divert min dsq (float; FLT_MAX parked)')
+        _sk_field('bot_sk_thresh', MAX_BOT_SLOTS * 4,
+                  'sk: per-bot rolled RETURN threshold (0 = unrolled sentinel; re-rolled per banked run)')
         _sk_field('sk_pile_valid', sk_pile_max_capped * 4,
                   'sk: pile ring slot TTL countdown (frames; 0 = empty/expired)')
         _sk_field('sk_pile_pos', sk_pile_max_capped * 8,

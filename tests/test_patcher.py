@@ -1045,11 +1045,11 @@ class SalvageKingTests(unittest.TestCase):
             sk_map_name_slot=cfg.SK_MAP_NAME_SLOT,
             sk_pile_table_max=cfg.SK_PILE_TABLE_MAX,
         )
-        # load_sk clears bot_sk_return..bot_pile_best with ONE rep stosd (7
+        # load_sk clears bot_sk_return..bot_sk_thresh with ONE rep stosd (8
         # contiguous u32[16] arrays) — pin the physical ordering it relies on.
         perbot = ['bot_sk_return', 'bot_sk_carry', 'bot_sk_dep_try',
                   'bot_pile_target', 'bot_pile_cd', 'bot_pile_try',
-                  'bot_pile_best']
+                  'bot_pile_best', 'bot_sk_thresh']
         for prev, cur in zip(perbot, perbot[1:]):
             self.assertEqual(layout.field(cur).offset, layout.field(prev).end,
                              f'{cur} not contiguous after {prev}')
@@ -1278,8 +1278,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '467024f96e33012fe95c9d6a4226823bcb66996de29b2186f707744b83c7b574'
-    HOOK_ENTRY_SIZE = 36819
+    SECTION_SHA256 = '1eab7299138b8fb99baed733bcc50ad34ef71f56d3429cd11ba8031658423bba'
+    HOOK_ENTRY_SIZE = 36919
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

@@ -844,7 +844,12 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     both fields build once per match, no rebuilds, no periodic cost.
   - **Behavior** (`sk_next_hop` replaces the arrival next-hop while armed;
     `sk_update_phase` maintains a per-bot COLLECT/RETURN hysteresis latch:
-    carry==0 clears, carry >= `SK_RETURN_CARRY_MIN` (6) sets): COLLECT
+    carry==0 clears, carry >= `bot_sk_thresh[slot]` sets — the threshold is
+    RANDOMIZED per run via the engine RNG in
+    `[SK_RETURN_CARRY_RAND_LO, SK_RETURN_CARRY_RAND_HI]` (30..100), rolled
+    lazily on first pickup and RE-ROLLED by `sk_roll_thresh` on every
+    RETURN→empty transition — the frame a deposit banks the load, or a
+    death while latched): COLLECT
     descends the mineral field; INSIDE a mineral zone (dist 0) it returns -1
     so the random roam sweeps the dense cluster and collects by walk-over.
     RETURN descends the bot's own-bin row; at the bin node the DEPOSIT FINAL

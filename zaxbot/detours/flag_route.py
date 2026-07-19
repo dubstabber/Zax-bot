@@ -1533,9 +1533,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         sk_def_ore_va      = layout.va('sk_def_ore')
         sk_def_crystal_va  = layout.va('sk_def_crystal')
         sk_carry_tmp_va    = layout.va('sk_carry_tmp')
-        sk_return_min_va   = layout.va('sk_return_min')
+        sk_return_lo_va    = layout.va('sk_return_lo')
+        sk_return_hi_va    = layout.va('sk_return_hi')
         bot_sk_return_va   = layout.va('bot_sk_return')
         bot_sk_carry_va    = layout.va('bot_sk_carry')
+        bot_sk_thresh_va   = layout.va('bot_sk_thresh')
 
         # -----------------------------------------------------------------
         # build_sk_routes: fill both fields and arm sk_routing_active when
@@ -1617,13 +1619,36 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC3')
 
         # -----------------------------------------------------------------
+        # sk_roll_thresh: roll a fresh per-bot RETURN threshold in
+        # [sk_return_lo, sk_return_hi] via the engine RNG and store it in
+        # bot_sk_thresh[slot]. Floor 1 defensively (0 is the "unrolled"
+        # sentinel — a CE-tuned lo of 0 must not wedge the lazy init in a
+        # per-think re-roll loop). Reads bot_slot_tmp; clobbers GPRs.
+        # -----------------------------------------------------------------
+        a.label('sk_roll_thresh')
+        a.raw(b'\xFF\x35' + le32(sk_return_hi_va))              # push high
+        a.raw(b'\xFF\x35' + le32(sk_return_lo_va))              # push low
+        a.raw(b'\xB9' + le32(ax.RNG_OBJ_VA))                    # ecx = RNG instance
+        a.call_va(ax.RNG_SUB)                                   # eax = [lo, hi] (callee pops)
+        a.raw(b'\x85\xC0'); a.jnz('srt_ok')
+        a.raw(b'\x40')                                          # floor 1
+        a.label('srt_ok')
+        a.raw(b'\x8B\x15' + le32(bot_slot_va))                  # edx = slot
+        a.raw(b'\x89\x04\x95' + le32(bot_sk_thresh_va))         # bot_sk_thresh[slot] = eax
+        a.raw(b'\xC3')
+
+        # -----------------------------------------------------------------
         # sk_update_phase: recompute this bot's carried-mineral count and
         # maintain the COLLECT/RETURN hysteresis latch: count == 0 clears
-        # it (deposit done / death), count >= sk_return_min sets it,
-        # anything between keeps the current phase. Reads bot_slot_tmp /
-        # bot_char_tmp; clobbers GPRs (called inside the movement pushad
-        # frame). sub_426860 is __usercall (ECX=char, EDX=def key -> EAX
-        # count) and preserves ebx/esi/edi/ebp.
+        # it, count >= bot_sk_thresh[slot] sets it, anything between keeps
+        # the current phase. The threshold is RANDOMIZED per run: rolled
+        # lazily on first use (load_sk zeroes it per match) and RE-ROLLED on
+        # the RETURN->empty transition — the frame the deposit banks the
+        # load (the deposit press calls this per think), or a death while
+        # latched (new life, new plan). Reads bot_slot_tmp / bot_char_tmp;
+        # clobbers GPRs (called inside the movement pushad frame).
+        # sub_426860 is __usercall (ECX=char, EDX=def key -> EAX count) and
+        # preserves ebx/esi/edi/ebp.
         # -----------------------------------------------------------------
         a.label('sk_update_phase')
         a.raw(b'\xC7\x05' + le32(sk_carry_tmp_va) + le32(0))    # carry = 0
@@ -1644,11 +1669,24 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xA1' + le32(sk_carry_tmp_va))                  # eax = carry
         a.raw(b'\x89\x04\x95' + le32(bot_sk_carry_va))          # bot_sk_carry[slot] = carry
         a.raw(b'\x85\xC0'); a.jnz('sup_nonzero')
-        a.raw(b'\xC7\x04\x95' + le32(bot_sk_return_va) + le32(0))  # empty -> collect
+        # Empty-handed. If the RETURN latch was set, a banked run just
+        # completed (or the bot died carrying) — clear it and roll the NEXT
+        # run's threshold. Already-collecting bots leave the roll alone.
+        a.raw(b'\x83\x3C\x95' + le32(bot_sk_return_va) + b'\x00')
+        a.jz('sup_keep')
+        a.raw(b'\xC7\x04\x95' + le32(bot_sk_return_va) + le32(0))  # -> collect
+        a.call_lbl('sk_roll_thresh')                            # re-roll for next run
         a.raw(b'\xC3')
         a.label('sup_nonzero')
-        a.raw(b'\x3B\x05' + le32(sk_return_min_va))             # carry >= threshold?
-        a.jb('sup_keep')
+        a.raw(b'\x8B\x0C\x95' + le32(bot_sk_thresh_va))         # ecx = thresh[slot]
+        a.raw(b'\x85\xC9'); a.jnz('sup_have_thresh')
+        a.call_lbl('sk_roll_thresh')                            # lazy first roll
+        a.raw(b'\x8B\x15' + le32(bot_slot_va))                  # edx = slot (reload)
+        a.raw(b'\x8B\x0C\x95' + le32(bot_sk_thresh_va))         # ecx = thresh[slot]
+        a.raw(b'\x8B\x04\x95' + le32(bot_sk_carry_va))          # eax = carry (reload)
+        a.label('sup_have_thresh')
+        a.raw(b'\x39\xC8')                                      # cmp eax, ecx
+        a.jb('sup_keep')                                        # carry < thresh
         a.raw(b'\xC7\x04\x95' + le32(bot_sk_return_va) + le32(1))  # -> return phase
         a.label('sup_keep')
         a.raw(b'\xC3')
