@@ -815,6 +815,103 @@ class DroppedFlagTests(unittest.TestCase):
                          2 * cfg.OVERLAY_VERTEX_MAX * 4)
 
 
+class SwitchWanderTests(unittest.TestCase):
+    """Roam switch wander-bump scratch invariants.
+
+    The `swander` snapshot chunk dumps bot_switch_target .. sww_census as ONE
+    contiguous range, and load_switches clears bot_switch_target ..
+    bot_switch_snap with ONE rep stosd — both rely on this physical ordering.
+    """
+
+    def _layout(self):
+        return build_scratch_layout(
+            zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA + zax_patch.SCRATCH_OFF,
+            zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF,
+            zax_patch.NUM_BOT_NAMES,
+            zax_patch.NAME_SLOT_SIZE,
+            zax_patch.NAME_SLOT_ASCII,
+            cfg.WEAPON_SPEEDS_MAX,
+            overlay_vertex_max=cfg.OVERLAY_VERTEX_MAX,
+            overlay_edge_max=cfg.OVERLAY_EDGE_MAX,
+            door_table_max=cfg.DOOR_TABLE_MAX,
+            door_static_map_max=cfg.DOOR_STATIC_MAP_MAX,
+            door_static_point_max=cfg.DOOR_STATIC_POINT_MAX,
+            door_map_name_slot=cfg.DOOR_MAP_NAME_SLOT,
+            door_opener_table_max=cfg.DOOR_OPENER_TABLE_MAX,
+            door_opener_static_max=cfg.DOOR_OPENER_STATIC_MAX,
+            switch_table_max=cfg.SWITCH_TABLE_MAX,
+            switch_pair_max=cfg.SWITCH_PAIR_MAX,
+            switch_static_map_max=cfg.SWITCH_STATIC_MAP_MAX,
+            switch_static_point_max=cfg.SWITCH_STATIC_POINT_MAX,
+            switch_static_pair_max=cfg.SWITCH_STATIC_PAIR_MAX,
+            switch_map_name_slot=cfg.SWITCH_MAP_NAME_SLOT,
+        )
+
+    def test_swander_scratch_block_layout_invariants(self):
+        layout = self._layout()
+        target = layout.field('bot_switch_target')
+        cd = layout.field('bot_switch_cd')
+        try_ = layout.field('bot_switch_try')
+        snap = layout.field('bot_switch_snap')
+        chance = layout.field('switch_wander_chance')
+        spill = layout.field('sww_spill')
+        census = layout.field('sww_census')
+        self.assertEqual(cd.offset, target.end)
+        self.assertEqual(try_.offset, cd.end)
+        self.assertEqual(snap.offset, try_.end)
+        self.assertEqual(chance.offset, snap.end)
+        self.assertEqual(spill.offset, chance.end)
+        self.assertEqual(census.offset, spill.end)
+        self.assertEqual(layout.field('tag_swander').offset, census.end)
+
+    def test_all_mp_door_parts_are_centityanimated(self):
+        # The door-anchor cache class gate (entity_scan.py) admits ONLY
+        # CEntityAnimated entities — the fix for Hydroplant Bouncefest's
+        # permanently-"closed" doors, whose anchors host two always-solid
+        # CEntityBase scenery models at the exact door position. This pins
+        # the premise: every CDoorAI Level Part in every MP map is authored
+        # `Level Part=CEntityAnimated`.
+        from zaxbot.door_data import _iter_local_files, _find_block
+        data_path = os.path.join(os.path.dirname(zax_patch.__file__), 'Data.dat')
+        if not os.path.exists(data_path):
+            self.skipTest('Data.dat not present')
+        with open(data_path, 'rb') as f:
+            data = f.read()
+        total = 0
+        for name, payload in _iter_local_files(data):
+            normalized = name.replace('\\', '/').lower()
+            if not normalized.endswith('.zax') or '/multiplayer/' not in normalized:
+                continue
+            lines = payload.decode('latin-1').replace('\r\n', '\n').split('\n')
+            idx = 0
+            while idx < len(lines):
+                if not lines[idx].strip().startswith('Level Part='):
+                    idx += 1
+                    continue
+                start, end = _find_block(lines, idx)
+                if any(l.strip() == 'Activity=CDoorAI' for l in lines[start:end]):
+                    cls = lines[idx].strip().split('=', 1)[1]
+                    self.assertEqual(cls, 'CEntityAnimated',
+                                     f'{name}: door part class {cls!r}')
+                    total += 1
+                idx = end
+        self.assertEqual(total, 333)
+
+    def test_swander_block_absent_without_switch_tables(self):
+        layout = build_scratch_layout(
+            zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA + zax_patch.SCRATCH_OFF,
+            zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF,
+            zax_patch.NUM_BOT_NAMES,
+            zax_patch.NAME_SLOT_SIZE,
+            zax_patch.NAME_SLOT_ASCII,
+            cfg.WEAPON_SPEEDS_MAX,
+            overlay_vertex_max=cfg.OVERLAY_VERTEX_MAX,
+            overlay_edge_max=cfg.OVERLAY_EDGE_MAX,
+        )
+        self.assertFalse(layout.has_field('bot_switch_target'))
+        self.assertFalse(layout.has_field('switch_wander_chance'))
+
+
 class PatcherTests(unittest.TestCase):
     def test_patch_manifest_names_and_targets_are_valid(self):
         names = [patch.name for patch in zax_patch.ENABLED_PATCHES]
@@ -935,8 +1032,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '3b8abeda3f55655dcb03f768164ec7a38ec25ba26a2fd5db0466211370c7078a'
-    HOOK_ENTRY_SIZE = 32479
+    SECTION_SHA256 = '68ac2b72dc195ba89206ef7e65d53752342fb71811a773dfbd400ae4eafcbf97'
+    HOOK_ENTRY_SIZE = 33490
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

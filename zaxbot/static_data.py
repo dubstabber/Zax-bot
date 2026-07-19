@@ -55,6 +55,8 @@ DUMP_TAGS = (
     ('tag_proute', 'proute'),
     # Dropped-flag pursuit state (drop positions/valid + per-bot latches).
     ('tag_dpursuit', 'dpursuit'),
+    # Roam switch wander-bump state (per-bot bump latches + census/knob).
+    ('tag_swander', 'swander'),
 )
 
 
@@ -594,6 +596,7 @@ def write_static_scratch_data(
     door_edge_radius_sq=1600.0,
     switch_map_name_slot=0,
     overlay_switch_color=(128, 255, 255, 255),
+    switch_wander_chance=0,
     ctf_drop_pursue_enabled=False,
     ctf_drop_pursue_radius_sq=122500.0,
     ctf_drop_reached_radius_sq=576.0,
@@ -891,6 +894,12 @@ def write_static_scratch_data(
             tuple(m for m in door_maps if m.switches),
             switch_map_name_slot,
         )
+    if layout.has_field('switch_wander_chance'):
+        layout.write(section, scratch_off, 'switch_wander_chance',
+                     struct.pack('<I', max(0, min(100, int(switch_wander_chance)))))
+        # switch_node starts unbound until load_switches binds it per match.
+        layout.write(section, scratch_off, 'switch_node',
+                     b'\xFF' * layout.field('switch_node').size)
     # Pickup self-registration master switch (per-frame CPickupAI detour).
     if layout.has_field('pickup_register_enabled'):
         layout.write(section, scratch_off, 'pickup_register_enabled',

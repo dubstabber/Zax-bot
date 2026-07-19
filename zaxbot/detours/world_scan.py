@@ -24,6 +24,7 @@ outputs flow back through ``bot_pickup_{x,y}_cache[slot]`` and
 
 from .. import addresses as ax
 from .. import config as cfg
+from .. import door_data
 from ..asm import Asm, le32
 from ..layout import ScratchLayout
 
@@ -1393,6 +1394,20 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xBF' + le32(switch_flags_va))                      # edi = switch_flags
         a.raw(b'\xB9' + le32(cfg.SWITCH_TABLE_MAX))                 # ecx = flag bytes
         a.raw(b'\xF3\xAA')                                          # rep stosb (eax still 0)
+        if layout.has_field('switch_node') and layout.has_field('bot_switch_target'):
+            # Per-match wander-bump state: switch_node unbound until the bind
+            # loop below (build_flag_routes also binds, but only on CTF
+            # matches — DM roamers need the binding too); the per-bot
+            # latch/cooldown/patience/census arrays are contiguous, one clear
+            # covers all four.
+            a.raw(b'\xBF' + le32(layout.va('switch_node')))         # edi = switch_node
+            a.raw(b'\xB9' + le32(cfg.SWITCH_TABLE_MAX))             # ecx = table max
+            a.raw(b'\x83\xC8\xFF')                                  # eax = -1
+            a.raw(b'\xF3\xAB')                                      # rep stosd
+            a.raw(b'\xBF' + le32(layout.va('bot_switch_target')))   # edi = per-bot block
+            a.raw(b'\xB9' + le32(4 * cfg.MAX_BOT_SLOTS))            # target+cd+try+snap
+            a.raw(b'\x31\xC0')                                      # eax = 0
+            a.raw(b'\xF3\xAB')                                      # rep stosd
         a.raw(b'\xA1' + le32(ax.MAP_NAME_CSTRING_VA))               # eax = [map CString header]
         a.raw(b'\x85\xC0'); a.jz('lsw_done')
         a.raw(b'\x83\xC0' + bytes([ax.MAP_NAME_ASCII_OFFSET]))      # eax = map name ASCII
@@ -1461,6 +1476,121 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xBF' + le32(switch_pairs_va))                      # edi = live switch_pairs
         a.raw(b'\xF3\xA5')                                          # rep movsd (ecx = count dwords)
 
+        if layout.has_field('switch_node') and layout.has_field('sww_spill'):
+            # Bind each live switch to its nearest graph node (wp_load ran
+            # earlier in detour_df90, so the graph is in). Sits after the
+            # pairs copy, so pairless maps (relay/bin-only switches) skip it —
+            # the wander-bump only targets door-opening switches, which by
+            # definition carry pairs. The loop index must survive
+            # wp_find_nearest — spill it in sww_spill.
+            a.raw(b'\x83\x3D' + le32(layout.va('overlay_vertex_count')) + b'\x00')
+            a.jz('lsw_done')                                        # no graph -> unbound
+            a.raw(b'\xC7\x05' + le32(layout.va('sww_spill')) + le32(0))
+            a.label('lsw_bind_loop')
+            a.raw(b'\xA1' + le32(layout.va('sww_spill')))           # eax = s
+            a.raw(b'\x3B\x05' + le32(switch_count_va))              # s >= switch_count?
+            a.jae('lsw_done')
+            a.raw(b'\x83\xF8' + bytes([cfg.SWITCH_TABLE_MAX]))      # s >= table max?
+            a.jae('lsw_done')
+            a.raw(b'\x8B\x0C\xC5' + le32(switch_table_va))          # ecx = switch.x
+            a.raw(b'\x89\x0D' + le32(layout.va('wp_scratch')))
+            a.raw(b'\x8B\x0C\xC5' + le32(switch_table_va + 4))      # ecx = switch.y
+            a.raw(b'\x89\x0D' + le32(layout.va('wp_scratch') + 4))
+            a.call_lbl('wp_find_nearest')                           # ebx = nearest or -1
+            a.raw(b'\xA1' + le32(layout.va('sww_spill')))           # eax = s
+            a.raw(b'\x89\x1C\x85' + le32(layout.va('switch_node'))) # switch_node[s] = ebx
+            a.raw(b'\xFF\x05' + le32(layout.va('sww_spill')))       # ++s
+            a.jmp('lsw_bind_loop')
+
         a.label('lsw_done')
         a.raw(b'\x61')                                              # popad
+        a.raw(b'\xC3')
+
+    # =====================================================================
+    # switch_blocked_census(ECX = switch idx) -> EAX = number of paired doors
+    # currently blocked. Shared by switch_wander_check (candidate filter +
+    # roll-time census) and the follower's bump-approach block (success = the
+    # census CHANGED since latch — registers for openers AND togglers).
+    # Clobbers edx/esi/ebx; preserves ecx. Bounded by the live pair count and
+    # the static cap.
+    #
+    # switch_wander_check(ECX = current node idx) -> EAX = switch idx+1 to
+    # bump, or 0. Called from the follower's roam fallback (inside its pushad
+    # frame; may clobber GPRs). Mirrors portal_wander_check: the FIRST
+    # door-opening switch bound to this node with >=1 paired door blocked
+    # (toggle-safety: a toggler with all its doors open is never bumped shut)
+    # rolls RNG(0..99) < switch_wander_chance; the census at roll time lands
+    # in sww_census for the caller to snapshot into bot_switch_snap.
+    # =====================================================================
+    if not (
+        layout.has_field('bot_switch_target')
+        and layout.has_field('switch_node')
+        and layout.has_field('door_blocked')
+        and layout.has_field('sww_spill')
+    ):
+        a.label('switch_blocked_census')
+        a.raw(b'\x31\xC0\xC3')                                      # xor eax,eax; ret
+        a.label('switch_wander_check')
+        a.raw(b'\x31\xC0\xC3')                                      # xor eax,eax; ret
+    else:
+        a.label('switch_blocked_census')
+        a.raw(b'\x31\xC0')                                          # eax = 0 (census)
+        a.raw(b'\x31\xD2')                                          # edx = 0 (p)
+        a.label('sbc_loop')
+        a.raw(b'\x3B\x15' + le32(layout.va('switch_pair_count')))   # p >= pair_count?
+        a.jae('sbc_done')
+        a.raw(b'\x81\xFA' + le32(cfg.SWITCH_PAIR_MAX))              # p >= pair cap?
+        a.jae('sbc_done')
+        a.raw(b'\x8B\x34\x95' + le32(layout.va('switch_pairs')))    # esi = pairs[p]
+        a.raw(b'\x0F\xB7\xDE')                                      # ebx = low16 (switch idx)
+        a.raw(b'\x39\xCB')                                          # cmp ebx, ecx
+        a.jnz('sbc_next')
+        a.raw(b'\xC1\xEE\x10')                                      # esi >>= 16 (door idx)
+        a.raw(b'\x3B\x35' + le32(layout.va('door_count')))          # door idx valid?
+        a.jae('sbc_next')
+        a.raw(b'\x83\x3C\xB5' + le32(layout.va('door_blocked')) + b'\x00')
+        a.jz('sbc_next')                                            # open -> not counted
+        a.raw(b'\x40')                                              # ++census
+        a.label('sbc_next')
+        a.raw(b'\x42')                                              # ++p
+        a.jmp('sbc_loop')
+        a.label('sbc_done')
+        a.raw(b'\xC3')
+
+        a.label('switch_wander_check')
+        a.raw(b'\x83\x3D' + le32(layout.va('switch_wander_chance')) + b'\x00')
+        a.jz('swc_zero')
+        a.raw(b'\x31\xFF')                                          # edi = 0 (s)
+        a.label('swc_loop')
+        a.raw(b'\x3B\x3D' + le32(layout.va('switch_count')))        # s >= switch_count?
+        a.jae('swc_zero')
+        a.raw(b'\x83\xFF' + bytes([cfg.SWITCH_TABLE_MAX]))          # s >= table max?
+        a.jae('swc_zero')
+        a.raw(b'\x39\x0C\xBD' + le32(layout.va('switch_node')))     # switch_node[s] == cur?
+        a.jnz('swc_next')
+        a.raw(b'\xF6\x87' + le32(layout.va('switch_flags'))
+              + bytes([door_data.SWITCH_FLAG_OPENS_DOORS]))         # opener class?
+        a.jz('swc_next')
+        a.raw(b'\x51')                                              # push ecx (cur)
+        a.raw(b'\x89\xF9')                                          # ecx = s
+        a.call_lbl('switch_blocked_census')                         # eax = census
+        a.raw(b'\x59')                                              # pop ecx (cur)
+        a.raw(b'\x85\xC0')                                          # census == 0?
+        a.jz('swc_next')                                            # nothing to open
+        a.raw(b'\xA3' + le32(layout.va('sww_census')))              # stash roll-time census
+        a.raw(b'\x89\x3D' + le32(layout.va('sww_spill')))           # spill s (RNG clobbers)
+        a.raw(b'\x6A\x63')                                          # push 99 (high)
+        a.raw(b'\x6A\x00')                                          # push 0  (low)
+        a.raw(b'\xB9' + le32(ax.RNG_OBJ_VA))                        # ecx = RNG instance
+        a.call_va(ax.RNG_SUB)                                       # eax = 0..99 (callee pops)
+        a.raw(b'\x3B\x05' + le32(layout.va('switch_wander_chance')))
+        a.jae('swc_zero')                                           # roll failed -> no bump
+        a.raw(b'\xA1' + le32(layout.va('sww_spill')))               # eax = s
+        a.raw(b'\x40')                                              # eax = s+1
+        a.raw(b'\xC3')
+        a.label('swc_next')
+        a.raw(b'\x47')                                              # ++s
+        a.jmp('swc_loop')
+        a.label('swc_zero')
+        a.raw(b'\x31\xC0')                                          # eax = 0
         a.raw(b'\xC3')

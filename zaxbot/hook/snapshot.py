@@ -267,6 +267,18 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         emit_chunk(layout.va('tag_dpursuit'),
                    b'\xB8' + le32(layout.va('flag_drop_valid')),
                    dpursuit_dump_len, 'snap_skip_dpursuit')
+    # Roam switch wander-bump state: one contiguous chunk from
+    # bot_switch_target through sww_census (per-bot bump latch, re-roll
+    # cooldown, press patience, latch-time census + the chance knob and
+    # spills) — one R press pins which bots are pressing which switch and
+    # why a roll did or did not fire.
+    if layout.has_field('tag_swander') and layout.has_field('bot_switch_target'):
+        swander_dump_len = (layout.field('sww_census').offset
+                            + layout.field('sww_census').size
+                            - layout.field('bot_switch_target').offset)
+        emit_chunk(layout.va('tag_swander'),
+                   b'\xB8' + le32(layout.va('bot_switch_target')),
+                   swander_dump_len, 'snap_skip_swander')
 
     # Waypoint-graph probe. wp_compute populates wp_diag_data[0..7]:
     #   [+0x00] MGR, [+0x04] WM, [+0x08] LV, [+0x0C] WPM,

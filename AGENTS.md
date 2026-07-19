@@ -571,7 +571,18 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     rings looked permanently stale (toggling the overlay off restored FPS,
     let a scan through, and "fixed" it). Characters are excluded from the
     cache by the same shield as the flag-anchor cache (a bot standing in an
-    OPEN doorway is SOLID but is not a door).
+    OPEN doorway is SOLID but is not a door). The cache also carries a
+    **CEntityAnimated CLASS GATE** (`sub_416790` is-a against the
+    `sub_48DE10` descriptor): all 333 MP CDoorAI parts are authored
+    `Level Part=CEntityAnimated` (census pinned in tests), while Hydroplant
+    Bouncefest authors TWO always-solid unnamed CEntityBase wall-corner
+    models at the EXACT anchor position of every door — they filled cache
+    slots and, since the refresh ORs the cached SOLID bits, pinned
+    `door_blocked=1` forever (live-diagnosed 2026-07-19: permanent double
+    rings on genuinely open doors, on this map only; evicting the props
+    live flipped blocked to [0,0,0,0] within a frame and the un-gated scan
+    re-polluted it 2 s later). CEntityBase is CEntityAnimated's PARENT, so
+    the is-a test rejects the props and admits any animated subclass.
   - **Overlay markers**: every door draws as a small oval in the door color;
     a CLOSED door gets a second double-radius ring (in 8-bit palettized mode
     all B=255 markers share a hue, so the ring — not the color — signals state).
@@ -681,10 +692,10 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     so `ctf_next_hop` re-plans door-aware from the reachable node (offline-
     verified: 15→14 across closed door 9 re-plans 15→16; 5→6 across closed door
     15 re-plans 5→1). Fires only in that exact stuck state — door open or
-    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~4.3 KB below
-    `SCRATCH_OFF` (hook_entry_size 32450 of 36864 after the dropped-flag
-    pursuit layer + its pad-hop fix; the boundary moved 0x8000→0x9000 with
-    the section at 0x18000). When it runs low again, bump
+    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~3.3 KB below
+    `SCRATCH_OFF` (hook_entry_size 33490 of 36864 after the switch
+    wander-bump layer + the door-cache class gate; the boundary moved
+    0x8000→0x9000 with the section at 0x18000). When it runs low again, bump
     `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
     `flag_routing_active`) was added for diagnosing route commitment.
@@ -747,6 +758,32 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     Known noise: an attacker near its own base may bump a near switch whose
     door its team could open anyway (harmless 1-2 hop detour; the opened
     door excludes the switch from the next round).
+  - **Roam-time WANDER-BUMP** (`cfg.SWITCH_WANDER_ENABLED`, the "switches are
+    part of the random path" layer; live-motivated on Hydroplant Bouncefest
+    2026-07-19 — seek only serves ROUTED bots, that map's seek gate can
+    structurally never trip (base-to-base is equal-cost around every door),
+    and a two-flags-away standoff had both bots in permanent missing-flag
+    roam, so switches were NEVER touched): a bot taking the roam fallback
+    (DM roam, goal-less CTF search, routing fallback) that arrives at a node
+    hosting a door-opening switch with >=1 paired door currently blocked
+    (same toggle-safety as seek candidates) rolls RNG(0..99) <
+    `SWITCH_WANDER_CHANCE` (35) via `switch_wander_check` (world_scan.py)
+    and latches `bot_switch_target[slot]`; the follower final-approaches the
+    switch CENTER through the standard watchdog + press patience
+    (`SWITCH_WANDER_PRESS_PATIENCE`, mirror of the pad/door patience).
+    Success = the switch's blocked-paired-door census CHANGED since latch
+    (`switch_blocked_census`, shared helper — registers for openers AND
+    togglers, and stops the press before a re-bump re-closes a toggler);
+    success or exhausted patience arms `bot_switch_cd[slot]`
+    (`SWITCH_WANDER_COOLDOWN_FRAMES`, 900) so a bot cannot orbit one switch.
+    Deliberately NOT gated on routing suspension (unlike the portal wander
+    roll): a bump is local and can open the exact door the bot is wedged at.
+    A dropped-flag pursuit outranks the bump; latch drops on
+    respawn/death/teleport-jump/match change/stale idx. `switch_node[]` is
+    now bound per match in `load_switches` (not just `build_flag_routes`,
+    which is CTF-only) so DM roamers bump too; the per-bot state block
+    clears there as well. R-snapshot chunk `swander` dumps the whole block
+    (latch/cd/patience/census + chance knob).
 - General world-entity enumeration (`detours/entity_scan.py:scan_entities`,
   gated by `cfg.SCAN_ENTITIES_ENABLED`). The long-standing blocker for object
   detection was that there is no flat entity list: `mgr+0x290` is players,
@@ -951,7 +988,12 @@ Older emitted labels or disabled detours are not active unless they appear in
   SWITCH-SEEK is DONE (see the switch bullet in "Current state"): sealed or
   door-shortcut-blocked bots route to the best reachable door-opening switch,
   bump it, and the door_dirty/epoch machinery re-plans through the opened
-  door — chaining across rounds. Remaining refinements: the final-approach
+  door — chaining across rounds. The roam-time WANDER-BUMP is DONE too
+  (same bullet): goal-less/roaming bots occasionally press adjacent blocked
+  switches, so switch+door interaction no longer requires a routed goal
+  (built 2026-07-19, offline-verified; first live pass pending — note "bot
+  collision fires a CollideTrigger" is still live-unverified, this layer is
+  the test). Remaining refinements: the final-approach
   wedge (goal node reachable but the last straight leg to the flag blocked
   by a pillar) does not trigger a seek directly, only the wedge/suspension
   roam; and the pair-blocked candidate filter could additionally skip doors

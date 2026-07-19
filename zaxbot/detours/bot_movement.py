@@ -233,6 +233,10 @@ def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_drop_cd')) + le32(0))      # fresh pursuit cooldown
         if layout.has_field('bot_drop_try'):
             a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_drop_try')) + le32(0))  # fresh press patience
+    if layout.has_field('bot_switch_target'):
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_switch_target')) + le32(0))  # drop switch bump
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_switch_cd')) + le32(0))      # fresh roll cooldown
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_switch_try')) + le32(0))     # fresh press patience
     a.raw(b'\x89\x14\x8D' + le32(bot_last_char_va))       # bot_last_char[slot] = edx
     a.label('s542360_char_same')
 
@@ -314,6 +318,9 @@ def _emit_stuck_detection(a: Asm, layout: ScratchLayout) -> None:
             # away now — drop the pursuit (the entry scan re-latches if it is
             # genuinely still nearby at the exit).
             a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_drop_target')) + le32(0))
+        if layout.has_field('bot_switch_target'):
+            # Same for a latched switch bump — the switch is an arena away.
+            a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_switch_target')) + le32(0))
         if layout.has_field('bot_portal_cd'):
             # Teleported: arm the wander-entry cooldown so the roam roll at
             # the exit node (which IS the return pad's node) can't bounce the
@@ -749,6 +756,29 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         flag_present_mv_va    = layout.va('flag_present')
         flag_count_mv_va      = layout.va('flag_count')
 
+    # Roam switch wander-bump. bot_switch_target[slot] (switch idx+1) is
+    # latched by the switch_wander_check roll at a roam arrival (the fallback
+    # path — DM roam, CTF missing-flag search, routing fallback); while
+    # latched the follower steers at the SWITCH CENTER through the same
+    # watchdog + press patience as the pad approach so the repeatable
+    # CollideTrigger fires. Success = the switch's blocked-paired-door census
+    # CHANGED since latch (openers AND togglers both register); success or
+    # exhausted patience arms the per-bot re-roll cooldown. A dropped-flag
+    # pursuit outranks a bump.
+    switch_wander = (cfg.SWITCH_WANDER_ENABLED
+                     and layout.has_field('bot_switch_target')
+                     and layout.has_field('switch_node')
+                     and layout.has_field('switch_table')
+                     and layout.has_field('sww_census'))
+    if switch_wander:
+        bot_switch_target_va = layout.va('bot_switch_target')
+        bot_switch_cd_va     = layout.va('bot_switch_cd')
+        bot_switch_try_va    = layout.va('bot_switch_try')
+        bot_switch_snap_va   = layout.va('bot_switch_snap')
+        sww_census_va        = layout.va('sww_census')
+        switch_table_sw_va   = layout.va('switch_table')
+        switch_count_sw_va   = layout.va('switch_count')
+
     # === Waypoint following =============================================
     a.raw(b'\x83\x3D' + le32(wp_follow_enabled_va) + b'\x00')
     a.jz('s542360_fallback_zero')
@@ -1120,6 +1150,91 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # node logic starts clean
         a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
         a.label('s542360_drp_done')
+    if switch_wander:
+        # --- Roam switch bump approach (latch-driven) ----------------------
+        # Runs after the pad/drop latches (both outrank a bump). Fast path
+        # when unlatched and off-cooldown: three loads + two jz.
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        # Re-roll cooldown ticks once per think; while it runs there is no
+        # latch (every path that arms the cooldown also clears the latch).
+        a.raw(b'\x8B\x04\x8D' + le32(bot_switch_cd_va))   # eax = cd[slot]
+        a.raw(b'\x85\xC0'); a.jz('s542360_sww_cd0')
+        a.raw(b'\x48')                                    # dec eax
+        a.raw(b'\x89\x04\x8D' + le32(bot_switch_cd_va))
+        a.jmp('s542360_sww_done')
+        a.label('s542360_sww_cd0')
+        a.raw(b'\x8B\x04\x8D' + le32(bot_switch_target_va))  # eax = latch (idx+1 / 0)
+        a.raw(b'\x85\xC0'); a.jz('s542360_sww_done')
+        if drop_move:
+            # A dropped-flag pursuit latched meanwhile outranks the bump —
+            # hand over cleanly (no cooldown: the bump never ran).
+            a.raw(b'\x83\x3C\x8D' + le32(bot_drop_target_va) + b'\x00')
+            a.jnz('s542360_sww_clear')
+        a.raw(b'\x48')                                    # eax = switch idx
+        a.raw(b'\x3B\x05' + le32(switch_count_sw_va))     # stale idx (map change)?
+        a.jae('s542360_sww_clear')
+        # Census changed since latch -> the bump fired (a paired door opened,
+        # or a toggler flipped its set). Back off with the full cooldown so
+        # continued pressing cannot re-toggle the doors shut.
+        a.raw(b'\x50')                                    # push eax (idx)
+        a.raw(b'\x89\xC1')                                # ecx = idx
+        a.call_lbl('switch_blocked_census')               # eax = census (clobbers ebx/edx/esi)
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot (reload)
+        a.raw(b'\x3B\x04\x8D' + le32(bot_switch_snap_va)) # census == snapshot?
+        a.raw(b'\x58')                                    # pop eax (idx; EFLAGS kept)
+        a.jnz('s542360_sww_backoff')
+        # desired = switch center - bot
+        a.raw(b'\xD9\x04\xC5' + le32(switch_table_sw_va)) # fld switch.x
+        a.raw(b'\xD8\x25' + le32(bot_pos_va))             # fsub bot.x
+        a.raw(b'\xD9\x1D' + le32(dx_accum_va))            # fstp dx_accum
+        a.raw(b'\xD9\x04\xC5' + le32(switch_table_sw_va + 4))  # fld switch.y
+        a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))         # fsub bot.y
+        a.raw(b'\xD9\x1D' + le32(dy_accum_va))            # fstp dy_accum
+        # Watchdog — mirror of the pad approach: strict dsq improvement
+        # resets wp_try; stalling ramps it (drives the wall-slide sweep at
+        # the emit); each full progress-timeout grants a fresh cycle up to
+        # SWITCH_WANDER_PRESS_PATIENCE before the cooldown blacklists the
+        # attempt (the prop is collidable, so the final pixels never
+        # "arrive" — patience, not arrival, ends a successful press).
+        a.raw(b'\xD9\x05' + le32(dx_accum_va))            # fld dx
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xD9\x05' + le32(dy_accum_va))            # fld dy
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xDE\xC1')                                # faddp -> ST0 = dsq(bot, switch)
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8B\x04\x8D' + le32(stuck_count_va))     # eax = stuck_count[slot]
+        a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES]))
+        a.jae('s542360_sww_no_progress')                  # physically pinned
+        a.raw(b'\xD9\x04\x8D' + le32(wp_best_dsq_va))     # fld best (ST0=best, ST1=dsq)
+        a.raw(b'\xDF\xF1')                                # fcomip st0,st1 (best:dsq, pop)
+        a.jbe('s542360_sww_no_progress')                  # best <= dsq -> no improvement
+        a.raw(b'\xD9\x1C\x8D' + le32(wp_best_dsq_va))     # best = dsq (pop)
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.jmp('s542360_emit')
+        a.label('s542360_sww_no_progress')
+        a.raw(b'\xDD\xD8')                                # fstp st(0) (drop dsq)
+        a.raw(b'\xFF\x04\x8D' + le32(wp_try_va))          # ++wp_try[slot]
+        a.raw(b'\x8B\x04\x8D' + le32(wp_try_va))          # eax = wp_try
+        a.raw(b'\x3B\x05' + le32(wp_progress_timeout_va))
+        a.jb('s542360_emit')                              # keep pressing; slide sweeps
+        a.raw(b'\xFF\x04\x8D' + le32(bot_switch_try_va))  # ++patience used
+        a.raw(b'\x83\x3C\x8D' + le32(bot_switch_try_va)
+              + bytes([cfg.SWITCH_WANDER_PRESS_PATIENCE]))
+        a.ja('s542360_sww_backoff')                       # budget exhausted
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))     # fresh cycle
+        a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))
+        a.jmp('s542360_emit')                             # keep pressing
+        a.label('s542360_sww_backoff')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot (reload)
+        a.raw(b'\xC7\x04\x8D' + le32(bot_switch_cd_va)
+              + le32(cfg.SWITCH_WANDER_COOLDOWN_FRAMES))
+        a.label('s542360_sww_clear')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot (reload)
+        a.raw(b'\xC7\x04\x8D' + le32(bot_switch_target_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(bot_switch_try_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # node logic starts clean
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.label('s542360_sww_done')
     if door_reroute:
         # --- Closed-door commitment recovery -------------------------------
         # If the (prev -> cur) edge we are latched onto is bound to a currently
@@ -1734,6 +1849,33 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
                 a.raw(b'\xC7\x04\x9D' + le32(layout.va('bot_pad_try')) + le32(0))
             a.jmp('s542360_wp_steer')
             a.label('s542360_wp_no_wander')
+        if switch_wander:
+            # Roam switch-bump roll: same arrival, after the pad roll (a pad
+            # entry outranks a bump — it rewires the whole roam). Skipped
+            # while the per-bot cooldown runs or a bump is already latched;
+            # deliberately NOT skipped during routing suspension — unlike a
+            # teleport, a bump is local and can open the exact door the bot
+            # is wedged at (the suspension roam brought it here).
+            a.raw(b'\x8B\x1D' + le32(bot_slot_tmp_va))   # ebx = slot
+            a.raw(b'\x83\x3C\x9D' + le32(bot_switch_cd_va) + b'\x00')
+            a.jnz('s542360_wp_no_sww')                   # cooling down -> no roll
+            a.raw(b'\x83\x3C\x9D' + le32(bot_switch_target_va) + b'\x00')
+            a.jnz('s542360_wp_no_sww')                   # already latched
+            a.raw(b'\x51')                               # push cur (ecx)
+            a.raw(b'\x52')                               # push prev (edx)
+            a.call_lbl('switch_wander_check')            # eax = switch idx+1 or 0 (in: ecx=cur)
+            a.raw(b'\x5A')                               # pop edx (prev)
+            a.raw(b'\x59')                               # pop ecx (cur)
+            a.raw(b'\x85\xC0'); a.jz('s542360_wp_no_sww')
+            a.raw(b'\x8B\x1D' + le32(bot_slot_tmp_va))   # ebx = slot
+            a.raw(b'\x89\x04\x9D' + le32(bot_switch_target_va))  # latch = idx+1
+            a.raw(b'\xA1' + le32(sww_census_va))         # eax = roll-time census
+            a.raw(b'\x89\x04\x9D' + le32(bot_switch_snap_va))
+            a.raw(b'\xC7\x04\x9D' + le32(bot_switch_try_va) + le32(0))
+            a.raw(b'\xC7\x04\x9D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))
+            a.raw(b'\xC7\x04\x9D' + le32(wp_try_va) + le32(0))
+            a.jmp('s542360_wp_steer')
+            a.label('s542360_wp_no_sww')
         a.call_lbl('wp_advance')                         # fallback: random/non-prev neighbour
         a.label('s542360_wp_have_next')
     else:
@@ -2211,6 +2353,8 @@ def _emit_dead_and_zero_return(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pad_try')) + le32(0))
     if layout.has_field('bot_drop_target'):
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_drop_target')) + le32(0))    # drop flag pursuit
+    if layout.has_field('bot_switch_target'):
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_switch_target')) + le32(0))  # drop switch bump
     # fall through to zero-vector return.
 
     # --- Zero-vector return (panic / NULL char / degenerate normalize) ---

@@ -636,6 +636,30 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         # standing in a doorway is never cached as a door piece. Entities are
         # cached regardless of SOLID state — the per-frame refresh needs the
         # OPEN door entity too, to see it close again.
+        #
+        # CLASS GATE: only CEntityAnimated entities may enter the cache. All
+        # 333 CDoorAI door parts across the 10 MP door maps are authored
+        # `Level Part=CEntityAnimated` (Data.dat census, pinned in tests) —
+        # a door must animate to open. Live CE on Hydroplant Bouncefest
+        # caught the counter-case this gate fixes: every door anchor there
+        # hosts TWO always-solid unnamed CEntityBase scenery models (vtbl
+        # 0x5F1C4C, "Interior Hall Wall Corner" pieces) at the EXACT anchor
+        # position alongside the real animated door (vtbl 0x5F2010, named
+        # "Doorleft"/...), and since door_refresh_state ORs the cached SOLID
+        # bits, door_blocked was pinned 1 forever — permanent double rings
+        # on the overlay and doors the router treated as closed while
+        # genuinely open. sub_416790 walks the inheritance chain (CEntityBase
+        # is CEntityAnimated's PARENT, so the props test false while any
+        # animated subclass tests true); the descriptor accessor is a cheap
+        # two-instruction lazy getter after its first call.
+        a.raw(b'\x83\x3D' + le32(door_count_va) + b'\x00')  # any doors this map?
+        a.jz('spa_ent_next')                                # no -> skip the pass
+        a.call_va(ax.SUB_48DE10_VA)                         # eax = CEntityAnimated desc
+        a.raw(b'\x85\xC0'); a.jz('spa_ent_next')            # desc alloc failed -> skip
+        a.raw(b'\x50')                                      # push classdesc (arg)
+        a.raw(b'\x8B\x0D' + le32(cur_va))                   # ecx = ent (this)
+        a.call_va(ax.SUB_416790_VA)                         # __thiscall is-a, ret 4 -> al
+        a.raw(b'\x84\xC0'); a.jz('spa_ent_next')            # not animated -> never a door
         a.raw(b'\x31\xF6')                                  # xor esi, esi (door i)
         a.label('spa_door_match')
         a.raw(b'\x3B\x35' + le32(door_count_va))            # cmp esi, [door_count]

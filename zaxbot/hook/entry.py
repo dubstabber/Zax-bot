@@ -284,6 +284,8 @@ def build_hook(section_va_abs):
         door_edge_radius_sq=cfg.DOOR_EDGE_RADIUS_SQ,
         switch_map_name_slot=cfg.SWITCH_MAP_NAME_SLOT,
         overlay_switch_color=cfg.OVERLAY_SWITCH_COLOR,
+        switch_wander_chance=(cfg.SWITCH_WANDER_CHANCE
+                              if cfg.SWITCH_WANDER_ENABLED else 0),
         ctf_drop_pursue_enabled=cfg.CTF_DROPPED_FLAG_ENABLED,
         ctf_drop_pursue_radius_sq=cfg.CTF_DROP_PURSUE_RADIUS_SQ,
         ctf_drop_reached_radius_sq=cfg.CTF_DROP_REACHED_RADIUS_SQ,

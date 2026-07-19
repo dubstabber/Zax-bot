@@ -819,6 +819,27 @@ SWITCH_SEEK_TIMEOUT_FRAMES = 900   # ~15 s at 60 Hz before an active seek expire
 # BENEFIT check (walk+post-open route must beat the current open route), so
 # a low trigger threshold cannot cause silly cross-map detours.
 SWITCH_SEEK_SHORTCUT_GAIN  = 5
+# Roam-time switch WANDER-BUMP (the "switches are part of the random path"
+# layer). The seek machinery above only serves ROUTED bots — a goal-less bot
+# (DM roam, CTF missing-flag search, suspension roam) never requests one, and
+# some maps structurally never trip the seek gate at all (Hydroplant
+# Bouncefest: base-to-base is equal-cost around every door, live-diagnosed
+# 2026-07-19 with both flags away pinning both bots in permanent roam). A
+# ROAMING bot that ARRIVES at a node hosting a door-opening switch with >=1
+# paired door currently blocked (the same toggle-safety gate as seek
+# candidates: a toggler with its doors open is never bumped shut) now rolls
+# RNG(0..99) < SWITCH_WANDER_CHANCE and, on success, final-approaches the
+# switch CENTER to physically BUMP it — through the standard watchdog +
+# press-patience machinery (mirror of the pad/door patience). Success is a
+# CHANGE in the switch's blocked-paired-door census (works for openers AND
+# togglers); success or exhausted patience arms the per-bot cooldown so the
+# bot cannot orbit one switch. Deliberately NOT gated on routing suspension:
+# unlike the portal wander roll (which can fling a suspended bot across the
+# map), a bump is local and can open the exact door the bot is wedged at.
+SWITCH_WANDER_ENABLED = True
+SWITCH_WANDER_CHANCE = 35            # percent per roam arrival at a blocked switch's node
+SWITCH_WANDER_COOLDOWN_FRAMES = 900  # ~15 s between bump attempts per bot
+SWITCH_WANDER_PRESS_PATIENCE = 2     # fresh watchdog cycles pressing the switch
 # Door-press patience. Live trace (Battle on the Ice, 2026-07-18): a red bot
 # wedged at its own closed walk-up door entered the door's tiny trigger oval
 # via the wall-slide sweep after ~2 s — the SAME timescale as the routed

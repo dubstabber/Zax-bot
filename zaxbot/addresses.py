@@ -147,6 +147,11 @@ ITEM_DEF_REGISTRY_VA        = 0x6C0C08   # inventory item-definition registry
 SUB_48D8F0_VA               = 0x48D8F0   # __thiscall(registry, index) -> definition*
 SUB_5B5F20_VA               = 0x5B5F20   # () -> CZaxInventoryItemDefinition class desc
 SUB_416790_VA               = 0x416790   # __thiscall(obj, class_desc) -> bool is-a
+SUB_48DE10_VA               = 0x48DE10   # CEntityAnimated class-desc accessor (lazy-init
+                                         # global dword_6BDD98; also vtbl 0x5F2010 slot 2).
+                                         # All 333 MP CDoorAI door parts are authored
+                                         # `Level Part=CEntityAnimated` (Data.dat census) —
+                                         # the door-cache class gate filters on this.
 SUB_5B7AB0_VA               = 0x5B7AB0   # __thiscall(item_def) -> default entity
 SUB_416760_VA               = 0x416760   # __thiscall(default_entity, 0, -1) -> clone item
 SUB_417710_VA               = 0x417710   # __thiscall(size_in_ecx) -> operator new-ish
