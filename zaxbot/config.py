@@ -811,14 +811,18 @@ SWITCH_DETECT_ENABLED = True
 # that switch until the next door-state change.
 SWITCH_SEEK_ENABLED = True
 SWITCH_SEEK_TIMEOUT_FRAMES = 900   # ~15 s at 60 Hz before an active seek expires
-# full+GAIN < open hops triggers the shortcut request. Live-calibrated on
-# Battle on the Ice: the directional gap at the blue base node is exactly 8
-# hops for a red carrier (full 21 vs open 29 — the red door is passable for
-# its own team, unlike the physical-semantics offline sim's 10), so 8 missed
-# the request by one. The request is cheap and activation carries its own
-# BENEFIT check (walk+post-open route must beat the current open route), so
-# a low trigger threshold cannot cause silly cross-map detours.
-SWITCH_SEEK_SHORTCUT_GAIN  = 5
+# full+GAIN < open triggers the shortcut request. UNITS: since the weighted-
+# routing change, every BFS distance is PHYSICAL length in WP_EDGE_LEN_QUANTUM
+# (16 px) units, not hops — so GAIN=20 means "the through-door route must be
+# at least ~320 px shorter than the current open route". The motivating case
+# (Hydroplant Bouncefest, live-reported): base-to-base is 9 hops BOTH through
+# the doors and around the top, so the old hop metric saw zero benefit and
+# the seek never fired — but physically the door route is 1899 px vs 2580 px
+# around (42 quanta gap), which clears this threshold comfortably. The
+# request is cheap and activation carries its own BENEFIT check (walk +
+# post-open route must beat the current open route), so a low trigger
+# threshold cannot cause silly cross-map detours. Must stay <= 127 (imm8).
+SWITCH_SEEK_SHORTCUT_GAIN  = 20
 # Roam-time switch WANDER-BUMP (the "switches are part of the random path"
 # layer). The seek machinery above only serves ROUTED bots — a goal-less bot
 # (DM roam, CTF missing-flag search, suspension roam) never requests one, and
@@ -962,6 +966,16 @@ FLAG_ROUTE_MAX        = 2
 # behavior that visibly un-sticks it when the flag state changes), then
 # routing resumes automatically.
 WP_ROUTE_SUSPEND_FRAMES = 240
+# Physical-length routing quantum: every graph edge's traversal cost in the
+# shared BFS (bfs_run — full/open/seek/drop fields alike) is its pixel length
+# divided by this, rounded, min 1. Hop counting was live-refuted on Hydroplant
+# Bouncefest: the through-door route and the around-the-top route are both 9
+# hops, so routing (and the seek benefit gate) saw zero gain from opening the
+# switch-doors even though the door route is 681 px (~26%) shorter. With
+# 16 px quanta a 3000 px map maxes out around ~200 units — far from the
+# 0xFFFFFFFF unreachable sentinel. Teleport pads keep cost 1 (near-free,
+# strongly preferred — matches their old +1 hop).
+WP_EDGE_LEN_QUANTUM = 16.0
 # The failed-edge marker must be RETRIED, not kept forever. Live CE analysis
 # of the reported "carrier stuck near a door" showed the exact loop: the
 # marker held the door edge (15,17) long after the door became passable;

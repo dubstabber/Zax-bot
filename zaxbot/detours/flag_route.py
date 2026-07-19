@@ -68,6 +68,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     if not all(layout.has_field(f) for f in needed):
         # Layout built without routing fields — inert stubs so call_lbl resolves.
         a.label('build_flag_routes'); a.raw(b'\xC3')
+        a.label('build_edge_lens'); a.raw(b'\xC3')
         a.label('rebuild_open_routes'); a.raw(b'\xC3')
         a.label('ctf_pick_goal'); a.raw(b'\xC3')
         a.label('ctf_next_hop'); a.raw(b'\xB8\xFF\xFF\xFF\xFF\xC3')  # mov eax,-1; ret
@@ -108,6 +109,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     VMAX  = cfg.OVERLAY_VERTEX_MAX
     RMAX  = cfg.FLAG_ROUTE_MAX
     ROW   = VMAX * 4                       # flag_dist row stride (bytes) per base
+
+    # Weighted routing (physical-length SPFA): per-edge quantized lengths +
+    # per-node in-queue flags. Present whenever the overlay edge tables are
+    # (same layout gate), i.e. always on routing-capable builds.
+    weighted = layout.has_field('edge_len') and layout.has_field('bfs_inq')
+    if weighted:
+        edge_len_va     = layout.va('edge_len')
+        bfs_inq_va      = layout.va('bfs_inq')
+        elen_quantum_va = layout.va('elen_quantum')
+        assert (VMAX & (VMAX - 1)) == 0, 'SPFA ring mask needs power-of-two VMAX'
 
     # Door-aware rerouting: a SECOND per-base BFS field (flag_dist_open) that
     # SKIPS every graph edge crossing a currently-blocked door, so bots route
@@ -392,16 +403,86 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x61')                                        # popad
     a.raw(b'\xC3')
 
+    # =====================================================================
+    # build_edge_lens: per-match quantized physical edge lengths — the
+    # traversal cost bfs_run adds per edge (weighted SPFA). Hop counting was
+    # live-refuted on Hydroplant Bouncefest: the through-door route and the
+    # around-the-top route TIE at 9 hops, so routing and the seek benefit
+    # gate saw zero gain from opening the switch-doors, yet the door route
+    # is 1899 px vs 2580 px around. All slots default to cost 1 so strict
+    # next-hop descent survives any degenerate edge. Called once per match
+    # from detour_df90 (after wp_load). pushad/popad, no args.
+    # =====================================================================
+    if not weighted:
+        a.label('build_edge_lens')
+        a.raw(b'\xC3')
+    else:
+        a.label('build_edge_lens')
+        a.raw(b'\x60')                                        # pushad
+        a.raw(b'\xBF' + le32(edge_len_va))                    # edi = edge_len
+        a.raw(b'\xB9' + le32(cfg.OVERLAY_EDGE_MAX))           # ecx = edge cap
+        a.raw(b'\xB8\x01\x00\x00\x00')                        # eax = 1 (default cost)
+        a.raw(b'\xFC\xF3\xAB')                                # cld; rep stosd
+        a.raw(b'\x31\xF6')                                    # esi = 0 (e)
+        a.label('bel_loop')
+        a.raw(b'\x3B\x35' + le32(ecount_va))                  # e >= edge_count?
+        a.jae('bel_done')
+        a.raw(b'\x81\xFE' + le32(cfg.OVERLAY_EDGE_MAX))       # e >= cap?
+        a.jae('bel_done')
+        a.raw(b'\x8B\x04\xB5' + le32(edges_va))               # eax = edges[e]
+        a.raw(b'\x0F\xB7\xD8')                                # ebx = i (low16)
+        a.raw(b'\xC1\xE8\x10')                                # eax = j (high16)
+        a.raw(b'\x3B\x1D' + le32(vcount_va))                  # i >= vcount?
+        a.jae('bel_next')
+        a.raw(b'\x3B\x05' + le32(vcount_va))                  # j >= vcount?
+        a.jae('bel_next')
+        a.raw(b'\xD9\x04\xC5' + le32(verts_va))               # fld vx[j]
+        a.raw(b'\xD8\x24\xDD' + le32(verts_va))               # fsub vx[i]
+        a.raw(b'\xD8\xC8')                                    # fmul st,st
+        a.raw(b'\xD9\x04\xC5' + le32(verts_va + 4))           # fld vy[j]
+        a.raw(b'\xD8\x24\xDD' + le32(verts_va + 4))           # fsub vy[i]
+        a.raw(b'\xD8\xC8')                                    # fmul st,st
+        a.raw(b'\xDE\xC1')                                    # faddp -> len^2
+        a.raw(b'\xD9\xFA')                                    # fsqrt -> len px
+        a.raw(b'\xD8\x35' + le32(elen_quantum_va))            # fdiv quantum px/unit
+        a.raw(b'\xDB\x1D' + le32(bfs_u_va))                   # fistp (round-nearest)
+        a.raw(b'\xA1' + le32(bfs_u_va))                       # eax = quantized len
+        a.raw(b'\x83\xF8\x01')                                # cmp eax, 1
+        a.jge('bel_store')                                    # >= 1 -> keep
+        a.raw(b'\xB8\x01\x00\x00\x00')                        # min cost 1
+        a.label('bel_store')
+        a.raw(b'\x89\x04\xB5' + le32(edge_len_va))            # edge_len[e] = eax
+        a.label('bel_next')
+        a.raw(b'\x46')                                        # ++e
+        a.jmp('bel_loop')
+        a.label('bel_done')
+        a.raw(b'\x61')                                        # popad
+        a.raw(b'\xC3')
+
     if door_route:
         # =================================================================
-        # bfs_run: one BFS pass. Inputs (scratch): bfs_start (seed node),
-        # bfs_disti (distance-row base, pre-cleared to -1), bfs_skip (1 =
-        # skip edges crossing currently-blocked doors). Clobbers GPRs.
+        # bfs_run: one WEIGHTED shortest-path pass (SPFA — queue-based
+        # Bellman-Ford; positive edge costs from edge_len[], so it
+        # terminates and yields exact shortest paths). Inputs (scratch):
+        # bfs_start (seed node), bfs_disti (distance-row base, pre-cleared
+        # to -1 = INF), bfs_skip (1 = gate edges crossing currently-blocked
+        # doors). The queue is a VMAX ring (free-running head/tail masked on
+        # access) with per-node in-queue flags (bfs_inq) so a node is
+        # enqueued at most once at a time — max in-flight = VMAX, the ring
+        # never overflows. Distances are physical lengths in
+        # WP_EDGE_LEN_QUANTUM px units (portal hops stay cost 1: teleports
+        # are near-free and strongly preferred). Clobbers GPRs.
         # =================================================================
+        assert weighted, 'door_route builds carry the weighted-routing fields'
         a.label('bfs_run')
+        a.raw(b'\xBF' + le32(bfs_inq_va))                    # edi = bfs_inq
+        a.raw(b'\xB9' + le32(VMAX // 4))                     # ecx = VMAX/4 dwords
+        a.raw(b'\x31\xC0')                                   # eax = 0
+        a.raw(b'\xFC\xF3\xAB')                               # cld; rep stosd (clear inq)
         a.raw(b'\x8B\x1D' + le32(bfs_start_va))              # ebx = start node
         a.raw(b'\x8B\x0D' + le32(bfs_disti_va))              # ecx = disti
         a.raw(b'\xC7\x04\x99\x00\x00\x00\x00')               # disti[start] = 0
+        a.raw(b'\xC6\x83' + le32(bfs_inq_va) + b'\x01')      # inq[start] = 1
         a.raw(b'\x89\x1D' + le32(bfs_queue_va))              # queue[0] = start
         a.raw(b'\xC7\x05' + le32(bfs_head_va) + le32(0))     # head = 0
         a.raw(b'\xC7\x05' + le32(bfs_tail_va) + le32(1))     # tail = 1
@@ -409,10 +490,12 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.label('bfsr_loop')
         a.raw(b'\xA1' + le32(bfs_head_va))                    # eax = head
         a.raw(b'\x3B\x05' + le32(bfs_tail_va))               # cmp eax, tail
-        a.jae('bfsr_done')
-        a.raw(b'\x8B\x0C\x85' + le32(bfs_queue_va))         # ecx = queue[head]
+        a.jae('bfsr_done')                                    # head==tail -> empty
+        a.raw(b'\x25' + le32(VMAX - 1))                       # ring index (and eax, mask)
+        a.raw(b'\x8B\x0C\x85' + le32(bfs_queue_va))         # ecx = queue[head & mask]
         a.raw(b'\x89\x0D' + le32(bfs_u_va))                  # bfs_u = u
         a.raw(b'\xFF\x05' + le32(bfs_head_va))              # head++
+        a.raw(b'\xC6\x81' + le32(bfs_inq_va) + b'\x00')      # inq[u] = 0 (re-enqueueable)
         a.raw(b'\x8B\x15' + le32(bfs_disti_va))             # edx = disti
         a.raw(b'\x8B\x04\x8A')                               # eax = disti[u] (du)
         a.raw(b'\x89\x05' + le32(bfs_du_va))                # bfs_du = du
@@ -477,15 +560,21 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.label('bfsr_pass_ok')
         a.raw(b'\x3B\x05' + le32(vcount_va))               # cmp eax, vertex_count
         a.jae('bfsr_edge_next')                            # out of range
-        a.raw(b'\x8B\x15' + le32(bfs_disti_va))           # edx = disti
-        a.raw(b'\x8B\x0C\x82')                             # ecx = disti[v]
-        a.raw(b'\x83\xF9\xFF')                             # visited?
-        a.jnz('bfsr_edge_next')
+        # Weighted relax: cand = du + edge_len[e]; improve-or-skip (INF =
+        # 0xFFFFFFFF loses every unsigned compare, so "unvisited" needs no
+        # special case); enqueue v unless already in the ring.
         a.raw(b'\x8B\x0D' + le32(bfs_du_va))              # ecx = du
-        a.raw(b'\x41')                                     # inc ecx (du+1)
-        a.raw(b'\x89\x0C\x82')                            # disti[v] = du+1
+        a.raw(b'\x03\x0C\xB5' + le32(edge_len_va))        # ecx += edge_len[e]
+        a.raw(b'\x8B\x15' + le32(bfs_disti_va))           # edx = disti
+        a.raw(b'\x3B\x0C\x82')                             # cand vs disti[v]
+        a.jae('bfsr_edge_next')                            # no improvement
+        a.raw(b'\x89\x0C\x82')                            # disti[v] = cand
+        a.raw(b'\x80\xB8' + le32(bfs_inq_va) + b'\x00')    # inq[v] set?
+        a.jnz('bfsr_edge_next')                            # already queued
+        a.raw(b'\xC6\x80' + le32(bfs_inq_va) + b'\x01')    # inq[v] = 1
         a.raw(b'\x8B\x0D' + le32(bfs_tail_va))           # ecx = tail
-        a.raw(b'\x89\x04\x8D' + le32(bfs_queue_va))      # queue[tail] = v (eax)
+        a.raw(b'\x81\xE1' + le32(VMAX - 1))                # ring index (and ecx, mask)
+        a.raw(b'\x89\x04\x8D' + le32(bfs_queue_va))      # queue[tail & mask] = v (eax)
         a.raw(b'\xFF\x05' + le32(bfs_tail_va))           # tail++
         a.label('bfsr_edge_next')
         a.raw(b'\x46')                                    # inc esi
@@ -514,15 +603,21 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
             a.jz('bfsr_pp_next')
             a.raw(b'\x3B\x05' + le32(vcount_va))          # defensive range
             a.jae('bfsr_pp_next')
-            a.raw(b'\x8B\x15' + le32(bfs_disti_va))       # edx = disti
-            a.raw(b'\x8B\x0C\x82')                        # ecx = disti[src]
-            a.raw(b'\x83\xF9\xFF')                        # visited?
-            a.jnz('bfsr_pp_next')
+            # Weighted relax, pad cost 1 (near-free — teleporting is
+            # instant, so pads stay strongly preferred, matching their old
+            # +1 hop semantics against px-quantum walk costs).
             a.raw(b'\x8B\x0D' + le32(bfs_du_va))          # ecx = du
             a.raw(b'\x41')                                # inc ecx (du+1)
-            a.raw(b'\x89\x0C\x82')                        # disti[src] = du+1
+            a.raw(b'\x8B\x15' + le32(bfs_disti_va))       # edx = disti
+            a.raw(b'\x3B\x0C\x82')                        # cand vs disti[src]
+            a.jae('bfsr_pp_next')                         # no improvement
+            a.raw(b'\x89\x0C\x82')                        # disti[src] = cand
+            a.raw(b'\x80\xB8' + le32(bfs_inq_va) + b'\x00')  # inq[src] set?
+            a.jnz('bfsr_pp_next')
+            a.raw(b'\xC6\x80' + le32(bfs_inq_va) + b'\x01')  # inq[src] = 1
             a.raw(b'\x8B\x0D' + le32(bfs_tail_va))        # ecx = tail
-            a.raw(b'\x89\x04\x8D' + le32(bfs_queue_va))   # queue[tail] = src
+            a.raw(b'\x81\xE1' + le32(VMAX - 1))           # ring index
+            a.raw(b'\x89\x04\x8D' + le32(bfs_queue_va))   # queue[tail & mask] = src
             a.raw(b'\xFF\x05' + le32(bfs_tail_va))        # tail++
             a.label('bfsr_pp_next')
             a.raw(b'\x47')                                # ++p

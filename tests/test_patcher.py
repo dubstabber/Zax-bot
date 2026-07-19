@@ -307,20 +307,30 @@ class PortalDataTests(unittest.TestCase):
                        key=lambda k: (verts[k][0]-x)**2 + (verts[k][1]-y)**2)
 
         def bfs(goal, portal_edges):
+            # Weighted mirror of bfs_run: quantized-length edge costs, pad
+            # relaxes at cost 1 (near-free, matching the emitted pass).
+            import heapq
+            import math
             dist = [-1] * vc
             dist[goal] = 0
-            q = [goal]
-            while q:
-                u = q.pop(0)
+            pq = [(0, goal)]
+            while pq:
+                du, u = heapq.heappop(pq)
+                if du > dist[u]:
+                    continue
                 for (i, j) in edges:
                     v = j if i == u else (i if j == u else None)
-                    if v is not None and dist[v] == -1:
-                        dist[v] = dist[u] + 1
-                        q.append(v)
+                    if v is None:
+                        continue
+                    w = max(1, round(math.dist(verts[i], verts[j])
+                                     / cfg.WP_EDGE_LEN_QUANTUM))
+                    if dist[v] == -1 or du + w < dist[v]:
+                        dist[v] = du + w
+                        heapq.heappush(pq, (du + w, v))
                 for (src_n, dest_n) in portal_edges:
-                    if dest_n == u and dist[src_n] == -1:
-                        dist[src_n] = dist[u] + 1
-                        q.append(src_n)
+                    if dest_n == u and (dist[src_n] == -1 or du + 1 < dist[src_n]):
+                        dist[src_n] = du + 1
+                        heapq.heappush(pq, (du + 1, src_n))
             return dist
 
         routes = dict(resolve_portal_routes())[name]
@@ -502,19 +512,29 @@ class PortalDataTests(unittest.TestCase):
             return ddx*ddx + ddy*ddy
 
         def bfs(verts, edges, edge_door, blocked, start, skip):
+            # Weighted mirror of bfs_run (SPFA): edge cost = quantized
+            # physical length exactly as build_edge_lens computes it
+            # (round-half-even matches the x87 default rounding).
+            import heapq
+            import math
             dist = [-1] * len(verts)
             dist[start] = 0
-            q = [start]
-            while q:
-                u = q.pop(0)
+            pq = [(0, start)]
+            while pq:
+                du, u = heapq.heappop(pq)
+                if du > dist[u]:
+                    continue
                 for e, (i, j) in enumerate(edges):
                     if skip and edge_door[e] is not None and blocked[edge_door[e]]:
                         continue
                     v = j if i == u else (i if j == u else None)
-                    if v is None or dist[v] != -1:
+                    if v is None:
                         continue
-                    dist[v] = dist[u] + 1
-                    q.append(v)
+                    w = max(1, round(math.dist(verts[i], verts[j])
+                                     / cfg.WP_EDGE_LEN_QUANTUM))
+                    if dist[v] == -1 or du + w < dist[v]:
+                        dist[v] = du + w
+                        heapq.heappush(pq, (du + w, v))
             return dist
 
         def nearest(verts, x, y):
@@ -571,22 +591,43 @@ class PortalDataTests(unittest.TestCase):
                     best, best_score = s, score
             return ('seek', best, best_score)
 
+        # Scores are physical lengths in WP_EDGE_LEN_QUANTUM (16 px) units
+        # since the weighted-SPFA change.
         # Torture Chamber: a blue bot sealed in its base by the closed pillar
-        # walls picks its OWN base toggler (switches to the enemy base are
-        # sealed away), 3-hop walk; after that group opens, the route to the
-        # red base is fully open and the gate stops firing.
-        self.assertEqual(run('Torture Chamber.zax', 0, 1), ('seek', 0, 8))
+        # walls picks a REACHABLE pillar toggler — the weighted metric now
+        # prefers toggler 3 (physically nearer than toggler 0, which the hop
+        # metric used to pick); bumping it unseals the base (open route to
+        # the red base drops to 105 units, below the gate), so the choice is
+        # a valid escape and the chaining machinery handles any residual.
+        self.assertEqual(run('Torture Chamber.zax', 0, 1), ('seek', 3, 98))
+        self.assertEqual(run('Torture Chamber.zax', 0, 1, opened=(3,))[0], 'no-gate')
         self.assertEqual(run('Torture Chamber.zax', 0, 1, opened=(0,))[0], 'no-gate')
-        self.assertEqual(run('Torture Chamber.zax', 1, 0), ('seek', 1, 7))
+        self.assertEqual(run('Torture Chamber.zax', 1, 0), ('seek', 1, 92))
         # Battle on the Ice: a red bot at the BLUE base heading home (the
-        # live-reported scenario) picks the blue-door switch INSIDE the blue
-        # base 1 hop away — not the red-door switch across the map — because
-        # the detour score weighs the walk to the switch.
-        self.assertEqual(run('Battle on the Ice.zax', 0, 1), ('seek', 1, 21))
+        # live-reported scenario) still picks the blue-door switch INSIDE the
+        # blue base — not the red-door switch across the map — because the
+        # detour score weighs the walk to the switch.
+        self.assertEqual(run('Battle on the Ice.zax', 0, 1), ('seek', 1, 214))
         # A red attacker from its own base picks the near red-door switch
-        # (harmless 2-hop detour; once bumped its door opens, the candidate
+        # (harmless short detour; once bumped its door opens, the candidate
         # filter excludes it, and the next round picks the blue-door switch).
-        self.assertEqual(run('Battle on the Ice.zax', 1, 0), ('seek', 0, 23))
+        self.assertEqual(run('Battle on the Ice.zax', 1, 0), ('seek', 0, 242))
+        # Hydroplant Bouncefest — the weighted metric's motivating map
+        # (live-reported): base-to-base ties at 9 HOPS through the doors and
+        # around the top, so the hop gate never fired here; physically the
+        # door route is ~680 px shorter. The blue-base bot now seeks the
+        # blue-side switch (0, opens door 0) and the red-base bot the
+        # red-side switch (3) — score 117 vs the 161-unit around-route. The
+        # sim's PHYSICAL door semantics still gate after door 0 opens (door
+        # 3 blocks the last leg), but no candidate passes the benefit bar
+        # (('seek', None, ...) = pending with no activation, i.e. bots keep
+        # the open route); the RUNTIME's directional edge_pass goes further:
+        # door 3 is passable from the inside via its arming walk-in trigger,
+        # so the real open field equals full and the gate stops entirely.
+        self.assertEqual(run('Hydroplant Bouncefest.zax', 0, 1), ('seek', 0, 117))
+        self.assertEqual(run('Hydroplant Bouncefest.zax', 1, 0), ('seek', 3, 117))
+        self.assertEqual(run('Hydroplant Bouncefest.zax', 0, 1, opened=(0,)),
+                         ('seek', None, None))
 
     def test_door_opener_topology_is_extracted(self):
         # Openers drive DIRECTIONAL closed-door passability: bot-usable
@@ -728,21 +769,30 @@ class DroppedFlagTests(unittest.TestCase):
         pads = [(nearest(src), nearest(dst)) for src, dst in routes]
         drop_node = nearest((709.6, 1851.8))     # snapshot 6 drop position
         start = nearest((619.0, 330.0))          # snapshot 6 bot position
+        # Weighted mirror of bfs_run: quantized-length edge costs, pad cost 1.
+        import heapq
+        import math
         INF = 0xFFFFFFFF
         dist = [INF]*vc
         dist[drop_node] = 0
-        q = [drop_node]
-        while q:
-            u = q.pop(0)
+        pq = [(0, drop_node)]
+        while pq:
+            du, u = heapq.heappop(pq)
+            if du > dist[u]:
+                continue
             for i, j in edges:
                 v = j if i == u else (i if j == u else None)
-                if v is not None and dist[v] == INF:
-                    dist[v] = dist[u] + 1
-                    q.append(v)
+                if v is None:
+                    continue
+                w = max(1, round(math.dist(verts[i], verts[j])
+                                 / cfg.WP_EDGE_LEN_QUANTUM))
+                if du + w < dist[v]:
+                    dist[v] = du + w
+                    heapq.heappush(pq, (du + w, v))
             for sn, dn in pads:                  # bfsr_portals relax
-                if dn == u and dist[sn] == INF:
-                    dist[sn] = dist[u] + 1
-                    q.append(sn)
+                if dn == u and du + 1 < dist[sn]:
+                    dist[sn] = du + 1
+                    heapq.heappush(pq, (du + 1, sn))
 
         self.assertNotEqual(dist[start], INF)
         cur, used_pad = start, False
@@ -1032,8 +1082,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '68ac2b72dc195ba89206ef7e65d53752342fb71811a773dfbd400ae4eafcbf97'
-    HOOK_ENTRY_SIZE = 33490
+    SECTION_SHA256 = 'e5d80571bcfce0881cf99eeb3e13a140aaeed1ebb180ea8a9edc0e1ff1b88415'
+    HOOK_ENTRY_SIZE = 33745
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

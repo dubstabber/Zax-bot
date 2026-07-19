@@ -143,6 +143,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # the graph never move mid-match, so the point-segment sweep runs once
     # here (wp_load above loaded the graph; load_doors filled door_table).
     a.call_lbl('build_edge_doors')
+    # Quantized physical edge lengths — the per-edge traversal cost every
+    # bfs_run field (full/open/seek/drop) adds since the weighted-SPFA
+    # change. Graph is static per match; runs once here after wp_load.
+    # Inert stub on non-routing builds.
+    a.call_lbl('build_edge_lens')
     # CTF flag routing: when the active match is CTF with a graph + flags,
     # precompute the per-base BFS distance field (build_flag_routes) and arm the
     # runtime gate (flag_routing_active). detect_mode returns 0/1/2 (DM/CTF/SK);

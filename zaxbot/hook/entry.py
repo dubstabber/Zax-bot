@@ -286,6 +286,7 @@ def build_hook(section_va_abs):
         overlay_switch_color=cfg.OVERLAY_SWITCH_COLOR,
         switch_wander_chance=(cfg.SWITCH_WANDER_CHANCE
                               if cfg.SWITCH_WANDER_ENABLED else 0),
+        wp_edge_len_quantum=cfg.WP_EDGE_LEN_QUANTUM,
         ctf_drop_pursue_enabled=cfg.CTF_DROPPED_FLAG_ENABLED,
         ctf_drop_pursue_radius_sq=cfg.CTF_DROP_PURSUE_RADIUS_SQ,
         ctf_drop_reached_radius_sq=cfg.CTF_DROP_REACHED_RADIUS_SQ,

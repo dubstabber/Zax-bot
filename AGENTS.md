@@ -223,7 +223,7 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     ENTRY node. Not gated on live pad state (fields are per-match; a stale
     route into a deactivated pad ends in the normal watchdog → suspension →
     roam machinery). Offline-verified + pinned in tests on the shipped Hydro
-    graph: arenas disconnected without pads, enemy base 12 hops with them,
+    graph: arenas disconnected without pads, enemy base reachable with them,
     both departure-arena pads strictly descending (bots pick whichever their
     path reaches).
   - **Pad next-hop** (`ctf_next_hop`): after the neighbour scan, a pad bound
@@ -305,8 +305,21 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     reliable Red/Blue order, hence the explicit tag).
   - **Per-match BFS** (`build_flag_routes`, from `detour_df90`, only when
     `detect_mode()==CTF` and `flag_count>0`): nearest graph node to each base,
-    then a BFS over the UNDIRECTED edge list fills `flag_dist[base][node]` (hop
-    distance, `0xFFFFFFFF`=unreachable). Arms `flag_routing_active`.
+    then a WEIGHTED shortest-path pass (`bfs_run`, SPFA — queue-based
+    Bellman-Ford over the UNDIRECTED edge list with per-node `bfs_inq`
+    dedup flags and a VMAX ring queue) fills `flag_dist[base][node]`
+    (`0xFFFFFFFF`=unreachable). DISTANCES ARE PHYSICAL LENGTHS in
+    `WP_EDGE_LEN_QUANTUM` (16 px) units, not hops: `build_edge_lens` (per
+    match from `detour_df90`, after `wp_load`) quantizes each edge's pixel
+    length into `edge_len[e]` (min 1, so next-hop descent stays strict),
+    and every `bfs_run` field (full, per-team open, seek, drop rows) adds
+    it per edge. Hop counting was live-refuted on Hydroplant Bouncefest:
+    the through-door route and the around-the-top route TIE at 9 hops but
+    differ by 681 px (1899 vs 2580), so hop routing — and the seek benefit
+    gate — saw zero gain from opening the switch-doors (the user-reported
+    "bots don't know the switch shortens the path"). Teleport pads keep
+    relax cost 1 (near-free, strongly preferred). Arms
+    `flag_routing_active`.
   - **Goal-biased follow** (`ctf_pick_goal` + `ctf_next_hop`, injected at
     `s542360_wp_arrived`): goal = carrying ? OWN base : ENEMY base (team to
     `flag_team`). `ctf_next_hop` steps to the neighbour of the current node with
@@ -692,9 +705,10 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     so `ctf_next_hop` re-plans door-aware from the reachable node (offline-
     verified: 15→14 across closed door 9 re-plans 15→16; 5→6 across closed door
     15 re-plans 5→1). Fires only in that exact stuck state — door open or
-    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~3.3 KB below
-    `SCRATCH_OFF` (hook_entry_size 33490 of 36864 after the switch
-    wander-bump layer + the door-cache class gate; the boundary moved
+    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~3.0 KB below
+    `SCRATCH_OFF` (hook_entry_size 33745 of 36864 after the switch
+    wander-bump layer + the door-cache class gate + the weighted-SPFA
+    routing change; the boundary moved
     0x8000→0x9000 with the section at 0x18000). When it runs low again, bump
     `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
@@ -731,8 +745,11 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   - **SWITCH-SEEK routing** (`cfg.SWITCH_SEEK_ENABLED`, flag-route block):
     when a routed CTF bot's goal is OPEN-FIELD UNREACHABLE from its node
     (sealed Torture Chamber base) or the open detour is
-    `SWITCH_SEEK_SHORTCUT_GAIN`+ hops worse than the full field (a red bot
-    inside the blue base with the team-gated blue door shut), `ctf_next_hop`
+    `SWITCH_SEEK_SHORTCUT_GAIN`+ UNITS worse than the full field (GAIN=20
+    quanta ≈ 320 px since the weighted-routing change — a red bot inside
+    the blue base with the team-gated blue door shut, or the Hydroplant
+    blue-base bot whose door route is 42 quanta shorter than the
+    around-route the hop metric could not distinguish), `ctf_next_hop`
     requests a per-team seek. The page-flip eval (`switch_seek_eval`, ONE
     bounded BFS per frame) walks candidates — OPENS_DOORS class, ≥1 paired
     door currently BLOCKED (doubles as toggle-safety: a toggler with open
@@ -752,11 +769,14 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     round handles the far side). A seek with no door change for
     `SWITCH_SEEK_TIMEOUT_FRAMES` blacklists that switch until the next
     door-state change. Offline-verified on the shipped graphs (pinned in
-    tests): sealed Torture bot → own-base toggler (3-hop walk; after it, the
-    route to the enemy base is fully open); red-at-blue-base carrier → the
-    blue-door switch 1 hop away, NOT the red-door switch across the map.
+    tests, weighted-metric scores): sealed Torture bot → a reachable pillar
+    toggler that unseals its base (the weighted metric picks the physically
+    nearest one); red-at-blue-base carrier → the blue-door switch inside
+    the base, NOT the red-door switch across the map; Hydroplant blue-base
+    bot → the blue-side switch 0 (score 117 vs the 161-unit around-route —
+    the scenario the hop metric could never gate on).
     Known noise: an attacker near its own base may bump a near switch whose
-    door its team could open anyway (harmless 1-2 hop detour; the opened
+    door its team could open anyway (harmless short detour; the opened
     door excludes the switch from the next round).
   - **Roam-time WANDER-BUMP** (`cfg.SWITCH_WANDER_ENABLED`, the "switches are
     part of the random path" layer; live-motivated on Hydroplant Bouncefest

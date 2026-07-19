@@ -1553,5 +1553,31 @@ def build_scratch_layout(
                          'diag: switch wander-bump dump chunk tag'),
         ])
 
+    # --- Weighted routing (physical-length BFS) ------------------------------
+    # Appended at the very tail. edge_len[e] = round(edge pixel length /
+    # elen_quantum), min 1 — the traversal cost bfs_run adds per edge (the
+    # SPFA conversion; hop counting was live-refuted on Hydroplant
+    # Bouncefest where the door route and the around route tie at 9 hops
+    # but differ by 681 px). bfs_inq is the SPFA in-queue byte per node
+    # (re-enqueue dedup; cleared at each bfs_run entry).
+    if overlay_edge_max_capped > 0 and overlay_vertex_max_capped > 0:
+        wlen_base = max(
+            [f.end for f in fields] + [f.end for f in overlay_fields]
+        )
+        wlen_base = (wlen_base + 7) & ~7
+        overlay_fields.extend([
+            ScratchField('edge_len', wlen_base,
+                         overlay_edge_max_capped * 4,
+                         'route: per-edge quantized physical length (bfs_run edge cost, min 1)'),
+            ScratchField('bfs_inq',
+                         wlen_base + overlay_edge_max_capped * 4,
+                         overlay_vertex_max_capped,
+                         'route: SPFA in-queue flag per node (bfs_run re-enqueue dedup)'),
+            ScratchField('elen_quantum',
+                         wlen_base + overlay_edge_max_capped * 4
+                         + overlay_vertex_max_capped, 0x04,
+                         'route: float px per distance unit (build_edge_lens divisor)'),
+        ])
+
     fields.extend(overlay_fields)
     return ScratchLayout(base_va, scratch_size, fields)

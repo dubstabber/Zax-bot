@@ -597,6 +597,7 @@ def write_static_scratch_data(
     switch_map_name_slot=0,
     overlay_switch_color=(128, 255, 255, 255),
     switch_wander_chance=0,
+    wp_edge_len_quantum=16.0,
     ctf_drop_pursue_enabled=False,
     ctf_drop_pursue_radius_sq=122500.0,
     ctf_drop_reached_radius_sq=576.0,
@@ -900,6 +901,9 @@ def write_static_scratch_data(
         # switch_node starts unbound until load_switches binds it per match.
         layout.write(section, scratch_off, 'switch_node',
                      b'\xFF' * layout.field('switch_node').size)
+    if layout.has_field('elen_quantum'):
+        layout.write(section, scratch_off, 'elen_quantum',
+                     struct.pack('<f', max(1.0, float(wp_edge_len_quantum))))
     # Pickup self-registration master switch (per-frame CPickupAI detour).
     if layout.has_field('pickup_register_enabled'):
         layout.write(section, scratch_off, 'pickup_register_enabled',
