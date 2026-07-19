@@ -387,6 +387,34 @@ S4C2D60_PROLOGUE = b'\x8B\x4C\x24\x10\x85\xC9'  # mov ecx,[esp+0x10]; test ecx,e
 VT_CACTIVATE_ACTION_VA   = 0x5F6374  # CActivateAction vtable
 VT_CDEACTIVATE_ACTION_VA = 0x5F63E4  # CDeactivateAction vtable
 
+# --- Salvage King (SK) engine anchors --------------------------------------
+# Carried-mineral count getter (used by the SK gametype's own stats sync
+# sub_5616B0): __usercall — ECX = character, EDX = item-def registry KEY
+# (the sub_591FC0(dword_6C0C08, name, -1) result, NOT a def pointer);
+# returns the carried count in EAX (0 when no inventory / item absent).
+# Walks char->vtbl[+0x90]() inventory, matches sub_482DE0(item) == key,
+# returns item->vtbl[+0xA4](). Plain ret, preserves ebx/esi/edi/ebp.
+SUB_426860_VA = 0x426860
+# The two SK mineral item-definition NAME strings in the image — resolved
+# per match by load_sk exactly like the engine's lazy caches
+# (dword_713160 / dword_71315C in sub_5616B0).
+ORE_DEPOSITS_STR_VA = 0x60B7D4  # "Ore Deposits"
+CRYSTALS_STR_VA     = 0x60B7C8  # "Crystals"
+
+# --- CDropAllOreAndCrystalsAction per-target apply (SK death pile) ---------
+# Every MP death runs the canned 'Drop Cystals and Ore' script; its action's
+# apply (vtable 0x603578 slot 22) clones an UNNAMED pile entity from the
+# "Ore_Crystals01" model template, places it collision-aware within 500 px of
+# the corpse (sub_4EB7B0), moves the victim's whole Ore Deposits + Crystals
+# load into a fresh CollideTrigger on the pile, and bails early when the
+# victim carried nothing. No New Name is ever assigned, so the CTF-style
+# name match cannot detect piles — the detour hooks this apply instead and
+# records the DYING CHARACTER's position (ECX = action, victim entity at
+# [esp+8] at entry, ret 0x10).
+SUB_5A6E60_VA       = 0x5A6E60
+S5A6E60_RESUME      = 0x5A6E66  # after the 6-byte prologue, at `mov esi,[esp+24h]`
+S5A6E60_PROLOGUE    = b'\x83\xEC\x10\x53\x55\x56'  # sub esp,10h; push ebx; push ebp; push esi
+
 # --- Active-gametype getter (used by detect_mode) --------------------------
 # `sub_59FF90(ecx=mgr)` returns the active CMultiPlayerGameType-derived
 # instance (or NULL). [result+0] is one of `VT_DM_VA`/`VT_CTF_VA`/`VT_SK_VA`.

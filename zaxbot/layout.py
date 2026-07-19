@@ -193,6 +193,13 @@ def build_scratch_layout(
     switch_static_point_max=0,
     switch_static_pair_max=0,
     switch_map_name_slot=0,
+    sk_mineral_table_max=0,
+    sk_bin_table_max=0,
+    sk_static_map_max=0,
+    sk_static_mineral_max=0,
+    sk_static_bin_max=0,
+    sk_map_name_slot=0,
+    sk_pile_table_max=0,
 ):
     BOT_STATE_BASE = 0x180
     MAX_BOT_SLOTS = 16
@@ -1578,6 +1585,91 @@ def build_scratch_layout(
                          + overlay_vertex_max_capped, 0x04,
                          'route: float px per distance unit (build_edge_lens divisor)'),
         ])
+
+    # --- Salvage King (SK) layer ---------------------------------------------
+    # Appended at the very tail so no existing scratch offset shifts. The block
+    # from sk_routing_active through tag_skstate is CONTIGUOUS and dumped whole
+    # by the R-snapshot `skstate` chunk (tests pin the ordering); the static
+    # pack tables and the BFS distance rows sit after the tag and are excluded
+    # (mirror of seek_dist / drop_dist). Live tables are per match: minerals +
+    # this map's bins (indexed by TEAM id == authored bin number - 1 == the SK
+    # bot team id botidx); sk_ore_dist is the per-match MULTI-SOURCE mineral
+    # field (every mineral-bearing node seeded at distance 0); sk_bin_dist is
+    # one bfs_run row per authored bin, team-major.
+    sk_mineral_max_capped = max(0, sk_mineral_table_max)
+    sk_bin_max_capped     = max(0, sk_bin_table_max)
+    sk_pile_max_capped    = max(0, sk_pile_table_max)
+    if (sk_mineral_max_capped > 0 and sk_bin_max_capped > 0
+            and overlay_vertex_max_capped > 0):
+        sk_off = max([f.end for f in fields] + [f.end for f in overlay_fields])
+        sk_off = (sk_off + 7) & ~7
+
+        def _sk_field(name, size, desc):
+            nonlocal sk_off
+            overlay_fields.append(ScratchField(name, sk_off, size, desc))
+            sk_off += size
+
+        _sk_field('sk_routing_active', 0x04,
+                  'sk: master runtime gate (mode==SK with graph + SK data this match)')
+        _sk_field('sk_mineral_count', 0x04, 'sk: live mineral anchors this map')
+        _sk_field('sk_bin_count', 0x04, 'sk: authored bins this map (== MaxPlayers)')
+        _sk_field('sk_return_min', 0x04,
+                  'sk: carried-minerals threshold that flips a bot to the RETURN phase')
+        _sk_field('sk_def_ore', 0x04,
+                  'sk: resolved "Ore Deposits" item-def ptr (per match; 0 = unresolved)')
+        _sk_field('sk_def_crystal', 0x04,
+                  'sk: resolved "Crystals" item-def ptr (per match; 0 = unresolved)')
+        _sk_field('sk_spill', 0x04, 'sk: loop index spill surviving engine calls')
+        _sk_field('sk_carry_tmp', 0x04, 'sk: carried-mineral count spill')
+        _sk_field('sk_pile_next', 0x04, 'sk: pile ring-table write cursor')
+        _sk_field('sk_pile_pursue_radius_sq', 0x04, 'sk: pile opportunistic divert radius^2 (float)')
+        _sk_field('sk_pile_reached_radius_sq', 0x04, 'sk: pile divert arrival radius^2 (float)')
+        _sk_field('sk_pile_ttl', 0x04, 'sk: pile entry lifetime in frames (ring TTL seed)')
+        _sk_field('sk_mineral_table', sk_mineral_max_capped * 8,
+                  'sk: live mineral anchor positions (float[2] each)')
+        _sk_field('sk_mineral_node', sk_mineral_max_capped * 4,
+                  'sk: nearest graph node per mineral (-1 = unbound)')
+        _sk_field('sk_bin_table', sk_bin_max_capped * 8,
+                  'sk: bin center per TEAM id (float[2]; only valid slots meaningful)')
+        _sk_field('sk_bin_valid', sk_bin_max_capped * 4,
+                  'sk: 1 = this team id has an authored bin on this map')
+        _sk_field('sk_bin_node', sk_bin_max_capped * 4,
+                  'sk: nearest graph node per bin (-1 = unbound)')
+        # Per-bot state: contiguous so load_sk clears it with one rep stosd
+        # and the R chunk dumps it in one block (7 parallel u32[16] arrays).
+        _sk_field('bot_sk_return', MAX_BOT_SLOTS * 4,
+                  'sk: per-bot RETURN-phase latch (1 until the deposit empties the load)')
+        _sk_field('bot_sk_carry', MAX_BOT_SLOTS * 4,
+                  'sk: per-bot last computed carried-mineral count (diagnostic)')
+        _sk_field('bot_sk_dep_try', MAX_BOT_SLOTS * 4,
+                  'sk: per-bot deposit press-patience cycles used')
+        _sk_field('bot_pile_target', MAX_BOT_SLOTS * 4,
+                  'sk: per-bot latched pile divert (pile idx+1, 0 = none)')
+        _sk_field('bot_pile_cd', MAX_BOT_SLOTS * 4,
+                  'sk: per-bot pile divert cooldown (thinks)')
+        _sk_field('bot_pile_try', MAX_BOT_SLOTS * 4,
+                  'sk: per-bot pile press-patience cycles used')
+        _sk_field('bot_pile_best', MAX_BOT_SLOTS * 4,
+                  'sk: per-bot pile divert min dsq (float; FLT_MAX parked)')
+        _sk_field('sk_pile_valid', sk_pile_max_capped * 4,
+                  'sk: pile ring slot TTL countdown (frames; 0 = empty/expired)')
+        _sk_field('sk_pile_pos', sk_pile_max_capped * 8,
+                  'sk: pile ring slot position (float[2], from the drop-action detour)')
+        _sk_field('tag_skstate', 0x10, 'diag: SK state dump chunk tag')
+        # Cold data after the tag: static pack + BFS rows (excluded from the
+        # R chunk like seek_dist / drop_dist).
+        _sk_field('sk_static_map_count', 0x04, 'sk: packed SK map records')
+        _sk_field('sk_static_maps',
+                  max(0, sk_static_map_max) * (max(0, sk_map_name_slot) + 16),
+                  'sk: map name + (mineral_count, mineral_first, bin_count, bin_first)')
+        _sk_field('sk_static_minerals', max(0, sk_static_mineral_max) * 8,
+                  'sk: all maps\' mineral anchors (float[2] each, parse order)')
+        _sk_field('sk_static_bins', max(0, sk_static_bin_max) * 12,
+                  'sk: all maps\' bins (x f32, y f32, team u32)')
+        _sk_field('sk_ore_dist', overlay_vertex_max_capped * 4,
+                  'sk: multi-source mineral BFS field (0 = mineral-bearing node)')
+        _sk_field('sk_bin_dist', sk_bin_max_capped * overlay_vertex_max_capped * 4,
+                  'sk: per-bin BFS rows, team-major (row = team * VMAX)')
 
     fields.extend(overlay_fields)
     return ScratchLayout(base_va, scratch_size, fields)

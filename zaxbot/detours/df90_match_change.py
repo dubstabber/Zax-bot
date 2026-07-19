@@ -139,6 +139,12 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # reference the door_table order load_doors just filled — keep this call
     # AFTER load_doors. Inert stub on non-switch builds.
     a.call_lbl('load_switches')
+    # Salvage King per-match data: mineral anchors + team-indexed bins copied
+    # from the static pack, item-def keys resolved, nodes bound (needs the
+    # graph, so after wp_load), live SK state cleared. Inert stub on
+    # non-SK builds. The routing fields build below only when the match is
+    # actually SK (detect_mode gate after the CTF block).
+    a.call_lbl('load_sk')
     # Static edge->door adjacency for the door-aware routing field. Doors and
     # the graph never move mid-match, so the point-segment sweep runs once
     # here (wp_load above loaded the graph; load_doors filled door_table).
@@ -183,6 +189,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.call_lbl('build_flag_routes')              # per-match BFS distance field
         a.raw(b'\xC7\x05' + le32(layout.va('flag_routing_active')) + le32(1))
         a.label('df90_no_ctf_routes')
+    # Salvage King routing: when the active match is SK with a graph + SK
+    # data, build the multi-source mineral field + per-bin rows.
+    # build_sk_routes itself arms sk_routing_active (load_sk cleared it), so
+    # a non-SK / mineral-less / graph-less match stays inert.
+    if cfg.SK_ENABLED and layout.has_field('sk_routing_active'):
+        a.call_lbl('detect_mode')                    # eax = 0 DM / 1 CTF / 2 SK
+        a.raw(b'\x83\xF8\x02')                        # cmp eax, 2 (SK)
+        a.jnz('df90_no_sk_routes')
+        a.call_lbl('build_sk_routes')
+        a.label('df90_no_sk_routes')
     # Capture the active map's CPlasmaTileMap* (lava) for proactive avoidance.
     # pushad/popad, no args/ret; self-clears plasma_map (0 on non-plasma maps).
     a.call_lbl('scan_plasma')

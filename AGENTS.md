@@ -24,6 +24,7 @@ The detailed notes live in `docs/`:
   - `addresses.py` - verified original-image VAs and prologue bytes.
   - `config.py` - section size, scratch policy, synthetic ids, bot names.
   - `patch_manifest.py` - enabled redirects into `.zaxbot`.
+  - `sk_data.py` - build-time Data.dat parse of SK minerals + team-bound bins.
   - `hook/` - dispatcher, mode detection, spawn, snapshot.
   - `detours/` - capture, safety, controller, fire/aim detours.
 - `zax_dump.bin` - appendable tagged runtime snapshots written by R.
@@ -58,18 +59,21 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 
 - WM_KEYDOWN hook at `0x599A1A` redirects `call sub_599580` to
   `.zaxbot:hook_entry`, then tail-jumps back to `sub_599580`.
-- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x18000`, RWX (grown from
+- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x26000`, RWX (grown from
   `0xA000` for the CTF flag static tables, then to `0xC000` for the CTF routing
   BFS distance field, then to `0xD000` for far-base CTF flag entity force-ticks,
   then to `0xF000` for the door detection static tables, then to `0x11000` for
   the door-aware routing field + anchor-entity cache, then `0x12000` for its
   per-team split, then to `0x14000` for the switch detection tables, then to
   `0x16000` for the portal routing layer, then to `0x18000` for the
-  dropped-flag pursuit layer).
-- Scratch starts at `0x723000` (`SCRATCH_OFF = 0x9000`; the code/scratch
+  dropped-flag pursuit layer, then to `0x26000` for the SK layer — 1856
+  static mineral anchors, team-indexed bin tables, the mineral field + 16
+  per-bin BFS rows, and the 512-slot pickup table).
+- Scratch starts at `0x724000` (`SCRATCH_OFF = 0xA000`; the code/scratch
   boundary moved from `0x5A00` at the door layer, from `0x6800` at the switch
-  layer, from `0x7000` at the portal routing layer, then from `0x8000` when
-  the dropped-flag ROUTED pursuit landed with ~456 code bytes left).
+  layer, from `0x7000` at the portal routing layer, from `0x8000` when
+  the dropped-flag ROUTED pursuit landed with ~456 code bytes left, then from
+  `0x9000` at the SK layer with ~3.0 KB left).
 - B opens the bot menu via `sub_59B260`; R writes a runtime snapshot.
 - Digit selection calls `do_spawn_with_team`.
 - Spawn injects a synthetic DirectPlay "player added" queue entry at
@@ -705,11 +709,10 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     so `ctf_next_hop` re-plans door-aware from the reachable node (offline-
     verified: 15→14 across closed door 9 re-plans 15→16; 5→6 across closed door
     15 re-plans 5→1). Fires only in that exact stuck state — door open or
-    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~3.0 KB below
-    `SCRATCH_OFF` (hook_entry_size 33745 of 36864 after the switch
-    wander-bump layer + the door-cache class gate + the weighted-SPFA
-    routing change; the boundary moved
-    0x8000→0x9000 with the section at 0x18000). When it runs low again, bump
+    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~4.0 KB below
+    `SCRATCH_OFF` (hook_entry_size 36819 of 40960 after the SK layer; the
+    boundary moved 0x9000→0xA000 with the section at 0x26000, scratch ~12.4
+    KB free). When it runs low again, bump
     `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
     `flag_routing_active`) was added for diagnosing route commitment.
@@ -804,6 +807,73 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     which is CTF-only) so DM roamers bump too; the per-bot state block
     clears there as well. R-snapshot chunk `swander` dumps the whole block
     (latch/cd/patience/census + chance knob).
+- Salvage King (SK / "Greed") bots EXECUTE THE MODE GOAL
+  (`cfg.SK_ENABLED`; built 2026-07-19, offline-verified on all 9 shipped SK
+  graphs, first live pass pending): collect minerals, carry them to their OWN
+  bin, deposit for points, and steal death piles. Engine facts (IDA session
+  2026-07-19): there is NO engine collector concept — bin ownership is pure
+  map script (`CIsOnSameTeamAction($Instigator, $Trigger)` inside the bin's
+  'Drop Ore in Container' canned: toucher entity team `+0x24` must equal the
+  bin part's authored `Team Number`), and the authored `'Bin NN'` parts carry
+  `Team Number = NN-1` covering `[0, MaxPlayers)` contiguously — the SAME id
+  space the patch assigns SK bots (team = botidx), so each bot's one scoring
+  bin is known statically. The deposit itself is
+  `CSalvageKingScoreMineralsAction` (apply `sub_561AB0`): consumes the WHOLE
+  carried load, score += 1/ore + 3/crystal (gametype floats `+0xC8/+0xCC`)
+  into `stats+0xF6`. Carried counts are read via the engine's own getter
+  `sub_426860` (`__usercall` ECX=char, EDX=def key from
+  `sub_591FC0(dword_6C0C08, name, -1)`; keys per match in
+  `sk_def_ore/sk_def_crystal` — the exact calls the SK stats sync
+  `sub_5616B0` makes; SK also mirrors them into `stats+0xEE/+0xF2` words).
+  Pieces:
+  - **Static data** (`sk_data.py` → `static_data.write_sk_static_table`,
+    census pinned in tests): minerals are `Model=Items/Money/{Ore deposit N,
+    Crystal NN}` CEntityBase pickups, `Used In=MultiPlayer/Salvage King`
+    (SK matches ONLY), respawn-in-place 10-15 s, DENSE — 107..386 per map,
+    1856 across the 9 SK-capable maps (8 Greed maps + Jungle Ruins).
+    `load_sk` (detour_df90, after `load_switches`) copies the active map's
+    minerals, scatters bins into the TEAM-indexed `sk_bin_table/valid/node`,
+    resolves the item-def keys, binds graph nodes, and clears all live SK
+    state.
+  - **Routing** (`build_sk_routes`, df90 when `detect_mode()==SK`; arms
+    `sk_routing_active`): a MULTI-SOURCE mineral field (`sk_ore_dist` — one
+    `bfs_run_seeded` pass with every mineral-bearing node at distance 0; the
+    new seeded entry into `bfs_run` skips its single-seed prologue) plus one
+    `bfs_run` row per authored bin (`sk_bin_dist`, team-major). Minerals
+    respawn in place, so presence tracking is deliberately NOT attempted —
+    both fields build once per match, no rebuilds, no periodic cost.
+  - **Behavior** (`sk_next_hop` replaces the arrival next-hop while armed;
+    `sk_update_phase` maintains a per-bot COLLECT/RETURN hysteresis latch:
+    carry==0 clears, carry >= `SK_RETURN_CARRY_MIN` (6) sets): COLLECT
+    descends the mineral field; INSIDE a mineral zone (dist 0) it returns -1
+    so the random roam sweeps the dense cluster and collects by walk-over.
+    RETURN descends the bot's own-bin row; at the bin node the DEPOSIT FINAL
+    APPROACH steers at the bin center (collidable prop — same press
+    machinery as the switch bump, `SK_DEPOSIT_PRESS_PATIENCE` cycles then
+    routing suspension) and the per-think `sk_update_phase` sees the emptied
+    inventory the same frame the canned action scores, ending the press
+    naturally. Pad hops are emitted exactly like ctf/drop descents (Jungle
+    Ruins is an SK map with pads). Respects `bot_route_suspend`; all latches
+    drop on respawn/death/teleport/match change.
+  - **Death piles** (`detours/sk_pile_register.py`, `detour_5A6E60`): every
+    MP death runs `CDropAllOreAndCrystalsAction` (apply `sub_5A6E60`, ret
+    0x10, victim at `[esp+8]`), which clones an UNNAMED pile entity (model
+    `Ore_Crystals01` template) within 500 px of the corpse holding the whole
+    load — touching grants everything to either team. No name ⇒ the CTF-
+    style scan match cannot see piles, so the detour self-registers the
+    corpse position into an 8-slot TTL ring (`sk_pile_pos/valid`), skipping
+    empty-handed deaths via the same `sub_426860` gate the apply uses.
+    Pursuit is opportunistic straight-steer within
+    `SK_PILE_PURSUE_RADIUS_SQ` (300 px) with watchdog + patience + retry/
+    grab cooldowns (mirror of the drop direct phase); reaching the spot
+    clears the ring entry optimistically. TTL (`SK_PILE_TTL_FRAMES`, 45 s,
+    ticked by `sk_pile_tick` from the page flip) bounds stale entries a
+    human grabbed first.
+  - R-snapshot chunk `skstate` dumps the live block (routing gate, counts,
+    bin tables, per-bot phase/carry/patience latches, pile ring). Offline
+    tests pin the census, the scratch-block invariants, and — on every
+    shipped SK graph — that all graph nodes reach a mineral zone and every
+    bin is reachable from every mineral node.
 - General world-entity enumeration (`detours/entity_scan.py:scan_entities`,
   gated by `cfg.SCAN_ENTITIES_ENABLED`). The long-standing blocker for object
   detection was that there is no flat entity list: `mgr+0x290` is players,
@@ -868,6 +938,9 @@ Current patched sites:
 - `0x5A9960` - CTF score action guard; last-resort backstop that blocks capture
   awards while the scoring team's own flag is away/carried. (The old
   `0x5B3100` flag-use guard was removed — it broke flag drops; see above.)
+- `0x5A6E60` - CDropAllOreAndCrystalsAction per-target apply; SK death-pile
+  self-registration into the `sk_pile` ring (gated by `cfg.SK_ENABLED`;
+  fast-skips outside armed SK matches).
 - `0x480889` - synthetic-id name-block skip in `sub_480800`.
 - `0x4F5204` - character iterator NULL-skip.
 
@@ -921,6 +994,12 @@ Older emitted labels or disabled detours are not active unless they appear in
 | `CTeleportAction vtbl = 0x6033B0` | genuine warp teleporter (parent chain `CSwitchMapAction 0x6032C4` → `CRelocateAction 0x603338` → `CTeleportAction`); the portal detour filters `[action]` to this. |
 | `CTouchingPolygonTriggerAI vtbl = 0x5EDC20` / `CTouchingOvalTriggerAI = 0x5EDB58` | touch-trigger volumes (Enter Action @+0x20, Exit @+0x24, Repeat @+0x28; "Triggered By" filter bytes @+0x10..+0x14). Portals can be a trigger's Enter Action OR a script/event-driven `CTeleportAction` referenced by name — hence runtime execute-hooking instead of per-map structure walking. |
 | `sub_4FB0A0` | `__thiscall(char/entity, &out_pos)` world-position getter, `ret 4` |
+| `sub_426860` | `__usercall(ECX=char, EDX=item-def KEY) -> EAX carried count` — the engine's own carried-mineral getter (walks `char->vtbl[+0x90]()` inventory, matches `sub_482DE0(item) == key`, returns `item->vtbl[+0xA4]()`); preserves ebx/esi/edi/ebp |
+| `sub_591FC0(dword_6C0C08, "Ore Deposits"/"Crystals", -1)` | the item-def KEY resolve the SK stats sync (`sub_5616B0`) makes and caches in `dword_713160`/`dword_71315C`; `load_sk` mirrors it per match into `sk_def_ore`/`sk_def_crystal` (engine strings at `0x60B7D4`/`0x60B7C8`) |
+| `sub_561AB0` | `CSalvageKingScoreMineralsAction` per-target apply: consumes the toucher's WHOLE mineral load, `stats+0xF6 += OrePointsValue(+0xC8)*ore + CrystalPointsValue(+0xCC)*crystals`, checks the score limit. NO ownership check here — ownership is the map-script `CIsOnSameTeamAction` gate (toucher entity team `+0x24` == bin part `Team Number` == `NN-1`) |
+| `sub_5A6E60` | `CDropAllOreAndCrystalsAction` per-target apply (`this`=ECX, victim at `[esp+8]`, `ret 0x10`; prologue `83 EC 10 53 55 56`): spawns the UNNAMED death pile (clone of the `Ore_Crystals01` model template, placed within 500 px via `sub_4EB7B0`) holding the victim's whole load; bails when nothing carried. Detoured for pile self-registration |
+| `stats + 0xEE/+0xF2/+0xF6` | SK replicated WORDs: carried ore / carried crystals (mirrored by SK gametype vtable `+0xA0` = `sub_5616B0`) / SK score |
+| `VT_SK_VA + 0xA0/+0xA8` | SK-only vtable slots: carried-mineral stats sync (`sub_5616B0`) / scoreboard cell renderer (`sub_561760`) |
 | `sub_4F37E0` | MP world update (virtual): builds one activation POINT per participant from `part+0xC0/+0xC4` (layer idx gate at `+0xDC`) |
 | `sub_4EA350` | point list → screen-sized activation rects (`dword_6C1BDC` array, `dword_6C1BE0` count) |
 | `sub_4E74A0` | layer update driver: `sub_57A100` grid-collects Active entities in viewport+participant rects, `sub_57A030` updates the collection |
@@ -982,6 +1061,17 @@ Older emitted labels or disabled detours are not active unless they appear in
 - Reintroduce hazard/pickup awareness as GRAPH-AWARE routing (route through
   nodes near pickups, around lava) rather than the removed vector-field
   perturbation that pushed the heading into walls.
+- SK mode awareness — DONE (see the Salvage King bullet in "Current state"):
+  collect/return phases over the multi-source mineral field + per-bin rows,
+  team-bound bin deposits through the press machinery, death-pile
+  registration + opportunistic pursuit. The old pickup-overlay gap ("only
+  ~80-90% of ores marked") was the 96-slot pickup table saturating — every
+  SK map exceeds it (The Foundry: 502 pickups); now 512. FIRST LIVE PASS
+  PENDING. Candidate refinements after live testing: prefer crystals (3×
+  points) when zones tie; a ROUTED pile-pursuit phase if straight-steer
+  grinds walls on cave maps; per-bot deposit thresholds for personality
+  variance; SK-aware fire/aim target priority (attack carriers near their
+  bin).
 - Portal routing — DONE for build-time-resolvable destinations (see the
   portal-routing bullet in "Current state"): pads are directed BFS edges, CTF
   bots route through them (Hydro Vengence cross-arena flag runs), roaming/DM

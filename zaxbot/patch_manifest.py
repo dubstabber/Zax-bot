@@ -124,6 +124,21 @@ def build_enabled_patches():
             )
         )
 
+    if cfg.SK_ENABLED:
+        # SK death-pile self-registration: detours the
+        # CDropAllOreAndCrystalsAction per-target apply so every mineral-
+        # carrying death records its corpse position (the pile lands there,
+        # within 500 px) into the sk_pile ring for the pile-divert behavior.
+        # The pile entity itself is unnamed, so the CTF-style name match
+        # cannot detect it. Fires only on deaths; fast-skips outside armed
+        # SK matches.
+        patches.append(
+            RelocationPatch(
+                'sub_5A6E60 SK death-pile registration', 'jmp', ax.SUB_5A6E60_VA,
+                ax.S5A6E60_PROLOGUE, 'detour_5A6E60_va', 6,
+            )
+        )
+
     if cfg.CTF_SCORE_GUARD_ENABLED:
         # Last-resort backstop: suppress a capture point award while the
         # scoring team's own flag is away/carried. Should never fire with the

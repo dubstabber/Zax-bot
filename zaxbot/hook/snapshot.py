@@ -279,6 +279,18 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         emit_chunk(layout.va('tag_swander'),
                    b'\xB8' + le32(layout.va('bot_switch_target')),
                    swander_dump_len, 'snap_skip_swander')
+    # Salvage King state: one contiguous chunk from sk_routing_active through
+    # sk_pile_pos (live mineral/bin tables + node binds, per-bot phase/carry/
+    # deposit-patience latches, pile-divert latches and the pile ring) — one
+    # R press pins the whole SK decision state; the static pack and the BFS
+    # rows after tag_skstate are excluded (like seek_dist / drop_dist).
+    if layout.has_field('tag_skstate') and layout.has_field('sk_routing_active'):
+        skstate_dump_len = (layout.field('sk_pile_pos').offset
+                            + layout.field('sk_pile_pos').size
+                            - layout.field('sk_routing_active').offset)
+        emit_chunk(layout.va('tag_skstate'),
+                   b'\xB8' + le32(layout.va('sk_routing_active')),
+                   skstate_dump_len, 'snap_skip_skstate')
 
     # Waypoint-graph probe. wp_compute populates wp_diag_data[0..7]:
     #   [+0x00] MGR, [+0x04] WM, [+0x08] LV, [+0x0C] WPM,

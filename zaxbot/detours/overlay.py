@@ -297,6 +297,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # flag_routing_active inside; inert stub on non-seek builds.
     if cfg.SWITCH_SEEK_ENABLED and layout.has_field('seek_active'):
         a.call_lbl('switch_seek_eval')
+    # SK pile-ring TTL: age each registered death-pile entry once per frame
+    # so stale (human-grabbed) piles expire. Register-preserving 8-slot loop;
+    # inert stub on non-SK builds.
+    if cfg.SK_ENABLED and layout.has_field('sk_pile_valid'):
+        a.call_lbl('sk_pile_tick')
     # Far CTF capture support. The bot force-tick above keeps the carrier
     # moving, but capture itself is driven by the base "checker" trigger at the
     # destination. Those entities are also camera-gated by the engine, so a bot

@@ -237,6 +237,15 @@ def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_switch_target')) + le32(0))  # drop switch bump
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_switch_cd')) + le32(0))      # fresh roll cooldown
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_switch_try')) + le32(0))     # fresh press patience
+    if layout.has_field('bot_sk_return'):
+        # Fresh SK phase state: a respawned bot carries nothing (the death
+        # drop consumed the load), so it starts in COLLECT with clean
+        # deposit patience and no pile divert.
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_sk_return')) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_sk_dep_try')) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pile_target')) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pile_cd')) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pile_try')) + le32(0))
     a.raw(b'\x89\x14\x8D' + le32(bot_last_char_va))       # bot_last_char[slot] = edx
     a.label('s542360_char_same')
 
@@ -321,6 +330,9 @@ def _emit_stuck_detection(a: Asm, layout: ScratchLayout) -> None:
         if layout.has_field('bot_switch_target'):
             # Same for a latched switch bump — the switch is an arena away.
             a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_switch_target')) + le32(0))
+        if layout.has_field('bot_pile_target'):
+            # Same for a latched SK pile divert.
+            a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pile_target')) + le32(0))
         if layout.has_field('bot_portal_cd'):
             # Teleported: arm the wander-entry cooldown so the roam roll at
             # the exit node (which IS the return pad's node) can't bounce the
@@ -779,6 +791,36 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         switch_table_sw_va   = layout.va('switch_table')
         switch_count_sw_va   = layout.va('switch_count')
 
+    # Salvage King layer: sk_next_hop replaces the arrival next-hop while
+    # sk_routing_active (COLLECT descends the multi-source mineral field,
+    # RETURN descends the bot's own-bin row); the deposit final approach
+    # steers at the bin center once the bot stands on its bin's node; the
+    # pile divert opportunistically steers at a registered death pile.
+    sk_move = (cfg.SK_ENABLED
+               and layout.has_field('sk_routing_active')
+               and layout.has_field('bot_sk_return')
+               and layout.has_field('sk_bin_table')
+               and layout.has_field('sk_pile_valid')
+               and layout.has_field('bot_route_suspend')
+               and layout.has_field('bot_team'))
+    if sk_move:
+        sk_team_mv_va       = layout.va('bot_team')
+        sk_suspend_mv_va    = layout.va('bot_route_suspend')
+        sk_active_mv_va     = layout.va('sk_routing_active')
+        bot_sk_return_va    = layout.va('bot_sk_return')
+        bot_sk_dep_try_va   = layout.va('bot_sk_dep_try')
+        sk_bin_table_mv_va  = layout.va('sk_bin_table')
+        sk_bin_valid_mv_va  = layout.va('sk_bin_valid')
+        sk_bin_node_mv_va   = layout.va('sk_bin_node')
+        bot_pile_target_va  = layout.va('bot_pile_target')
+        bot_pile_cd_va      = layout.va('bot_pile_cd')
+        bot_pile_try_va     = layout.va('bot_pile_try')
+        bot_pile_best_va    = layout.va('bot_pile_best')
+        sk_pile_valid_mv_va = layout.va('sk_pile_valid')
+        sk_pile_pos_mv_va   = layout.va('sk_pile_pos')
+        sk_pile_radius_va   = layout.va('sk_pile_pursue_radius_sq')
+        sk_pile_reached_va  = layout.va('sk_pile_reached_radius_sq')
+
     # === Waypoint following =============================================
     a.raw(b'\x83\x3D' + le32(wp_follow_enabled_va) + b'\x00')
     a.jz('s542360_fallback_zero')
@@ -1150,6 +1192,142 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # node logic starts clean
         a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
         a.label('s542360_drp_done')
+    if sk_move:
+        # --- SK death-pile divert (latch-driven straight-steer) ------------
+        # Runs after the pad latch and the (CTF-only, so mutually exclusive)
+        # drop pursuit; outranks the switch bump. Opportunistic only: a bot
+        # passing within sk_pile_pursue_radius_sq of a registered pile
+        # steers straight at the recorded corpse position through the
+        # standard watchdog + press patience. Reaching it clears the ring
+        # entry optimistically (the touch consumed the pile) and arms the
+        # grab cooldown; exhausted patience arms the retry cooldown. Ring
+        # entries are TTL-bounded, so a stale (human-grabbed) pile costs at
+        # most a few short revisits.
+        a.raw(b'\x83\x3D' + le32(sk_active_mv_va) + b'\x00')
+        a.jz('s542360_skp_done')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8B\x04\x8D' + le32(bot_pile_cd_va))     # eax = cd[slot]
+        a.raw(b'\x85\xC0'); a.jz('s542360_skp_cd0')
+        a.raw(b'\x48')                                    # dec eax
+        a.raw(b'\x89\x04\x8D' + le32(bot_pile_cd_va))
+        a.jmp('s542360_skp_done')
+        a.label('s542360_skp_cd0')
+        a.raw(b'\x8B\x04\x8D' + le32(bot_pile_target_va)) # eax = latch (idx+1 / 0)
+        a.raw(b'\x85\xC0'); a.jnz('s542360_skp_have')
+        # Entry scan: nearest live pile within the pursue radius. Mirrors
+        # the drop-pursuit scan (ebx = best idx, ST1 = best dsq).
+        a.raw(b'\xBB\xFF\xFF\xFF\xFF')                    # ebx = -1
+        a.raw(b'\xC7\x05' + le32(dx_accum_va) + le32(0x7F7FFFFF))
+        a.raw(b'\xD9\x05' + le32(dx_accum_va))            # fld FLT_MAX (best)
+        a.raw(b'\x31\xF6')                                # esi = 0 (slot i)
+        a.label('s542360_skp_scan')
+        a.raw(b'\x83\xFE' + bytes([cfg.SK_PILE_TABLE_MAX]))
+        a.jae('s542360_skp_scan_pop')
+        a.raw(b'\x83\x3C\xB5' + le32(sk_pile_valid_mv_va) + b'\x00')  # ttl > 0?
+        a.jz('s542360_skp_scan_next')
+        a.raw(b'\xD9\x04\xF5' + le32(sk_pile_pos_mv_va))       # fld pile.x
+        a.raw(b'\xD8\x25' + le32(bot_pos_va))             # fsub bot.x
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xD9\x04\xF5' + le32(sk_pile_pos_mv_va + 4))   # fld pile.y
+        a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))         # fsub bot.y
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xDE\xC1')                                # faddp -> ST0=dsq, ST1=best
+        a.raw(b'\xD9\x05' + le32(sk_pile_radius_va))      # fld radius (ST0=r, ST1=dsq)
+        a.raw(b'\xDF\xF1')                                # fcomip r:dsq (pop r)
+        a.jb('s542360_skp_scan_skip')                     # r < dsq -> out of range
+        a.raw(b'\xD8\xD1')                                # fcom st(1) (dsq:best)
+        a.raw(b'\xDF\xE0'); a.raw(b'\x9E')                # fnstsw ax; sahf
+        a.jae('s542360_skp_scan_skip')                    # dsq >= best -> keep best
+        a.raw(b'\xD9\xC9')                                # fxch (ST0=best, ST1=dsq)
+        a.raw(b'\xDD\xD8')                                # fstp st0 (pop old best)
+        a.raw(b'\x89\xF3')                                # ebx = i (new best)
+        a.jmp('s542360_skp_scan_next')
+        a.label('s542360_skp_scan_skip')
+        a.raw(b'\xDD\xD8')                                # fstp st0 (pop dsq)
+        a.label('s542360_skp_scan_next')
+        a.raw(b'\x46')                                    # ++i
+        a.jmp('s542360_skp_scan')
+        a.label('s542360_skp_scan_pop')
+        a.raw(b'\xDD\xD8')                                # fstp st0 (pop best; FPU empty)
+        a.raw(b'\x83\xFB\xFF')                            # candidate found?
+        a.jz('s542360_skp_done')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8D\x43\x01')                            # lea eax, [ebx+1]
+        a.raw(b'\x89\x04\x8D' + le32(bot_pile_target_va)) # latch = idx+1
+        a.raw(b'\xC7\x04\x8D' + le32(bot_pile_try_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(bot_pile_best_va) + le32(0x7F7FFFFF))
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))   # fresh watchdog
+        # fall through with eax = idx+1
+        a.label('s542360_skp_have')
+        a.raw(b'\x48')                                    # eax = pile idx
+        a.raw(b'\x83\xF8' + bytes([cfg.SK_PILE_TABLE_MAX]))  # stale idx?
+        a.jae('s542360_skp_clear')
+        a.raw(b'\x83\x3C\x85' + le32(sk_pile_valid_mv_va) + b'\x00')  # expired?
+        a.jz('s542360_skp_clear')
+        # desired = pile - bot (staged for the emit)
+        a.raw(b'\xD9\x04\xC5' + le32(sk_pile_pos_mv_va))       # fld pile.x [eax*8]
+        a.raw(b'\xD8\x25' + le32(bot_pos_va))             # fsub bot.x
+        a.raw(b'\xD9\x1D' + le32(dx_accum_va))            # fstp dx_accum
+        a.raw(b'\xD9\x04\xC5' + le32(sk_pile_pos_mv_va + 4))   # fld pile.y
+        a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))         # fsub bot.y
+        a.raw(b'\xD9\x1D' + le32(dy_accum_va))            # fstp dy_accum
+        a.raw(b'\xD9\x05' + le32(dx_accum_va))            # fld dx
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xD9\x05' + le32(dy_accum_va))            # fld dy
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xDE\xC1')                                # faddp -> ST0 = dsq(bot, pile)
+        # Reached? The pile's CollideTrigger consumed on overlap.
+        a.raw(b'\xD9\x05' + le32(sk_pile_reached_va))     # fld reached (ST0=r, ST1=dsq)
+        a.raw(b'\xDF\xF1')                                # fcomip r:dsq (pop r)
+        a.jb('s542360_skp_watch')                         # r < dsq -> keep going
+        a.raw(b'\xDD\xD8')                                # fstp st0 (drop dsq)
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8B\x04\x8D' + le32(bot_pile_target_va)) # eax = idx+1
+        a.raw(b'\x48')                                    # eax = idx
+        a.raw(b'\xC7\x04\x85' + le32(sk_pile_valid_mv_va) + le32(0))  # consume entry
+        a.raw(b'\xC7\x04\x8D' + le32(bot_pile_target_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(bot_pile_cd_va)
+              + le32(cfg.SK_PILE_GRAB_COOLDOWN_FRAMES))
+        a.raw(b'\xC7\x04\x8D' + le32(bot_pile_try_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.jmp('s542360_emit')
+        a.label('s542360_skp_watch')                      # ST0 = dsq
+        # Watchdog with press patience (exact mirror of the drop direct
+        # phase, on the pile's own progress tracker).
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8B\x04\x8D' + le32(stuck_count_va))     # eax = stuck_count[slot]
+        a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES]))
+        a.jae('s542360_skp_no_progress')                  # physically pinned
+        a.raw(b'\xD9\x04\x8D' + le32(bot_pile_best_va))   # fld best (ST0=best, ST1=dsq)
+        a.raw(b'\xDF\xF1')                                # fcomip st0,st1 (best:dsq, pop)
+        a.jbe('s542360_skp_no_progress')                  # best <= dsq -> no improvement
+        a.raw(b'\xD9\x1C\x8D' + le32(bot_pile_best_va))   # best = dsq (pop)
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.jmp('s542360_emit')
+        a.label('s542360_skp_no_progress')
+        a.raw(b'\xDD\xD8')                                # fstp st0 (drop dsq)
+        a.raw(b'\xFF\x04\x8D' + le32(wp_try_va))          # ++wp_try[slot]
+        a.raw(b'\x8B\x04\x8D' + le32(wp_try_va))          # eax = wp_try
+        a.raw(b'\x3B\x05' + le32(wp_progress_timeout_va))
+        a.jb('s542360_emit')                              # keep steering; slide sweeps
+        a.raw(b'\xFF\x04\x8D' + le32(bot_pile_try_va))    # ++patience used
+        a.raw(b'\x83\x3C\x8D' + le32(bot_pile_try_va)
+              + bytes([cfg.SK_PILE_PRESS_PATIENCE]))
+        a.ja('s542360_skp_impatient')                     # budget exhausted
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))    # fresh cycle
+        a.raw(b'\xC7\x04\x8D' + le32(bot_pile_best_va) + le32(0x7F7FFFFF))
+        a.jmp('s542360_emit')                             # keep pressing
+        a.label('s542360_skp_impatient')
+        a.raw(b'\xC7\x04\x8D' + le32(bot_pile_cd_va)
+              + le32(cfg.SK_PILE_RETRY_COOLDOWN_FRAMES))
+        a.label('s542360_skp_clear')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot (reload)
+        a.raw(b'\xC7\x04\x8D' + le32(bot_pile_target_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(bot_pile_try_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # node logic starts clean
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.label('s542360_skp_done')
     if switch_wander:
         # --- Roam switch bump approach (latch-driven) ----------------------
         # Runs after the pad/drop latches (both outrank a bump). Fast path
@@ -1421,6 +1599,89 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         # goal node, arrives, and ctf_next_hop (whose ctf_pick_goal now reads
         # the suspension) hands it to the random wp_advance.
         a.label('s542360_wp_not_final')
+    if sk_move:
+        # --- SK deposit final approach --------------------------------------
+        # Once a RETURN-phase bot's current node IS its own bin's nearest
+        # node the graph can take it no closer, so steer straight at the bin
+        # CENTER — the bin is a collidable prop whose CollideTrigger fires
+        # on the bump and the engine's canned action consumes + scores the
+        # whole load (sub_561AB0). The per-think sk_update_phase call sees
+        # the emptied inventory the same think, clears the RETURN latch, and
+        # this block stops firing — the arrival logic resumes and the next
+        # sk_next_hop routes back out for more minerals. Exhausted press
+        # patience (wedged approach) suspends routing exactly like the CTF
+        # final-approach watchdog.
+        a.raw(b'\x83\x3D' + le32(sk_active_mv_va) + b'\x00')
+        a.jz('s542360_skfa_done')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x83\x3C\x8D' + le32(sk_suspend_mv_va) + b'\x00')
+        a.jnz('s542360_skfa_done')                        # suspended -> roam
+        a.raw(b'\x83\x3C\x8D' + le32(bot_sk_return_va) + b'\x00')
+        a.jz('s542360_skfa_done')                         # collect phase
+        a.raw(b'\x8B\x14\x8D' + le32(sk_team_mv_va))        # edx = bot_team[slot]
+        a.raw(b'\x83\xE2' + bytes([cfg.SK_BIN_TABLE_MAX - 1]))  # and edx, 15
+        a.raw(b'\x83\x3C\x95' + le32(sk_bin_valid_mv_va) + b'\x00')
+        a.jz('s542360_skfa_done')                         # no authored bin
+        a.raw(b'\x8B\x34\x95' + le32(sk_bin_node_mv_va))  # esi = bin node
+        a.raw(b'\x8B\x04\x8D' + le32(current_wp_va))      # eax = current_wp[slot]
+        a.raw(b'\x39\xF0'); a.jnz('s542360_skfa_done')    # cur != bin node
+        # Standing on the bin node: refresh the carry state each think so
+        # the successful deposit ends the press the same frame.
+        a.call_lbl('sk_update_phase')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot (reload)
+        a.raw(b'\x83\x3C\x8D' + le32(bot_sk_return_va) + b'\x00')
+        a.jz('s542360_skfa_deposited')                    # emptied -> done
+        a.raw(b'\x8B\x14\x8D' + le32(sk_team_mv_va))        # edx = bot_team[slot]
+        a.raw(b'\x83\xE2' + bytes([cfg.SK_BIN_TABLE_MAX - 1]))
+        # desired = bin center - bot
+        a.raw(b'\xD9\x04\xD5' + le32(sk_bin_table_mv_va))     # fld bin.x [edx*8]
+        a.raw(b'\xD8\x25' + le32(bot_pos_va))             # fsub bot.x
+        a.raw(b'\xD9\x1D' + le32(dx_accum_va))            # fstp dx_accum
+        a.raw(b'\xD9\x04\xD5' + le32(sk_bin_table_mv_va + 4)) # fld bin.y
+        a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))         # fsub bot.y
+        a.raw(b'\xD9\x1D' + le32(dy_accum_va))            # fstp dy_accum
+        # Watchdog + press patience (mirror of the switch bump press).
+        a.raw(b'\xD9\x05' + le32(dx_accum_va))            # fld dx
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xD9\x05' + le32(dy_accum_va))            # fld dy
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xDE\xC1')                                # faddp -> ST0 = dsq(bot, bin)
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8B\x04\x8D' + le32(stuck_count_va))     # eax = stuck_count[slot]
+        a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES]))
+        a.jae('s542360_skfa_no_progress')                 # physically pinned
+        a.raw(b'\xD9\x04\x8D' + le32(wp_best_dsq_va))     # fld best (ST0=best, ST1=dsq)
+        a.raw(b'\xDF\xF1')                                # fcomip st0,st1 (best:dsq, pop)
+        a.jbe('s542360_skfa_no_progress')                 # best <= dsq -> no improvement
+        a.raw(b'\xD9\x1C\x8D' + le32(wp_best_dsq_va))     # best = dsq (pop)
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.jmp('s542360_emit')
+        a.label('s542360_skfa_no_progress')
+        a.raw(b'\xDD\xD8')                                # fstp st0 (drop dsq)
+        a.raw(b'\xFF\x04\x8D' + le32(wp_try_va))          # ++wp_try[slot]
+        a.raw(b'\x8B\x04\x8D' + le32(wp_try_va))          # eax = wp_try
+        a.raw(b'\x3B\x05' + le32(wp_progress_timeout_va))
+        a.jb('s542360_emit')                              # keep pressing; slide sweeps
+        a.raw(b'\xFF\x04\x8D' + le32(bot_sk_dep_try_va))  # ++patience used
+        a.raw(b'\x83\x3C\x8D' + le32(bot_sk_dep_try_va)
+              + bytes([cfg.SK_DEPOSIT_PRESS_PATIENCE]))
+        a.ja('s542360_skfa_impatient')                    # budget exhausted
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))     # fresh cycle
+        a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))
+        a.jmp('s542360_emit')                             # keep pressing the bin
+        a.label('s542360_skfa_impatient')
+        a.raw(b'\xC7\x04\x8D' + le32(bot_sk_dep_try_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(sk_suspend_mv_va)
+              + le32(cfg.WP_ROUTE_SUSPEND_FRAMES))        # roam, retry later
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))
+        a.jmp('s542360_skfa_done')                        # fall into node logic
+        a.label('s542360_skfa_deposited')
+        # Deposit landed: clean trackers so the node logic resumes fresh.
+        a.raw(b'\xC7\x04\x8D' + le32(bot_sk_dep_try_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.label('s542360_skfa_done')
     # Arrival test: dsq(bot, vertices[cur]) < wp_reached_radius_sq ?
     # If the bot is wedged and already near the node, accept a larger "stuck
     # arrival" radius. This avoids the far-bot failure where collision leaves a
@@ -1738,6 +1999,18 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
             a.jnz('s542360_wp_hop_done')                 # got a drop hop
             a.raw(b'\x8B\x4C\x24\x04')                   # ecx = cur (helper clobbered it)
             a.label('s542360_wp_use_cnh')
+            if sk_move:
+                # SK matches: descend the mineral/own-bin field instead of
+                # the (inert-in-SK) CTF goal field. -1 falls through to
+                # ctf_next_hop, which also returns -1 in SK, and then to the
+                # random wp_advance — exactly the mineral-zone roam.
+                a.raw(b'\x83\x3D' + le32(sk_active_mv_va) + b'\x00')
+                a.jz('s542360_wp_no_sk_hop')
+                a.call_lbl('sk_next_hop')                # eax = SK hop or -1 (in: ecx=cur)
+                a.raw(b'\x83\xF8\xFF')
+                a.jnz('s542360_wp_hop_done')             # got an SK hop
+                a.raw(b'\x8B\x4C\x24\x04')               # ecx = cur (helper clobbered it)
+                a.label('s542360_wp_no_sk_hop')
             a.call_lbl('ctf_next_hop')                   # eax = goal next-hop or -1 (in: ecx=cur)
             a.label('s542360_wp_hop_done')
         else:
@@ -2355,6 +2628,9 @@ def _emit_dead_and_zero_return(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_drop_target')) + le32(0))    # drop flag pursuit
     if layout.has_field('bot_switch_target'):
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_switch_target')) + le32(0))  # drop switch bump
+    if layout.has_field('bot_pile_target'):
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pile_target')) + le32(0))    # drop pile divert
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_sk_return')) + le32(0))      # dead = carrying nothing
     # fall through to zero-vector return.
 
     # --- Zero-vector return (panic / NULL char / degenerate normalize) ---

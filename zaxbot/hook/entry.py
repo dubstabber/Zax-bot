@@ -15,6 +15,7 @@ from ..layout import build_scratch_layout
 from ..portal_data import resolve_portal_data, resolve_portal_routes
 from ..flag_data import resolve_flag_data
 from ..door_data import resolve_door_topology
+from ..sk_data import resolve_sk_data
 from ..static_data import write_static_scratch_data
 from . import aim_lead, apply_colors, detect_mode, dispatcher, snapshot, spawn, waypoint_diag, waypoint_edit, weapon_speed
 from .helpers import emit_logc_body, emit_wbuf_body
@@ -33,6 +34,7 @@ from ..detours import (
     overlay,
     pickup_register,
     portal_register,
+    sk_pile_register,
     spawn_safety,
     walk_controller,
     world_scan,
@@ -63,6 +65,7 @@ _DETOUR_LABEL_KEYS = {
     'detour_5A9960':           'detour_5A9960_va',
     'detour_4C29F0':           'detour_4C29F0_va',
     'detour_4C2D60':           'detour_4C2D60_va',
+    'detour_5A6E60':           'detour_5A6E60_va',
 }
 
 
@@ -120,6 +123,13 @@ def build_hook(section_va_abs):
         switch_static_point_max=cfg.SWITCH_STATIC_POINT_MAX if _switch_on() else 0,
         switch_static_pair_max=cfg.SWITCH_STATIC_PAIR_MAX if _switch_on() else 0,
         switch_map_name_slot=cfg.SWITCH_MAP_NAME_SLOT if _switch_on() else 0,
+        sk_mineral_table_max=cfg.SK_MINERAL_TABLE_MAX if cfg.SK_ENABLED else 0,
+        sk_bin_table_max=cfg.SK_BIN_TABLE_MAX if cfg.SK_ENABLED else 0,
+        sk_static_map_max=cfg.SK_STATIC_MAP_MAX if cfg.SK_ENABLED else 0,
+        sk_static_mineral_max=cfg.SK_STATIC_MINERAL_MAX if cfg.SK_ENABLED else 0,
+        sk_static_bin_max=cfg.SK_STATIC_BIN_MAX if cfg.SK_ENABLED else 0,
+        sk_map_name_slot=cfg.SK_MAP_NAME_SLOT if cfg.SK_ENABLED else 0,
+        sk_pile_table_max=cfg.SK_PILE_TABLE_MAX if cfg.SK_ENABLED else 0,
     )
 
     a = Asm(section_va_abs + cfg.HOOK_ENTRY_OFF)
@@ -167,6 +177,7 @@ def build_hook(section_va_abs):
     overlay.emit(a, layout)
     pickup_register.emit(a, layout)
     portal_register.emit(a, layout)
+    sk_pile_register.emit(a, layout)
     entity_scan.emit(a, layout)
     flag_events.emit(a, layout)
     flag_route.emit(a, layout)
@@ -181,6 +192,7 @@ def build_hook(section_va_abs):
     portal_maps = resolve_portal_data()
     flag_maps = resolve_flag_data()
     door_maps = resolve_door_topology() if cfg.DOOR_DETECT_ENABLED else ()
+    sk_maps = resolve_sk_data() if cfg.SK_ENABLED else ()
 
     section = bytearray(cfg.NEW_SECTION_SIZE)
     section[cfg.HOOK_ENTRY_OFF:cfg.HOOK_ENTRY_OFF + len(code)] = code
@@ -292,6 +304,12 @@ def build_hook(section_va_abs):
         ctf_drop_reached_radius_sq=cfg.CTF_DROP_REACHED_RADIUS_SQ,
         ctf_drop_direct_radius_sq=cfg.CTF_DROP_DIRECT_RADIUS_SQ,
         ctf_drop_abandon_radius_sq=cfg.CTF_DROP_ABANDON_RADIUS_SQ,
+        sk_maps=sk_maps,
+        sk_map_name_slot=cfg.SK_MAP_NAME_SLOT,
+        sk_return_carry_min=cfg.SK_RETURN_CARRY_MIN,
+        sk_pile_pursue_radius_sq=cfg.SK_PILE_PURSUE_RADIUS_SQ,
+        sk_pile_reached_radius_sq=cfg.SK_PILE_REACHED_RADIUS_SQ,
+        sk_pile_ttl_frames=cfg.SK_PILE_TTL_FRAMES,
     )
 
     info = {

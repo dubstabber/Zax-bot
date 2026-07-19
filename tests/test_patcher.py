@@ -962,6 +962,202 @@ class SwitchWanderTests(unittest.TestCase):
         self.assertFalse(layout.has_field('switch_wander_chance'))
 
 
+class SalvageKingTests(unittest.TestCase):
+    """Salvage King static census + scratch invariants + routing simulation.
+
+    Census source: zaxbot/sk_data.py parse of the shipped Data.dat
+    (2026-07-19). Minerals are Model=Items/Money/* CEntityBase pickups with
+    Used In=MultiPlayer/Salvage King; bins are 'Bin NN' CollideTrigger parts
+    running the 'Drop Ore in Container' canned, whose authored Team Number ==
+    NN-1 == the SK bot team id (botidx). Both are load-bearing for the SK
+    behavior layer: the deposit canned gates on the toucher's team matching
+    the bin's, so a wrong census means bots press bins that can never score.
+    """
+
+    # (ore, crystals, bins) per SK-capable map — 8 Greed maps + Jungle Ruins.
+    SK_CENSUS = {
+        'Caves of Gold.zax': (258, 115, 12),
+        'Cold Crucible.zax': (66, 59, 8),
+        'Cold Sweat.zax': (66, 54, 3),
+        'Corridor of Suffering.zax': (51, 56, 4),
+        'Jungle Madness.zax': (103, 66, 6),
+        'Molten Ice.zax': (92, 71, 3),
+        'The Foundry.zax': (262, 124, 16),
+        'Underground Frenzy.zax': (66, 59, 8),
+        'Jungle Ruins.zax': (182, 106, 10),
+    }
+
+    def _sk_maps(self):
+        from zaxbot.sk_data import resolve_sk_data
+        maps = resolve_sk_data()
+        if not maps:
+            self.skipTest('Data.dat not present')
+        return maps
+
+    def test_sk_census_is_pinned(self):
+        maps = self._sk_maps()
+        seen = {}
+        for m in maps:
+            base = m.map_name.replace('\\', '/').rsplit('/', 1)[-1]
+            ore = sum(1 for p in m.minerals if p[2] == 0)
+            cry = sum(1 for p in m.minerals if p[2] == 1)
+            seen[base] = (ore, cry, len(m.bins))
+            # Bins must be contiguous team ids [0, N) in team order — the
+            # runtime table is INDEXED by team id and the SK spawn path
+            # assigns botidx < MaxPlayers == bin count.
+            self.assertEqual([b[2] for b in m.bins], list(range(len(m.bins))),
+                             f'{base}: bins not contiguous by team')
+        self.assertEqual(seen, self.SK_CENSUS)
+        # Capacity pins: the static pack and the live table must hold the
+        # shipped content (The Foundry peaks at 386 minerals / 16 bins).
+        total_minerals = sum(len(m.minerals) for m in maps)
+        total_bins = sum(len(m.bins) for m in maps)
+        self.assertEqual(total_minerals, 1856)
+        self.assertEqual(total_bins, 70)
+        self.assertLessEqual(total_minerals, cfg.SK_STATIC_MINERAL_MAX)
+        self.assertLessEqual(total_bins, cfg.SK_STATIC_BIN_MAX)
+        self.assertLessEqual(len(maps), cfg.SK_STATIC_MAP_MAX)
+        self.assertLessEqual(max(len(m.minerals) for m in maps),
+                             cfg.SK_MINERAL_TABLE_MAX)
+        self.assertLessEqual(max(len(m.bins) for m in maps),
+                             cfg.SK_BIN_TABLE_MAX)
+        # The reported "only ~80-90% of ores marked" overlay gap was the old
+        # 96-slot pickup table saturating: SK mode loads every mineral PLUS
+        # the weapon/ammo/health mix (The Foundry: 502 total). Keep the live
+        # pickup table above the shipped worst case.
+        self.assertGreaterEqual(cfg.PICKUP_TABLE_MAX, 512)
+
+    def test_sk_scratch_block_layout_invariants(self):
+        layout = build_scratch_layout(
+            zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA + zax_patch.SCRATCH_OFF,
+            zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF,
+            zax_patch.NUM_BOT_NAMES,
+            zax_patch.NAME_SLOT_SIZE,
+            zax_patch.NAME_SLOT_ASCII,
+            cfg.WEAPON_SPEEDS_MAX,
+            overlay_vertex_max=cfg.OVERLAY_VERTEX_MAX,
+            overlay_edge_max=cfg.OVERLAY_EDGE_MAX,
+            sk_mineral_table_max=cfg.SK_MINERAL_TABLE_MAX,
+            sk_bin_table_max=cfg.SK_BIN_TABLE_MAX,
+            sk_static_map_max=cfg.SK_STATIC_MAP_MAX,
+            sk_static_mineral_max=cfg.SK_STATIC_MINERAL_MAX,
+            sk_static_bin_max=cfg.SK_STATIC_BIN_MAX,
+            sk_map_name_slot=cfg.SK_MAP_NAME_SLOT,
+            sk_pile_table_max=cfg.SK_PILE_TABLE_MAX,
+        )
+        # load_sk clears bot_sk_return..bot_pile_best with ONE rep stosd (7
+        # contiguous u32[16] arrays) — pin the physical ordering it relies on.
+        perbot = ['bot_sk_return', 'bot_sk_carry', 'bot_sk_dep_try',
+                  'bot_pile_target', 'bot_pile_cd', 'bot_pile_try',
+                  'bot_pile_best']
+        for prev, cur in zip(perbot, perbot[1:]):
+            self.assertEqual(layout.field(cur).offset, layout.field(prev).end,
+                             f'{cur} not contiguous after {prev}')
+            self.assertEqual(layout.field(cur).size, 16 * 4)
+        # The `skstate` snapshot chunk dumps sk_routing_active..sk_pile_pos as
+        # one range ending right before tag_skstate; the pile ring must sit
+        # inside it and the cold data (static pack + BFS rows) after the tag.
+        start = layout.field('sk_routing_active')
+        pile_pos = layout.field('sk_pile_pos')
+        tag = layout.field('tag_skstate')
+        self.assertEqual(tag.offset, pile_pos.end)
+        self.assertLess(start.offset, pile_pos.offset)
+        self.assertGreater(layout.field('sk_static_maps').offset, tag.offset)
+        self.assertGreater(layout.field('sk_ore_dist').offset, tag.offset)
+        # Row strides the emitted descent code assumes.
+        self.assertEqual(layout.field('sk_ore_dist').size,
+                         cfg.OVERLAY_VERTEX_MAX * 4)
+        self.assertEqual(layout.field('sk_bin_dist').size,
+                         cfg.SK_BIN_TABLE_MAX * cfg.OVERLAY_VERTEX_MAX * 4)
+        # The pile ring mask in the register detour needs a power of two.
+        self.assertEqual(cfg.SK_PILE_TABLE_MAX & (cfg.SK_PILE_TABLE_MAX - 1), 0)
+
+    def test_sk_routing_fields_on_shipped_graphs(self):
+        # Offline simulation of the emitted SK fields on every shipped
+        # SK-capable graph: the MULTI-SOURCE mineral field (bfs_run_seeded
+        # semantics — every bound mineral node at distance 0, weighted SPFA
+        # relax) and the per-team bin rows. Asserts the data premises the
+        # follower relies on: minerals bind, every graph node reaches a
+        # mineral zone (strict descent terminates at dist 0), and every
+        # authored bin's node is reachable from the mineral zones (the
+        # RETURN descent can always get home).
+        import heapq
+        import math
+        import struct as _struct
+        from pathlib import Path
+
+        maps = self._sk_maps()
+        for m in maps:
+            name = m.map_name.replace('\\', '/')
+            path = (Path(__file__).resolve().parents[1] / 'waypoints'
+                    / (name.replace('/', '_') + '.zwpt'))
+            if not path.exists():
+                continue
+            d = path.read_bytes()
+            magic, _ver, vc, ec = _struct.unpack('<4sIII', d[:16])
+            self.assertEqual(magic, b'ZWPT')
+            verts = [_struct.unpack('<ff', d[16 + i*8:24 + i*8])
+                     for i in range(vc)]
+            eoff = 16 + vc*8
+            edges = []
+            for e in range(ec):
+                w = _struct.unpack('<I', d[eoff + e*4:eoff + e*4 + 4])[0]
+                edges.append((w & 0xFFFF, w >> 16))
+            self.assertGreater(vc, 0, f'{name}: empty graph')
+
+            def nearest(x, y):
+                return min(range(vc),
+                           key=lambda k: (verts[k][0]-x)**2 + (verts[k][1]-y)**2)
+
+            def elen(i, j):
+                # round-half-even matches the emitted x87 fistp default
+                return max(1, round(math.dist(verts[i], verts[j])
+                                    / cfg.WP_EDGE_LEN_QUANTUM))
+
+            adj = {}
+            for (i, j) in edges:
+                if i < vc and j < vc:
+                    adj.setdefault(i, []).append(j)
+                    adj.setdefault(j, []).append(i)
+
+            def field(sources):
+                dist = [-1] * vc
+                pq = []
+                for s in sources:
+                    if dist[s] != 0:
+                        dist[s] = 0
+                        heapq.heappush(pq, (0, s))
+                while pq:
+                    du, u = heapq.heappop(pq)
+                    if du > dist[u]:
+                        continue
+                    for v in adj.get(u, ()):
+                        w = elen(u, v)
+                        if dist[v] == -1 or du + w < dist[v]:
+                            dist[v] = du + w
+                            heapq.heappush(pq, (du + w, v))
+                return dist
+
+            mineral_nodes = sorted({nearest(x, y) for (x, y, _k) in m.minerals})
+            self.assertTrue(mineral_nodes, f'{name}: no minerals bound')
+            ore = field(mineral_nodes)
+            unreachable = [k for k in range(vc) if ore[k] == -1]
+            self.assertFalse(
+                unreachable,
+                f'{name}: nodes {unreachable} cannot reach any mineral zone')
+
+            for (bx, by, team) in m.bins:
+                bin_node = nearest(bx, by)
+                row = field([bin_node])
+                # Every mineral zone must reach the bin (RETURN phase) and
+                # the strict descent from the bin must find minerals again
+                # (COLLECT phase leaves the bin after depositing).
+                for mn in mineral_nodes:
+                    self.assertNotEqual(
+                        row[mn], -1,
+                        f'{name}: bin {team} unreachable from mineral node {mn}')
+
+
 class PatcherTests(unittest.TestCase):
     def test_patch_manifest_names_and_targets_are_valid(self):
         names = [patch.name for patch in zax_patch.ENABLED_PATCHES]
@@ -1082,8 +1278,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = 'e5d80571bcfce0881cf99eeb3e13a140aaeed1ebb180ea8a9edc0e1ff1b88415'
-    HOOK_ENTRY_SIZE = 33745
+    SECTION_SHA256 = '467024f96e33012fe95c9d6a4226823bcb66996de29b2186f707744b83c7b574'
+    HOOK_ENTRY_SIZE = 36819
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

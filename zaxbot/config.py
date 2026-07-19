@@ -11,19 +11,23 @@ from .build import SectionSpec
 # --- new section parameters (.zaxbot) -------------------------------------
 NEW_SECTION_NAME   = b'.zaxbot\x00'
 NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
-NEW_SECTION_SIZE   = 0x18000       # 36KB code + 60KB scratch (grown for the door detection
+NEW_SECTION_SIZE   = 0x26000       # 40KB code + 112KB scratch (grown for the door detection
                                    # tables, the door-aware routing field, its per-team
                                    # split, the switch detection tables, the portal
-                                   # routing layer — dest tables + node bindings — then
-                                   # the dropped-flag pursuit layer: drop_dist BFS rows)
+                                   # routing layer — dest tables + node bindings — the
+                                   # dropped-flag pursuit layer: drop_dist BFS rows —
+                                   # then the SK layer: 1856 static mineral anchors,
+                                   # per-team bin tables, the mineral field + 16 bin
+                                   # BFS rows, and the 512-slot pickup table)
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
-SCRATCH_OFF        = 0x9000        # writable scratch buffer; 36KB code / 60KB scratch
+SCRATCH_OFF        = 0xA000        # writable scratch buffer; 40KB code / 112KB scratch
                                    # (boundary moved from 0x5A00 at the door layer, from
                                    # 0x6800 at the switch layer, from 0x7000 at the
-                                   # portal-routing layer, then from 0x8000 when the
+                                   # portal-routing layer, from 0x8000 when the
                                    # dropped-flag ROUTED pursuit landed with ~456 code
-                                   # bytes left)
+                                   # bytes left, then from 0x9000 at the SK layer with
+                                   # ~3.0KB code left)
 
 ZAXBOT_SECTION = SectionSpec(
     name=NEW_SECTION_NAME,
@@ -545,9 +549,13 @@ PICKUP_REGISTER_ENABLED = False
 # toggle turns registration on/off alongside overlay drawing so normal play
 # does not keep populating pickup_table every frame.
 PICKUP_OVERLAY_MARKERS_ENABLED = True
-# Max pickups tracked per frame (each slot is 8 bytes: x, y floats). Greed
-# maps scatter many ore / ammo / health / energy items; size generously.
-PICKUP_TABLE_MAX        = 96
+# Max pickups tracked per frame (each slot is 8 bytes: x, y floats). Sized to
+# the Data.dat census (2026-07-19): SK mode loads every mineral, and The
+# Foundry peaks at 502 total pickups (386 minerals + the weapon/ammo/health
+# mix); EVERY SK map exceeds the old 96 cap (min 135), which was the reported
+# "only ~80-90% of ores are marked" overlay gap — pickups past the cap simply
+# never registered. Non-SK modes stay well under (max: Battle on the Ice 74).
+PICKUP_TABLE_MAX        = 512
 
 # --- Teleport/portal detection -------------------------------------------
 # Portal source trigger centers are extracted from Data.dat at patch-build time
@@ -988,6 +996,88 @@ WP_EDGE_LEN_QUANTUM = 16.0
 # bot simply passes; if it is still blocked the wedge timeout re-marks it and
 # the roam suspension takes over.
 WP_ROUTE_BLOCK_RETRY_HITS = 3
+
+# --- Salvage King (SK / "Greed") bot awareness ----------------------------
+# The SK loop: collect ore/crystal minerals scattered around the map, carry
+# them to YOUR OWN bin (the collector), bank points on deposit; dying drops
+# everything as a stealable pile. All authored data is static (Data.dat
+# census 2026-07-19, parsed by zaxbot/sk_data.py, pinned in tests):
+#   * minerals are CEntityBase parts with Model=Items/Money/{Ore deposit N,
+#     Crystal NN}, Used In=MultiPlayer/Salvage King (SK matches ONLY),
+#     respawn-in-place 10-15 s, and are DENSE (107..386 per map, 1856 across
+#     the 9 SK-capable maps — the 8 Greed maps + Jungle Ruins);
+#   * bins are 'Bin NN' CEntityAnimated CollideTrigger parts whose canned
+#     deposit action ('Drop Ore in Container') gates on CIsOnSameTeamAction —
+#     the authored Team Number == NN-1 covers [0, MaxPlayers) contiguously,
+#     the SAME id space the patch already assigns SK bots (team = botidx), so
+#     each bot's one scoring bin is known statically per map.
+# Behavior model (armed per match when detect_mode()==SK with a graph + SK
+# data — sk_routing_active):
+#   * COLLECT phase (carried minerals < SK_RETURN_CARRY_MIN): descend the
+#     per-match MULTI-SOURCE mineral field (sk_ore_dist — one bfs_run seeded
+#     with every mineral-bearing node at distance 0, built once per match:
+#     minerals respawn in place, so presence tracking is deliberately NOT
+#     attempted) toward the nearest mineral zone; INSIDE a zone (dist == 0)
+#     fall back to the random roam, which sweeps the dense cluster and
+#     collects by walk-over overlap.
+#   * RETURN phase (carried >= SK_RETURN_CARRY_MIN, latched until the deposit
+#     empties the inventory): descend this bot's own-bin row (sk_bin_dist,
+#     one bfs_run per authored bin at match start, indexed by team id) and
+#     final-approach the bin center at its node — bins are collidable props,
+#     so the press machinery (watchdog + patience) fires the CollideTrigger
+#     exactly like the switch wander-bump; the engine's canned action does
+#     the actual scoring/consuming, which flips the carry state and ends the
+#     approach naturally.
+SK_ENABLED = True
+# Deposit threshold: a bot heads home once carrying this many minerals total
+# (Ore Deposits + Crystals). Low = frequent short banking runs (safe, less
+# efficient); high = long greedy runs that lose more on death. The engine
+# awards score per deposited mineral, so this is pacing, not value.
+SK_RETURN_CARRY_MIN = 6
+# Live per-map mineral table (The Foundry authors 386 — the shipped max).
+SK_MINERAL_TABLE_MAX  = 400
+# Bins live table is indexed by TEAM id (== bin number - 1); 16 = MAX_BOT_SLOTS
+# and the shipped per-map max (The Foundry).
+SK_BIN_TABLE_MAX      = 16
+SK_STATIC_MAP_MAX     = 12   # shipped Data.dat has 9 SK-capable maps
+SK_STATIC_MINERAL_MAX = 1920 # shipped Data.dat has 1856 mineral anchors
+SK_STATIC_BIN_MAX     = 80   # shipped Data.dat has 70 bins
+SK_MAP_NAME_SLOT      = 96   # fixed ASCII bytes per map path, incl. NUL
+# Bin final-approach press patience (mirror of the switch/pad/door patience):
+# fresh watchdog cycles pressing the bin's collide trigger before the deposit
+# attempt suspends routing (roam) and retries later. The trigger re-fires
+# every 0.5 s while overlapping, so 2 cycles (~2 s) is ample for a clean
+# deposit; truly-wedged approaches suspend like every other final approach.
+SK_DEPOSIT_PRESS_PATIENCE = 2
+# --- SK death piles (the stealable "pile of ores and crystals") -----------
+# Every MP death runs the canned 'Drop Cystals and Ore' (sic) script whose
+# CDropAllOreAndCrystalsAction (apply sub_5A6E60) clones a NAMELESS
+# CEntityAnimated pile from the Ore_Crystals01 model template, placed
+# collision-aware within 500 px of the corpse, holding the victim's whole
+# load; TOUCHING it grants everything to either team and self-deletes. There
+# is no entity name to match (unlike CTF flag drops), so detection hooks the
+# drop apply itself (mirror of the portal self-registration): the detour
+# records the DYING CHARACTER's position into a small ring table — skipping
+# empty-handed deaths via the engine's own carried-count getter (sub_426860,
+# which the apply also gates on) — and pursuit steers at that point (the
+# placement lands at/near the corpse in open ground, which is where fights
+# happen). Entries expire by TTL, on a bot reaching the spot (optimistic
+# clear — the touch consumed it), and on match change; a pile a HUMAN
+# grabbed leaves at worst a TTL-bounded stale entry that costs a bot one
+# short revisit. Pursuit is opportunistic: a bot passing within
+# sqrt(SK_PILE_PURSUE_RADIUS_SQ) diverts straight at the pile through the
+# standard watchdog + patience, with a cooldown after success/failure so
+# nobody orbits an unreachable spot.
+SK_PILE_TABLE_MAX = 8
+SK_PILE_PURSUE_RADIUS_SQ  = 300.0 * 300.0
+SK_PILE_REACHED_RADIUS_SQ = 24.0 * 24.0
+SK_PILE_PRESS_PATIENCE    = 2
+SK_PILE_RETRY_COOLDOWN_FRAMES = 240
+SK_PILE_GRAB_COOLDOWN_FRAMES  = 150
+# Registered piles expire after this many frames (~45 s at 60 Hz) if nothing
+# collected them — SK piles rarely survive longer, and the bound keeps stale
+# human-grabbed entries from pulling bots forever.
+SK_PILE_TTL_FRAMES = 2700
 
 # --- Keep bots simulated when far from the host's camera -----------------
 # The engine advances an entity's components (incl. the bot walking-controller

@@ -57,6 +57,9 @@ DUMP_TAGS = (
     ('tag_dpursuit', 'dpursuit'),
     # Roam switch wander-bump state (per-bot bump latches + census/knob).
     ('tag_swander', 'swander'),
+    # Salvage King state (live mineral/bin tables + per-bot phase latches +
+    # pile ring; the static pack + BFS rows after the tag are excluded).
+    ('tag_skstate', 'skstate'),
 )
 
 
@@ -499,6 +502,100 @@ def write_switch_static_table(section, scratch_off, layout, switch_maps, map_nam
 _FORCE_MODE_TABLE = {None: 0xFFFFFFFF, 'dm': 0, 'ctf': 1, 'sk': 2}
 
 
+def write_sk_static_table(section, scratch_off, layout, sk_maps, map_name_slot):
+    """Pack build-time SK map records (mineral anchors + team-bound bins) and
+    seed every live SK table for the runtime ``load_sk`` copy.
+
+    ``sk_maps`` is a sequence of ``sk_data.MapSkData``. Each map record is
+    ``name[slot] | mineral_count u32 | mineral_first u32 | bin_count u32 |
+    bin_first u32``. Minerals pack as (x f32, y f32) in parse order; bins as
+    (x f32, y f32, team u32) in TEAM order (the live table is indexed by team
+    id, so load_sk scatters by the packed team field).
+    """
+    if not layout.has_field('sk_static_map_count'):
+        return
+
+    sk_maps = tuple(sk_maps or ())
+    # Live tables start inert: routing disarmed, counts zero, node binds -1,
+    # BFS rows unreachable, per-bot state clean. load_sk re-seeds per match.
+    layout.write(section, scratch_off, 'sk_routing_active', struct.pack('<I', 0))
+    layout.write(section, scratch_off, 'sk_mineral_count', struct.pack('<I', 0))
+    layout.write(section, scratch_off, 'sk_bin_count', struct.pack('<I', 0))
+    layout.write(section, scratch_off, 'sk_mineral_node',
+                 b'\xFF' * layout.field('sk_mineral_node').size)
+    layout.write(section, scratch_off, 'sk_bin_node',
+                 b'\xFF' * layout.field('sk_bin_node').size)
+    layout.write(section, scratch_off, 'sk_ore_dist',
+                 b'\xFF' * layout.field('sk_ore_dist').size)
+    layout.write(section, scratch_off, 'sk_bin_dist',
+                 b'\xFF' * layout.field('sk_bin_dist').size)
+
+    map_stride = map_name_slot + 16
+    map_capacity = layout.field('sk_static_maps').size // map_stride
+    mineral_capacity = layout.field('sk_static_minerals').size // 8
+    bin_capacity = layout.field('sk_static_bins').size // 12
+
+    if len(sk_maps) > map_capacity:
+        raise ValueError(
+            f'SK map table has {len(sk_maps)} rows but scratch holds {map_capacity}'
+        )
+    total_minerals = sum(len(m.minerals) for m in sk_maps)
+    if total_minerals > mineral_capacity:
+        raise ValueError(
+            f'SK mineral table has {total_minerals} rows but scratch holds {mineral_capacity}'
+        )
+    total_bins = sum(len(m.bins) for m in sk_maps)
+    if total_bins > bin_capacity:
+        raise ValueError(
+            f'SK bin table has {total_bins} rows but scratch holds {bin_capacity}'
+        )
+
+    live_mineral_cap = layout.field('sk_mineral_table').size // 8
+    live_bin_cap = layout.field('sk_bin_table').size // 8
+
+    packed_maps = bytearray(map_capacity * map_stride)
+    packed_minerals = bytearray(mineral_capacity * 8)
+    packed_bins = bytearray(bin_capacity * 12)
+    mineral_index = 0
+    bin_index = 0
+    for map_idx, m in enumerate(sk_maps):
+        name_bytes = m.map_name.encode('latin1')
+        if b'\x00' in name_bytes:
+            raise ValueError(f'SK map name contains NUL: {m.map_name!r}')
+        if len(name_bytes) + 1 > map_name_slot:
+            raise ValueError(
+                f'SK map name too long for {map_name_slot}-byte slot: {m.map_name!r}'
+            )
+        if len(m.minerals) > live_mineral_cap:
+            raise ValueError(
+                f'{m.map_name!r} authors {len(m.minerals)} minerals but the live '
+                f'table holds {live_mineral_cap} (raise SK_MINERAL_TABLE_MAX)'
+            )
+        rec_off = map_idx * map_stride
+        packed_maps[rec_off:rec_off + len(name_bytes)] = name_bytes
+        struct.pack_into('<IIII', packed_maps, rec_off + map_name_slot,
+                         len(m.minerals), mineral_index, len(m.bins), bin_index)
+        for (x, y, _kind) in m.minerals:
+            struct.pack_into('<ff', packed_minerals, mineral_index * 8,
+                             float(x), float(y))
+            mineral_index += 1
+        for (x, y, team) in m.bins:
+            if not (0 <= team < live_bin_cap):
+                raise ValueError(
+                    f'{m.map_name!r} bin team {team} outside the live table '
+                    f'range [0, {live_bin_cap})'
+                )
+            struct.pack_into('<ffI', packed_bins, bin_index * 12,
+                             float(x), float(y), team)
+            bin_index += 1
+
+    layout.write(section, scratch_off, 'sk_static_map_count',
+                 struct.pack('<I', len(sk_maps)))
+    layout.write(section, scratch_off, 'sk_static_maps', bytes(packed_maps))
+    layout.write(section, scratch_off, 'sk_static_minerals', bytes(packed_minerals))
+    layout.write(section, scratch_off, 'sk_static_bins', bytes(packed_bins))
+
+
 def write_static_scratch_data(
     section,
     scratch_off,
@@ -603,6 +700,12 @@ def write_static_scratch_data(
     ctf_drop_reached_radius_sq=576.0,
     ctf_drop_direct_radius_sq=25600.0,
     ctf_drop_abandon_radius_sq=490000.0,
+    sk_maps=(),
+    sk_map_name_slot=0,
+    sk_return_carry_min=6,
+    sk_pile_pursue_radius_sq=90000.0,
+    sk_pile_reached_radius_sq=576.0,
+    sk_pile_ttl_frames=2700,
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
     # meaningful — "spawn one bot"); CTF is the only team mode and accepts
@@ -904,6 +1007,17 @@ def write_static_scratch_data(
     if layout.has_field('elen_quantum'):
         layout.write(section, scratch_off, 'elen_quantum',
                      struct.pack('<f', max(1.0, float(wp_edge_len_quantum))))
+    if layout.has_field('sk_static_map_count'):
+        write_sk_static_table(section, scratch_off, layout, sk_maps,
+                              sk_map_name_slot)
+        layout.write(section, scratch_off, 'sk_return_min',
+                     struct.pack('<I', max(1, int(sk_return_carry_min))))
+        layout.write(section, scratch_off, 'sk_pile_pursue_radius_sq',
+                     struct.pack('<f', sk_pile_pursue_radius_sq))
+        layout.write(section, scratch_off, 'sk_pile_reached_radius_sq',
+                     struct.pack('<f', sk_pile_reached_radius_sq))
+        layout.write(section, scratch_off, 'sk_pile_ttl',
+                     struct.pack('<I', max(1, int(sk_pile_ttl_frames))))
     # Pickup self-registration master switch (per-frame CPickupAI detour).
     if layout.has_field('pickup_register_enabled'):
         layout.write(section, scratch_off, 'pickup_register_enabled',
