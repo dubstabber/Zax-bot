@@ -78,6 +78,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.label('build_sk_routes'); a.raw(b'\xC3')
         a.label('sk_update_phase'); a.raw(b'\xC3')
         a.label('sk_next_hop'); a.raw(b'\xB8\xFF\xFF\xFF\xFF\xC3')
+        a.label('build_item_routes'); a.raw(b'\xC3')
+        a.label('sk_pile_route_refresh'); a.raw(b'\xC3')
         return
 
     routing_active_va = layout.va('flag_routing_active')
@@ -1522,6 +1524,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.label('build_sk_routes'); a.raw(b'\xC3')
         a.label('sk_update_phase'); a.raw(b'\xC3')
         a.label('sk_next_hop'); a.raw(b'\xB8\xFF\xFF\xFF\xFF\xC3')
+        a.label('build_item_routes'); a.raw(b'\xC3')
+        a.label('sk_pile_route_refresh'); a.raw(b'\xC3')
     else:
         sk_active_va       = layout.va('sk_routing_active')
         sk_min_count_va    = layout.va('sk_mineral_count')
@@ -1538,6 +1542,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         bot_sk_return_va   = layout.va('bot_sk_return')
         bot_sk_carry_va    = layout.va('bot_sk_carry')
         bot_sk_thresh_va   = layout.va('bot_sk_thresh')
+        bot_goody_va       = layout.va('bot_pile_target')  # pursuit kind latch
+        # Goody-pursuit routing fields (graph-routed piles + filler items).
+        goody_fields = (layout.has_field('item_dist')
+                        and layout.has_field('item_routing_active'))
+        pile_field   = layout.has_field('sk_pile_dist')
 
         # -----------------------------------------------------------------
         # build_sk_routes: fill both fields and arm sk_routing_active when
@@ -1693,21 +1702,44 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
 
         # -----------------------------------------------------------------
         # sk_next_hop(ECX = current node idx) -> EAX = neighbour descending
-        # the phase field (mineral field / own-bin row), CUR itself when a
-        # portal hop was emitted (route_portal_hop = pad idx+1, exactly the
-        # ctf/drop convention), or -1 (caller falls back to the random
-        # wp_advance — deliberately reached at mineral zones, dist == 0).
-        # Inside the movement pushad frame; may clobber any GPR.
+        # the active row, CUR itself when a portal hop was emitted
+        # (route_portal_hop = pad idx+1, exactly the ctf/drop convention),
+        # or -1 (caller falls back to the random wp_advance — deliberately
+        # reached at mineral zones and at the target's own node, dist == 0).
+        # Row priority: a latched GOODY pursuit (bot_pile_target kind: 1 =
+        # pile field, 2+cat = filler-category field — mode-independent)
+        # outranks the SK phase logic (mineral field / own-bin row, SK
+        # matches only). Inside the movement pushad frame; clobbers GPRs.
         # -----------------------------------------------------------------
         a.label('sk_next_hop')
         a.raw(b'\x89\x0D' + le32(route_cur_va))                 # route_cur = cur
         if portal_route:
             a.raw(b'\xC7\x05' + le32(route_portal_hop_va) + le32(0))
-        a.raw(b'\x83\x3D' + le32(sk_active_va) + b'\x00')       # SK routing armed?
-        a.jz('snh_fail')
         a.raw(b'\x8B\x15' + le32(bot_slot_va))                  # edx = slot
         a.raw(b'\x83\x3C\x95' + le32(route_suspend_va) + b'\x00')
         a.jnz('snh_fail')                                       # suspended -> roam
+        a.raw(b'\x8B\x04\x95' + le32(bot_goody_va))             # eax = pursuit kind
+        a.raw(b'\x85\xC0'); a.jz('snh_phase')                   # no pursuit -> phase
+        if pile_field:
+            a.raw(b'\x83\xF8\x01')                              # kind == 1 (pile)?
+            a.jnz('snh_kind_item')
+            a.raw(b'\xB8' + le32(layout.va('sk_pile_dist')))    # eax = pile field
+            a.jmp('snh_have_row')
+            a.label('snh_kind_item')
+        if goody_fields:
+            a.raw(b'\x83\x3D' + le32(layout.va('item_routing_active')) + b'\x00')
+            a.jz('snh_fail')
+            a.raw(b'\x83\xE8\x02')                              # eax = kind - 2 (category)
+            a.raw(b'\x83\xF8' + bytes([cfg.ITEM_CATEGORIES]))   # cat in range?
+            a.jae('snh_fail')
+            a.raw(b'\x69\xC0' + le32(VMAX * 4))                 # eax = cat * row stride
+            a.raw(b'\x05' + le32(layout.va('item_dist')))       # + base
+            a.jmp('snh_have_row')
+        else:
+            a.jmp('snh_fail')
+        a.label('snh_phase')
+        a.raw(b'\x83\x3D' + le32(sk_active_va) + b'\x00')       # SK routing armed?
+        a.jz('snh_fail')
         a.call_lbl('sk_update_phase')                           # refresh phase latch
         a.raw(b'\x8B\x15' + le32(bot_slot_va))                  # edx = slot (reload)
         a.raw(b'\x83\x3C\x95' + le32(bot_sk_return_va) + b'\x00')
@@ -1801,3 +1833,145 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.label('snh_fail')
         a.raw(b'\xB8\xFF\xFF\xFF\xFF')                          # eax = -1
         a.raw(b'\xC3')
+
+        # -----------------------------------------------------------------
+        # build_item_routes: per-match filler-item routing fields — one
+        # multi-source bfs_run_seeded row per CATEGORY (health/energy/
+        # shield), seeded with every bound anchor of that category at
+        # distance 0. Mode-independent (fillers exist in DM/CTF/SK); arms
+        # item_routing_active when any category seeded. Fillers respawn in
+        # place, so like the mineral field there are no rebuilds. Called
+        # from detour_df90 after load_items. pushad/popad, no args.
+        #
+        # sk_pile_route_refresh: rebuild the pile field (multi-source over
+        # the live ring's bound nodes) when sk_pile_dirty is set — pile
+        # registration, TTL expiry, or a bot grabbing one. Called from the
+        # page flip right after sk_pile_tick; a no-op otherwise.
+        # -----------------------------------------------------------------
+        if not goody_fields:
+            a.label('build_item_routes'); a.raw(b'\xC3')
+        else:
+            item_dist_va   = layout.va('item_dist')
+            item_active_va = layout.va('item_routing_active')
+            item_count_va  = layout.va('item_count')
+            item_cat_va    = layout.va('item_cat')
+            item_node_va   = layout.va('item_node')
+
+            a.label('build_item_routes')
+            a.raw(b'\x60')                                          # pushad
+            a.raw(b'\x83\x3D' + le32(vcount_va) + b'\x00')          # graph loaded?
+            a.jz('bir_out')
+            a.raw(b'\x83\x3D' + le32(item_count_va) + b'\x00')      # any fillers?
+            a.jz('bir_out')
+            a.raw(b'\xC7\x05' + le32(bfr_i_va) + le32(0))           # cat = 0
+            a.label('bir_cat_loop')
+            a.raw(b'\xA1' + le32(bfr_i_va))                         # eax = cat
+            a.raw(b'\x83\xF8' + bytes([cfg.ITEM_CATEGORIES]))       # cats done?
+            a.jae('bir_out')
+            # Clear this category's row + the SPFA inq flags; seed anchors.
+            a.raw(b'\x69\xF8' + le32(VMAX * 4))                     # edi = cat * stride
+            a.raw(b'\x81\xC7' + le32(item_dist_va))                 # + base
+            a.raw(b'\x89\x3D' + le32(bfs_disti_va))                 # bfs_disti = row
+            a.raw(b'\xB9' + le32(VMAX))                             # ecx = VMAX
+            a.raw(b'\xB8\xFF\xFF\xFF\xFF')                          # eax = -1
+            a.raw(b'\xFC\xF3\xAB')                                  # cld; rep stosd
+            a.raw(b'\xBF' + le32(bfs_inq_va))                       # edi = bfs_inq
+            a.raw(b'\xB9' + le32(VMAX // 4))                        # ecx = VMAX/4 dwords
+            a.raw(b'\x31\xC0')                                      # eax = 0
+            a.raw(b'\xF3\xAB')                                      # rep stosd
+            a.raw(b'\xC7\x05' + le32(bfs_head_va) + le32(0))        # head = 0
+            a.raw(b'\xC7\x05' + le32(bfs_tail_va) + le32(0))        # tail = 0
+            a.raw(b'\x31\xF6')                                      # esi = 0 (i)
+            a.label('bir_seed_loop')
+            a.raw(b'\x3B\x35' + le32(item_count_va))                # i >= item count?
+            a.jae('bir_seed_done')
+            a.raw(b'\x83\xFE' + bytes([cfg.ITEM_TABLE_MAX]))        # i >= cap?
+            a.jae('bir_seed_done')
+            a.raw(b'\x8B\x04\xB5' + le32(item_cat_va))              # eax = item_cat[i]
+            a.raw(b'\x3B\x05' + le32(bfr_i_va))                     # == this category?
+            a.jnz('bir_seed_next')
+            a.raw(b'\x8B\x04\xB5' + le32(item_node_va))             # eax = node[i]
+            a.raw(b'\x83\xF8\xFF'); a.jz('bir_seed_next')           # unbound
+            a.raw(b'\x3B\x05' + le32(vcount_va)); a.jae('bir_seed_next')
+            a.raw(b'\x80\xB8' + le32(bfs_inq_va) + b'\x00')         # inq[node] set?
+            a.jnz('bir_seed_next')                                  # already seeded
+            a.raw(b'\xC6\x80' + le32(bfs_inq_va) + b'\x01')         # inq[node] = 1
+            a.raw(b'\x8B\x0D' + le32(bfs_disti_va))                 # ecx = row
+            a.raw(b'\xC7\x04\x81' + le32(0))                        # row[node] = 0
+            a.raw(b'\x8B\x0D' + le32(bfs_tail_va))                  # ecx = tail
+            a.raw(b'\x81\xE1' + le32(VMAX - 1))                     # ring index
+            a.raw(b'\x89\x04\x8D' + le32(bfs_queue_va))             # queue[tail & mask]
+            a.raw(b'\xFF\x05' + le32(bfs_tail_va))                  # tail++
+            a.label('bir_seed_next')
+            a.raw(b'\x46')                                          # ++i
+            a.jmp('bir_seed_loop')
+            a.label('bir_seed_done')
+            a.raw(b'\x83\x3D' + le32(bfs_tail_va) + b'\x00')        # any seeds?
+            a.jz('bir_cat_next')
+            a.raw(b'\xC7\x05' + le32(bfs_skip_va) + le32(0))        # full-field semantics
+            a.call_lbl('bfs_run_seeded')
+            a.raw(b'\xC7\x05' + le32(item_active_va) + le32(1))     # arm item routing
+            a.label('bir_cat_next')
+            a.raw(b'\xFF\x05' + le32(bfr_i_va))                     # ++cat
+            a.jmp('bir_cat_loop')
+            a.label('bir_out')
+            a.raw(b'\x61')                                          # popad
+            a.raw(b'\xC3')
+
+        if not (pile_field and layout.has_field('sk_pile_dirty')
+                and layout.has_field('sk_pile_node')):
+            a.label('sk_pile_route_refresh'); a.raw(b'\xC3')
+        else:
+            pile_dirty_va = layout.va('sk_pile_dirty')
+            pile_node_va  = layout.va('sk_pile_node')
+            pile_valid_fr_va = layout.va('sk_pile_valid')
+
+            a.label('sk_pile_route_refresh')
+            a.raw(b'\x60')                                          # pushad
+            a.raw(b'\x83\x3D' + le32(pile_dirty_va) + b'\x00')      # anything changed?
+            a.jz('spr_out')
+            a.raw(b'\xC7\x05' + le32(pile_dirty_va) + le32(0))
+            # Clear + reseed even with zero live piles (row goes all -1, so
+            # a stale latch simply stops descending).
+            a.raw(b'\xBF' + le32(layout.va('sk_pile_dist')))        # edi = row
+            a.raw(b'\xC7\x05' + le32(bfs_disti_va)
+                  + le32(layout.va('sk_pile_dist')))                # bfs_disti = row
+            a.raw(b'\xB9' + le32(VMAX))                             # ecx = VMAX
+            a.raw(b'\xB8\xFF\xFF\xFF\xFF')                          # eax = -1
+            a.raw(b'\xFC\xF3\xAB')                                  # cld; rep stosd
+            a.raw(b'\x83\x3D' + le32(vcount_va) + b'\x00')          # graph loaded?
+            a.jz('spr_out')
+            a.raw(b'\xBF' + le32(bfs_inq_va))                       # edi = bfs_inq
+            a.raw(b'\xB9' + le32(VMAX // 4))                        # ecx = VMAX/4 dwords
+            a.raw(b'\x31\xC0')                                      # eax = 0
+            a.raw(b'\xF3\xAB')                                      # rep stosd
+            a.raw(b'\xC7\x05' + le32(bfs_head_va) + le32(0))        # head = 0
+            a.raw(b'\xC7\x05' + le32(bfs_tail_va) + le32(0))        # tail = 0
+            a.raw(b'\x31\xF6')                                      # esi = 0 (p)
+            a.label('spr_seed_loop')
+            a.raw(b'\x83\xFE' + bytes([cfg.SK_PILE_TABLE_MAX]))     # ring done?
+            a.jae('spr_seed_done')
+            a.raw(b'\x83\x3C\xB5' + le32(pile_valid_fr_va) + b'\x00')  # ttl > 0?
+            a.jz('spr_seed_next')
+            a.raw(b'\x8B\x04\xB5' + le32(pile_node_va))             # eax = node[p]
+            a.raw(b'\x83\xF8\xFF'); a.jz('spr_seed_next')           # unbound
+            a.raw(b'\x3B\x05' + le32(vcount_va)); a.jae('spr_seed_next')
+            a.raw(b'\x80\xB8' + le32(bfs_inq_va) + b'\x00')         # inq[node] set?
+            a.jnz('spr_seed_next')
+            a.raw(b'\xC6\x80' + le32(bfs_inq_va) + b'\x01')         # inq[node] = 1
+            a.raw(b'\xC7\x04\x85' + le32(layout.va('sk_pile_dist')) + le32(0))
+            a.raw(b'\x8B\x0D' + le32(bfs_tail_va))                  # ecx = tail
+            a.raw(b'\x81\xE1' + le32(VMAX - 1))                     # ring index
+            a.raw(b'\x89\x04\x8D' + le32(bfs_queue_va))             # queue[tail & mask]
+            a.raw(b'\xFF\x05' + le32(bfs_tail_va))                  # tail++
+            a.label('spr_seed_next')
+            a.raw(b'\x46')                                          # ++p
+            a.jmp('spr_seed_loop')
+            a.label('spr_seed_done')
+            a.raw(b'\x83\x3D' + le32(bfs_tail_va) + b'\x00')        # any seeds?
+            a.jz('spr_out')
+            a.raw(b'\xC7\x05' + le32(bfs_skip_va) + le32(0))        # full-field semantics
+            a.call_lbl('bfs_run_seeded')
+            a.label('spr_out')
+            a.raw(b'\x61')                                          # popad
+            a.raw(b'\xC3')

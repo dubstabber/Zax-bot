@@ -1087,6 +1087,47 @@ SK_PILE_GRAB_COOLDOWN_FRAMES  = 150
 # human-grabbed entries from pulling bots forever.
 SK_PILE_TTL_FRAMES = 2700
 
+# --- Generalized GOODY pursuit (graph-routed; piles + filler items) --------
+# The original pile pursuit was straight-steer only — a pile spawned across a
+# wall within the 300 px entry radius made the bot grind the wall until
+# patience ran out (user-reported). Pursuit is now TWO-PHASE like the CTF
+# dropped-flag v2: while latched and farther than GOODY_DIRECT_RADIUS_SQ,
+# sk_next_hop descends a BFS field to the target's graph node (walls are
+# routed AROUND, teleport pads hop exactly like every other descent); the
+# straight steer runs only inside the direct radius or on the target's own
+# bound node. Fields:
+#   * piles — sk_pile_dist, MULTI-SOURCE over the live pile ring's bound
+#     nodes; rebuilt event-driven (registration, TTL expiry, a bot grabbing
+#     one) via the sk_pile_dirty flag on the page flip.
+#   * filler items — item_dist, one multi-source row per CATEGORY
+#     (health/energy/shield, model-prefix classified by item_data.py; 272
+#     anchors across all 17 MP maps), built once per match — fillers respawn
+#     in place, so like minerals there is no presence tracking; a
+#     just-consumed anchor costs one cooldown-bounded empty visit.
+# Item pursuit is OPPORTUNISTIC and works in EVERY mode (DM/CTF/SK): a bot
+# passing within sqrt(ITEM_PURSUE_RADIUS_SQ) of a filler diverts to it,
+# gated by the shared per-bot goody cooldown so nobody chain-diverts. The
+# per-think target is re-resolved as the NEAREST pile / nearest item of the
+# latched category, so a category descent that reaches a closer item of the
+# same kind simply takes it.
+ITEM_PURSUIT_ENABLED = True
+ITEM_PURSUE_RADIUS_SQ = 250.0 * 250.0
+# After grabbing (or failing) an item divert, no new goody latch for this
+# many thinks (~5 s) — also spaces out revisits to a consumed anchor.
+ITEM_GRAB_COOLDOWN_FRAMES = 300
+# Shared two-phase knobs (piles AND items): straight-steer only within
+# sqrt(DIRECT); silently drop a latch whose target drifted beyond
+# sqrt(ABANDON) (routed paths legitimately move AWAY from the target around
+# walls, so keep this comfortably above the entry radii).
+GOODY_DIRECT_RADIUS_SQ  = 160.0 * 160.0
+GOODY_ABANDON_RADIUS_SQ = 600.0 * 600.0
+# Live per-map filler table (Caves of Gold authors 42 — the shipped max).
+ITEM_TABLE_MAX        = 48
+ITEM_STATIC_MAP_MAX   = 20   # shipped Data.dat has 17 MP filler maps
+ITEM_STATIC_POINT_MAX = 288  # shipped Data.dat has 272 filler anchors
+ITEM_MAP_NAME_SLOT    = 96   # fixed ASCII bytes per map path, incl. NUL
+ITEM_CATEGORIES       = 3    # health / energy / shield (item_data.ITEM_CAT_*)
+
 # --- Keep bots simulated when far from the host's camera -----------------
 # The engine advances an entity's components (incl. the bot walking-controller
 # think sub_543B60) only when the char's ACTIVE bit (char+0x1C & 0x800000) is

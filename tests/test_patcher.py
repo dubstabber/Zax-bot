@@ -1072,6 +1072,91 @@ class SalvageKingTests(unittest.TestCase):
         # The pile ring mask in the register detour needs a power of two.
         self.assertEqual(cfg.SK_PILE_TABLE_MAX & (cfg.SK_PILE_TABLE_MAX - 1), 0)
 
+    # (health, energy, shield) filler counts per MP map — the goody-pursuit
+    # layer's static anchors (item_data.py, model-prefix classified).
+    ITEM_CENSUS = {
+        'Battle on the Ice.zax': (0, 13, 11),
+        'Curse of the Temple.zax': (0, 8, 8),
+        'Doom ship.zax': (0, 9, 7),
+        'Hydro Vengence.zax': (0, 7, 4),
+        'Temple Melee.zax': (2, 8, 4),
+        'Torture Chamber.zax': (0, 5, 4),
+        'Hydroplant Bouncefest.zax': (0, 4, 4),
+        'Jungle Ruins.zax': (15, 8, 7),
+        'Temple Deathgrip.zax': (2, 2, 3),
+        'Caves of Gold.zax': (14, 17, 11),
+        'Cold Crucible.zax': (8, 6, 1),
+        'Cold Sweat.zax': (3, 4, 1),
+        'Corridor of Suffering.zax': (4, 7, 1),
+        'Jungle Madness.zax': (2, 4, 2),
+        'Molten Ice.zax': (0, 1, 1),
+        'The Foundry.zax': (0, 19, 16),
+        'Underground Frenzy.zax': (8, 6, 1),
+    }
+
+    def test_item_census_is_pinned(self):
+        from zaxbot.item_data import resolve_item_data, ITEM_CATEGORIES
+        maps = resolve_item_data()
+        if not maps:
+            self.skipTest('Data.dat not present')
+        seen = {}
+        for m in maps:
+            base = m.map_name.replace('\\', '/').rsplit('/', 1)[-1]
+            counts = [0] * ITEM_CATEGORIES
+            for (_x, _y, cat) in m.items:
+                self.assertTrue(0 <= cat < ITEM_CATEGORIES)
+                counts[cat] += 1
+            seen[base] = tuple(counts)
+        self.assertEqual(seen, self.ITEM_CENSUS)
+        total = sum(len(m.items) for m in maps)
+        self.assertEqual(total, 272)
+        self.assertLessEqual(total, cfg.ITEM_STATIC_POINT_MAX)
+        self.assertLessEqual(len(maps), cfg.ITEM_STATIC_MAP_MAX)
+        self.assertLessEqual(max(len(m.items) for m in maps),
+                             cfg.ITEM_TABLE_MAX)
+        self.assertEqual(cfg.ITEM_CATEGORIES, ITEM_CATEGORIES)
+
+    def test_goody_scratch_block_layout_invariants(self):
+        layout = build_scratch_layout(
+            zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA + zax_patch.SCRATCH_OFF,
+            zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF,
+            zax_patch.NUM_BOT_NAMES,
+            zax_patch.NAME_SLOT_SIZE,
+            zax_patch.NAME_SLOT_ASCII,
+            cfg.WEAPON_SPEEDS_MAX,
+            overlay_vertex_max=cfg.OVERLAY_VERTEX_MAX,
+            overlay_edge_max=cfg.OVERLAY_EDGE_MAX,
+            sk_mineral_table_max=cfg.SK_MINERAL_TABLE_MAX,
+            sk_bin_table_max=cfg.SK_BIN_TABLE_MAX,
+            sk_static_map_max=cfg.SK_STATIC_MAP_MAX,
+            sk_static_mineral_max=cfg.SK_STATIC_MINERAL_MAX,
+            sk_static_bin_max=cfg.SK_STATIC_BIN_MAX,
+            sk_map_name_slot=cfg.SK_MAP_NAME_SLOT,
+            sk_pile_table_max=cfg.SK_PILE_TABLE_MAX,
+            item_table_max=cfg.ITEM_TABLE_MAX,
+            item_static_map_max=cfg.ITEM_STATIC_MAP_MAX,
+            item_static_point_max=cfg.ITEM_STATIC_POINT_MAX,
+            item_map_name_slot=cfg.ITEM_MAP_NAME_SLOT,
+            item_categories=cfg.ITEM_CATEGORIES,
+        )
+        # The `goody` snapshot chunk dumps item_routing_active..sk_pile_node
+        # as one range ending right before tag_goody; the static pack + BFS
+        # fields sit after the tag.
+        start = layout.field('item_routing_active')
+        pile_node = layout.field('sk_pile_node')
+        tag = layout.field('tag_goody')
+        self.assertEqual(tag.offset, pile_node.offset + pile_node.size)
+        self.assertLess(start.offset, pile_node.offset)
+        self.assertGreater(layout.field('item_static_maps').offset, tag.offset)
+        self.assertGreater(layout.field('item_dist').offset, tag.offset)
+        # Row strides the emitted kind row-select assumes.
+        self.assertEqual(layout.field('item_dist').size,
+                         cfg.ITEM_CATEGORIES * cfg.OVERLAY_VERTEX_MAX * 4)
+        self.assertEqual(layout.field('sk_pile_dist').size,
+                         cfg.OVERLAY_VERTEX_MAX * 4)
+        self.assertEqual(layout.field('sk_pile_node').size,
+                         cfg.SK_PILE_TABLE_MAX * 4)
+
     def test_sk_routing_fields_on_shipped_graphs(self):
         # Offline simulation of the emitted SK fields on every shipped
         # SK-capable graph: the MULTI-SOURCE mineral field (bfs_run_seeded
@@ -1278,8 +1363,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '1eab7299138b8fb99baed733bcc50ad34ef71f56d3429cd11ba8031658423bba'
-    HOOK_ENTRY_SIZE = 36919
+    SECTION_SHA256 = '99ac19d714f0956e401f8935a8f020abff9a08d8a72f1e8236033a0234c43e44'
+    HOOK_ENTRY_SIZE = 38674
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

@@ -1793,6 +1793,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
 
         # -----------------------------------------------------------------
         # sk_pile_tick: decrement every nonzero pile-ring TTL once per frame.
+        # A TTL that hits 0 EXPIRES the entry — flag sk_pile_dirty so the
+        # page flip rebuilds the pile routing field without the dead source.
         # Preserves all registers (runs inside the page-flip pushad frame,
         # but cheap to keep self-contained anyway).
         # -----------------------------------------------------------------
@@ -1806,9 +1808,217 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x85\xC0'); a.jz('skpt_next')
         a.raw(b'\x48')                                              # --ttl
         a.raw(b'\x89\x04\x8D' + le32(layout.va('sk_pile_valid')))
+        if layout.has_field('sk_pile_dirty'):
+            a.raw(b'\x85\xC0'); a.jnz('skpt_next')                  # still alive
+            a.raw(b'\xC7\x05' + le32(layout.va('sk_pile_dirty'))
+                  + le32(1))                                        # expired -> rebuild
         a.label('skpt_next')
         a.raw(b'\x41')                                              # ++slot
         a.jmp('skpt_loop')
         a.label('skpt_done')
         a.raw(b'\x59\x58')                                          # pop ecx; pop eax
         a.raw(b'\xC3')
+
+    # =====================================================================
+    # load_items: per-match filler-item data for the goody-pursuit layer
+    # (mode-independent — fillers exist in DM/CTF/SK alike). Copies the
+    # active map's (x, y, category) anchors from the static pack, binds each
+    # to its nearest graph node, and resets the live gate/count.
+    # build_item_routes (detour_df90, right after this) fills the
+    # per-category fields and arms item_routing_active. Same bounded
+    # map-name match as every other load_*. pushad/popad, no args.
+    # =====================================================================
+    items_on = (
+        layout.has_field('item_static_maps')
+        and layout.has_field('item_table')
+        and layout.has_field('item_cat')
+        and layout.has_field('item_node')
+        and layout.has_field('sk_spill')
+    )
+    if not items_on:
+        a.label('load_items')
+        a.raw(b'\xC3')
+    else:
+        item_map_stride = cfg.ITEM_MAP_NAME_SLOT + 8
+
+        a.label('load_items')
+        a.raw(b'\x60')                                              # pushad
+        a.raw(b'\xC7\x05' + le32(layout.va('item_routing_active')) + le32(0))
+        a.raw(b'\xC7\x05' + le32(layout.va('item_count')) + le32(0))
+        a.raw(b'\xFC')                                              # cld
+        a.raw(b'\xBF' + le32(layout.va('item_node')))               # edi = item_node
+        a.raw(b'\xB9' + le32(cfg.ITEM_TABLE_MAX))                   # ecx = table max
+        a.raw(b'\x83\xC8\xFF')                                      # eax = -1
+        a.raw(b'\xF3\xAB')                                          # rep stosd
+        # Active map name -> ebp.
+        a.raw(b'\xA1' + le32(ax.MAP_NAME_CSTRING_VA))               # eax = map CString hdr
+        a.raw(b'\x85\xC0'); a.jz('lit_done')
+        a.raw(b'\x83\xC0' + bytes([ax.MAP_NAME_ASCII_OFFSET]))      # eax = ASCII
+        a.raw(b'\x80\x38\x00'); a.jz('lit_done')                    # empty name?
+        a.raw(b'\x89\xC5')                                          # ebp = active map name
+
+        a.raw(b'\x8B\x0D' + le32(layout.va('item_static_map_count')))  # ecx = map count
+        a.raw(b'\x85\xC9'); a.jz('lit_done')
+        a.raw(b'\x83\xF9' + bytes([cfg.ITEM_STATIC_MAP_MAX]))       # defensive cap
+        a.jbe('lit_map_count_ok')
+        a.raw(b'\xB9' + le32(cfg.ITEM_STATIC_MAP_MAX))
+        a.label('lit_map_count_ok')
+        a.raw(b'\x31\xF6')                                          # esi = map idx
+
+        a.label('lit_map_loop')
+        a.raw(b'\x39\xCE'); a.jae('lit_done')                       # idx >= map_count?
+        a.raw(b'\x69\xC6' + le32(item_map_stride))                  # eax = idx * stride
+        a.raw(b'\x05' + le32(layout.va('item_static_maps')))        # eax = &record
+        a.raw(b'\x89\xC7')                                          # edi = record
+        a.raw(b'\x89\xEA')                                          # edx = active name
+        a.raw(b'\x89\xFB')                                          # ebx = record name
+
+        a.label('lit_str_loop')
+        a.raw(b'\x8A\x02')                                          # al = [active]
+        a.raw(b'\x3A\x03')                                          # cmp al, [record]
+        a.jnz('lit_next_map')
+        a.raw(b'\x84\xC0'); a.jz('lit_match')                       # both NUL -> equal
+        a.raw(b'\x42\x43')                                          # inc edx; inc ebx
+        a.jmp('lit_str_loop')
+
+        a.label('lit_next_map')
+        a.raw(b'\x46')                                              # ++idx
+        a.jmp('lit_map_loop')
+
+        a.label('lit_match')
+        a.raw(b'\x89\xFD')                                          # ebp = record (name done)
+        a.raw(b'\x8B\x4D' + bytes([cfg.ITEM_MAP_NAME_SLOT]))        # ecx = item count
+        a.raw(b'\x83\xF9' + bytes([cfg.ITEM_TABLE_MAX]))            # cmp ecx, live cap
+        a.jbe('lit_count_ok')
+        a.raw(b'\xB9' + le32(cfg.ITEM_TABLE_MAX))
+        a.label('lit_count_ok')
+        a.raw(b'\x89\x0D' + le32(layout.va('item_count')))          # item_count = ecx
+        a.raw(b'\x85\xC9'); a.jz('lit_done')
+        a.raw(b'\x8B\x5D' + bytes([cfg.ITEM_MAP_NAME_SLOT + 4]))    # ebx = item first
+        # Unpack loop: static (x f32, y f32, cat u32) records at 12 bytes ->
+        # live item_table (8B) + item_cat (4B), then bind nodes.
+        a.raw(b'\x31\xF6')                                          # esi = k
+        a.label('lit_copy_loop')
+        a.raw(b'\x3B\x35' + le32(layout.va('item_count')))          # k >= count?
+        a.jae('lit_bind')
+        a.raw(b'\x8D\x04\x1E')                                      # eax = first + k
+        a.raw(b'\x8D\x04\x40')                                      # eax = (first+k)*3
+        a.raw(b'\x8D\x3C\x85' + le32(layout.va('item_static_points')))  # edi = &rec (idx*12)
+        a.raw(b'\x8B\x17')                                          # edx = rec.x bits
+        a.raw(b'\x89\x14\xF5' + le32(layout.va('item_table')))      # item_table[k].x
+        a.raw(b'\x8B\x57\x04')                                      # edx = rec.y bits
+        a.raw(b'\x89\x14\xF5' + le32(layout.va('item_table') + 4))  # item_table[k].y
+        a.raw(b'\x8B\x57\x08')                                      # edx = rec.cat
+        a.raw(b'\x89\x14\xB5' + le32(layout.va('item_cat')))        # item_cat[k]
+        a.raw(b'\x46')                                              # ++k
+        a.jmp('lit_copy_loop')
+
+        a.label('lit_bind')
+        a.raw(b'\x83\x3D' + le32(layout.va('overlay_vertex_count')) + b'\x00')
+        a.jz('lit_done')                                            # no graph -> unbound
+        a.raw(b'\xC7\x05' + le32(layout.va('sk_spill')) + le32(0))
+        a.label('lit_bind_loop')
+        a.raw(b'\xA1' + le32(layout.va('sk_spill')))                # eax = i
+        a.raw(b'\x3B\x05' + le32(layout.va('item_count')))          # i >= count?
+        a.jae('lit_done')
+        a.raw(b'\x3D' + le32(cfg.ITEM_TABLE_MAX))                   # i >= cap?
+        a.jae('lit_done')
+        a.raw(b'\x8B\x0C\xC5' + le32(layout.va('item_table')))      # ecx = x bits
+        a.raw(b'\x89\x0D' + le32(layout.va('wp_scratch')))
+        a.raw(b'\x8B\x0C\xC5' + le32(layout.va('item_table') + 4))  # ecx = y bits
+        a.raw(b'\x89\x0D' + le32(layout.va('wp_scratch') + 4))
+        a.call_lbl('wp_find_nearest')                               # ebx = nearest or -1
+        a.raw(b'\xA1' + le32(layout.va('sk_spill')))                # eax = i
+        a.raw(b'\x89\x1C\x85' + le32(layout.va('item_node')))       # node[i] = ebx
+        a.raw(b'\xFF\x05' + le32(layout.va('sk_spill')))            # ++i
+        a.jmp('lit_bind_loop')
+
+        a.label('lit_done')
+        a.raw(b'\x61')                                              # popad
+        a.raw(b'\xC3')
+
+    # =====================================================================
+    # Goody-pursuit nearest-target scans (called from the follower inside
+    # its pushad frame; clobber eax/esi/FPU, return EBX = index or -1 and,
+    # on a hit, fill goody_tx/goody_ty/goody_node/goody_idx). Input:
+    # goody_scan_rad = radius^2 float bits (FLT_MAX bits = unlimited);
+    # goody_scan_cat (items only) = category filter or -1 for any.
+    #   goody_scan_piles: over the live pile ring (TTL > 0 slots).
+    #   goody_scan_items: over the live filler table, category-filtered.
+    # =====================================================================
+    goody_on = (
+        items_on
+        and layout.has_field('goody_tx')
+        and layout.has_field('goody_scan_rad')
+        and layout.has_field('sk_pile_valid')
+        and layout.has_field('sk_pile_node')
+    )
+    if not goody_on:
+        a.label('goody_scan_piles')
+        a.raw(b'\xBB\xFF\xFF\xFF\xFF\xC3')                          # ebx = -1; ret
+        a.label('goody_scan_items')
+        a.raw(b'\xBB\xFF\xFF\xFF\xFF\xC3')                          # ebx = -1; ret
+    else:
+        def _emit_goody_scan(name, table_va, node_va, count_imm, count_va,
+                             valid_va, cat_va):
+            a.label(name)
+            a.raw(b'\xBB\xFF\xFF\xFF\xFF')                          # ebx = -1
+            a.raw(b'\xD9\x05' + le32(layout.va('goody_scan_rad')))  # fld best = radius
+            a.raw(b'\x31\xF6')                                      # esi = 0
+            a.label(f'{name}_loop')
+            if count_va:
+                a.raw(b'\x3B\x35' + le32(count_va))                 # i >= live count?
+                a.jae(f'{name}_pop')
+            a.raw(b'\x83\xFE' + bytes([count_imm]))                 # i >= cap?
+            a.jae(f'{name}_pop')
+            if valid_va:
+                a.raw(b'\x83\x3C\xB5' + le32(valid_va) + b'\x00')   # slot live?
+                a.jz(f'{name}_next')
+            if cat_va:
+                a.raw(b'\x83\x3D' + le32(layout.va('goody_scan_cat')) + b'\xFF')
+                a.jz(f'{name}_cat_ok')                              # -1 = any
+                a.raw(b'\x8B\x04\xB5' + le32(cat_va))               # eax = item_cat[i]
+                a.raw(b'\x3B\x05' + le32(layout.va('goody_scan_cat')))
+                a.jnz(f'{name}_next')
+                a.label(f'{name}_cat_ok')
+            a.raw(b'\xD9\x04\xF5' + le32(table_va))                 # fld t.x
+            a.raw(b'\xD8\x25' + le32(layout.va('bot_pos')))         # fsub bot.x
+            a.raw(b'\xD8\xC8')                                      # fmul st,st
+            a.raw(b'\xD9\x04\xF5' + le32(table_va + 4))             # fld t.y
+            a.raw(b'\xD8\x25' + le32(layout.va('bot_pos') + 4))     # fsub bot.y
+            a.raw(b'\xD8\xC8')                                      # fmul st,st
+            a.raw(b'\xDE\xC1')                                      # faddp -> dsq, best
+            a.raw(b'\xD8\xD1')                                      # fcom st(1) (dsq:best)
+            a.raw(b'\xDF\xE0'); a.raw(b'\x9E')                      # fnstsw ax; sahf
+            a.jae(f'{name}_skip')                                   # dsq >= best
+            a.raw(b'\xD9\xC9')                                      # fxch
+            a.raw(b'\xDD\xD8')                                      # fstp st0 (pop old best)
+            a.raw(b'\x89\xF3')                                      # ebx = i
+            a.jmp(f'{name}_next')
+            a.label(f'{name}_skip')
+            a.raw(b'\xDD\xD8')                                      # fstp st0 (pop dsq)
+            a.label(f'{name}_next')
+            a.raw(b'\x46')                                          # ++i
+            a.jmp(f'{name}_loop')
+            a.label(f'{name}_pop')
+            a.raw(b'\xDD\xD8')                                      # fstp st0 (FPU empty)
+            a.raw(b'\x83\xFB\xFF')                                  # found?
+            a.jz(f'{name}_ret')
+            a.raw(b'\x8B\x04\xDD' + le32(table_va))                 # eax = t.x bits
+            a.raw(b'\xA3' + le32(layout.va('goody_tx')))
+            a.raw(b'\x8B\x04\xDD' + le32(table_va + 4))             # eax = t.y bits
+            a.raw(b'\xA3' + le32(layout.va('goody_ty')))
+            a.raw(b'\x8B\x04\x9D' + le32(node_va))                  # eax = node[i]
+            a.raw(b'\xA3' + le32(layout.va('goody_node')))
+            a.raw(b'\x89\x1D' + le32(layout.va('goody_idx')))       # goody_idx = i
+            a.label(f'{name}_ret')
+            a.raw(b'\xC3')
+
+        _emit_goody_scan('goody_scan_piles',
+                         layout.va('sk_pile_pos'), layout.va('sk_pile_node'),
+                         cfg.SK_PILE_TABLE_MAX, 0,
+                         layout.va('sk_pile_valid'), 0)
+        _emit_goody_scan('goody_scan_items',
+                         layout.va('item_table'), layout.va('item_node'),
+                         cfg.ITEM_TABLE_MAX, layout.va('item_count'),
+                         0, layout.va('item_cat'))

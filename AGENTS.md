@@ -25,6 +25,7 @@ The detailed notes live in `docs/`:
   - `config.py` - section size, scratch policy, synthetic ids, bot names.
   - `patch_manifest.py` - enabled redirects into `.zaxbot`.
   - `sk_data.py` - build-time Data.dat parse of SK minerals + team-bound bins.
+  - `item_data.py` - build-time parse of filler items (health/energy/shield).
   - `hook/` - dispatcher, mode detection, spawn, snapshot.
   - `detours/` - capture, safety, controller, fire/aim detours.
 - `zax_dump.bin` - appendable tagged runtime snapshots written by R.
@@ -709,10 +710,10 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     so `ctf_next_hop` re-plans door-aware from the reachable node (offline-
     verified: 15→14 across closed door 9 re-plans 15→16; 5→6 across closed door
     15 re-plans 5→1). Fires only in that exact stuck state — door open or
-    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~4.0 KB below
-    `SCRATCH_OFF` (hook_entry_size 36819 of 40960 after the SK layer; the
-    boundary moved 0x9000→0xA000 with the section at 0x26000, scratch ~12.4
-    KB free). When it runs low again, bump
+    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~2.2 KB below
+    `SCRATCH_OFF` (hook_entry_size 38674 of 40960 after the SK layer + the
+    graph-routed goody pursuit; the boundary sits at 0xA000 with the section
+    at 0x26000, scratch ~2.0 KB free). When it runs low again, bump
     `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
     `flag_routing_active`) was added for diagnosing route commitment.
@@ -866,14 +867,47 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     `Ore_Crystals01` template) within 500 px of the corpse holding the whole
     load — touching grants everything to either team. No name ⇒ the CTF-
     style scan match cannot see piles, so the detour self-registers the
-    corpse position into an 8-slot TTL ring (`sk_pile_pos/valid`), skipping
-    empty-handed deaths via the same `sub_426860` gate the apply uses.
-    Pursuit is opportunistic straight-steer within
-    `SK_PILE_PURSUE_RADIUS_SQ` (300 px) with watchdog + patience + retry/
-    grab cooldowns (mirror of the drop direct phase); reaching the spot
-    clears the ring entry optimistically. TTL (`SK_PILE_TTL_FRAMES`, 45 s,
-    ticked by `sk_pile_tick` from the page flip) bounds stale entries a
-    human grabbed first.
+    corpse position into an 8-slot TTL ring (`sk_pile_pos/valid`) + its
+    nearest graph node (`sk_pile_node`), skipping empty-handed deaths via
+    the same `sub_426860` gate the apply uses. TTL
+    (`SK_PILE_TTL_FRAMES`, 45 s, ticked by `sk_pile_tick` from the page
+    flip) bounds stale entries a human grabbed first. Pursuit runs through
+    the generalized GOODY layer below.
+- Bots pursue GOODIES through the graph — piles AND filler items
+  (`cfg.ITEM_PURSUIT_ENABLED`; the two-phase upgrade of the straight-steer
+  pile divert, which ground walls when a pile registered across one —
+  user-reported, same bug class as CTF drop-pursuit v1):
+  - **Static filler anchors** (`item_data.py` → `load_items`, per match,
+    ALL modes): every MP map's pickups whose model path starts
+    `Items/Medical|Energy|Shields/` (272 across 17 maps; category by
+    prefix, census pinned in tests). Weapons/ammo/keys/minerals excluded.
+    Fillers respawn in place (10-15 s), so like minerals there is NO
+    presence tracking — a consumed anchor costs one cooldown-bounded empty
+    visit.
+  - **Routing fields**: `build_item_routes` (df90, mode-independent, arms
+    `item_routing_active`) fills one MULTI-SOURCE `bfs_run_seeded` row per
+    CATEGORY (`item_dist`, cat-major); `sk_pile_route_refresh` (page flip)
+    rebuilds the pile row (`sk_pile_dist`) whenever `sk_pile_dirty` is set
+    — pile registration, TTL expiry, or a bot grabbing one. One bounded
+    SPFA per pile event, never per frame.
+  - **Behavior** (`s542360_gd_*` in bot_movement + the `goody_scan_piles/
+    items` helpers): the latch `bot_pile_target` holds the pursuit KIND
+    (1 = pile, 2+cat = filler). ENTRY is opportunistic (piles within
+    `SK_PILE_PURSUE_RADIUS_SQ` in SK, fillers within
+    `ITEM_PURSUE_RADIUS_SQ` in any mode, shared per-bot cooldown; a CTF
+    drop pursuit outranks). Each think the live target is RE-RESOLVED as
+    the nearest pile / nearest item of the latched category, so a category
+    descent that reaches a closer same-kind item takes it. ROUTED phase:
+    `sk_next_hop`'s kind row-select descends the matching field at each
+    arrival (pad hops included; also fires outside SK via the item gate at
+    the call site); DIRECT phase (within `GOODY_DIRECT_RADIUS_SQ`, or
+    physically at the target's bound node — the drop-pursuit arrival gate)
+    presses through the standard watchdog + patience. Reaching a pile
+    consumes its ring slot + rebuild; items take
+    `ITEM_GRAB_COOLDOWN_FRAMES`. `GOODY_ABANDON_RADIUS_SQ` bounds drift
+    (routed paths legitimately move AWAY around walls, so it sits well
+    above the entry radii). R-snapshot chunk `goody` dumps the resolved
+    target + gates; latches drop on respawn/death/teleport/match change.
   - R-snapshot chunk `skstate` dumps the live block (routing gate, counts,
     bin tables, per-bot phase/carry/patience latches, pile ring). Offline
     tests pin the census, the scratch-block invariants, and — on every
@@ -1072,11 +1106,14 @@ Older emitted labels or disabled detours are not active unless they appear in
   registration + opportunistic pursuit. The old pickup-overlay gap ("only
   ~80-90% of ores marked") was the 96-slot pickup table saturating — every
   SK map exceeds it (The Foundry: 502 pickups); now 512. FIRST LIVE PASS
-  PENDING. Candidate refinements after live testing: prefer crystals (3×
-  points) when zones tie; a ROUTED pile-pursuit phase if straight-steer
-  grinds walls on cave maps; per-bot deposit thresholds for personality
-  variance; SK-aware fire/aim target priority (attack carriers near their
-  bin).
+  PENDING. The pile straight-steer wall grind was live-reported and fixed
+  by the graph-routed GOODY pursuit layer (see its bullet in "Current
+  state"), which also gave every mode an opportunistic graph-safe filler
+  divert (health/energy/shield); per-run deposit thresholds randomize in
+  [30, 100]. Candidate refinements: prefer crystals (3× points) when zones
+  tie; NEED-gated filler pursuit (read bot health/energy/shield instead of
+  opportunistic-always); SK-aware fire/aim target priority (attack carriers
+  near their bin).
 - Portal routing — DONE for build-time-resolvable destinations (see the
   portal-routing bullet in "Current state"): pads are directed BFS edges, CTF
   bots route through them (Hydro Vengence cross-arena flag runs), roaming/DM

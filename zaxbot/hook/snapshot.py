@@ -291,6 +291,19 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         emit_chunk(layout.va('tag_skstate'),
                    b'\xB8' + le32(layout.va('sk_routing_active')),
                    skstate_dump_len, 'snap_skip_skstate')
+    # Goody pursuit state: item field gate/count, the per-think resolved
+    # target (tx/ty/node/idx), scan inputs, radius knobs, pile dirty flag +
+    # node binds — one R press pins what a latched bot is chasing and why.
+    # The static pack + BFS fields after tag_goody are excluded.
+    if layout.has_field('tag_goody') and layout.has_field('item_routing_active'):
+        goody_end = (layout.field('sk_pile_node')
+                     if layout.has_field('sk_pile_node')
+                     else layout.field('goody_abandon_radius_sq'))
+        goody_dump_len = (goody_end.offset + goody_end.size
+                          - layout.field('item_routing_active').offset)
+        emit_chunk(layout.va('tag_goody'),
+                   b'\xB8' + le32(layout.va('item_routing_active')),
+                   goody_dump_len, 'snap_skip_goody')
 
     # Waypoint-graph probe. wp_compute populates wp_diag_data[0..7]:
     #   [+0x00] MGR, [+0x04] WM, [+0x08] LV, [+0x0C] WPM,

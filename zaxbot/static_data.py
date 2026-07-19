@@ -60,6 +60,9 @@ DUMP_TAGS = (
     # Salvage King state (live mineral/bin tables + per-bot phase latches +
     # pile ring; the static pack + BFS rows after the tag are excluded).
     ('tag_skstate', 'skstate'),
+    # Goody pursuit state (item field gate/count, resolved target, pile
+    # dirty flag + node binds; the static pack + fields are excluded).
+    ('tag_goody', 'goody'),
 )
 
 
@@ -596,6 +599,73 @@ def write_sk_static_table(section, scratch_off, layout, sk_maps, map_name_slot):
     layout.write(section, scratch_off, 'sk_static_bins', bytes(packed_bins))
 
 
+def write_item_static_table(section, scratch_off, layout, item_maps, map_name_slot):
+    """Pack build-time filler-item map records for the goody-pursuit layer
+    and seed the live item tables. ``item_maps`` is a sequence of
+    ``item_data.MapItemData``; each map record is ``name[slot] | item_count
+    u32 | item_first u32``, points pack as (x f32, y f32, category u32)."""
+    if not layout.has_field('item_static_map_count'):
+        return
+
+    item_maps = tuple(item_maps or ())
+    layout.write(section, scratch_off, 'item_routing_active', struct.pack('<I', 0))
+    layout.write(section, scratch_off, 'item_count', struct.pack('<I', 0))
+    layout.write(section, scratch_off, 'item_node',
+                 b'\xFF' * layout.field('item_node').size)
+    layout.write(section, scratch_off, 'item_dist',
+                 b'\xFF' * layout.field('item_dist').size)
+    if layout.has_field('sk_pile_node'):
+        layout.write(section, scratch_off, 'sk_pile_node',
+                     b'\xFF' * layout.field('sk_pile_node').size)
+        layout.write(section, scratch_off, 'sk_pile_dist',
+                     b'\xFF' * layout.field('sk_pile_dist').size)
+
+    map_stride = map_name_slot + 8
+    map_capacity = layout.field('item_static_maps').size // map_stride
+    point_capacity = layout.field('item_static_points').size // 12
+    live_capacity = layout.field('item_table').size // 8
+
+    if len(item_maps) > map_capacity:
+        raise ValueError(
+            f'item map table has {len(item_maps)} rows but scratch holds {map_capacity}'
+        )
+    total_points = sum(len(m.items) for m in item_maps)
+    if total_points > point_capacity:
+        raise ValueError(
+            f'item point table has {total_points} rows but scratch holds {point_capacity}'
+        )
+
+    packed_maps = bytearray(map_capacity * map_stride)
+    packed_points = bytearray(point_capacity * 12)
+    point_index = 0
+    for map_idx, m in enumerate(item_maps):
+        name_bytes = m.map_name.encode('latin1')
+        if b'\x00' in name_bytes:
+            raise ValueError(f'item map name contains NUL: {m.map_name!r}')
+        if len(name_bytes) + 1 > map_name_slot:
+            raise ValueError(
+                f'item map name too long for {map_name_slot}-byte slot: {m.map_name!r}'
+            )
+        if len(m.items) > live_capacity:
+            raise ValueError(
+                f'{m.map_name!r} authors {len(m.items)} fillers but the live '
+                f'table holds {live_capacity} (raise ITEM_TABLE_MAX)'
+            )
+        rec_off = map_idx * map_stride
+        packed_maps[rec_off:rec_off + len(name_bytes)] = name_bytes
+        struct.pack_into('<II', packed_maps, rec_off + map_name_slot,
+                         len(m.items), point_index)
+        for (x, y, cat) in m.items:
+            struct.pack_into('<ffI', packed_points, point_index * 12,
+                             float(x), float(y), int(cat) & 0xFF)
+            point_index += 1
+
+    layout.write(section, scratch_off, 'item_static_map_count',
+                 struct.pack('<I', len(item_maps)))
+    layout.write(section, scratch_off, 'item_static_maps', bytes(packed_maps))
+    layout.write(section, scratch_off, 'item_static_points', bytes(packed_points))
+
+
 def write_static_scratch_data(
     section,
     scratch_off,
@@ -707,6 +777,11 @@ def write_static_scratch_data(
     sk_pile_pursue_radius_sq=90000.0,
     sk_pile_reached_radius_sq=576.0,
     sk_pile_ttl_frames=2700,
+    item_maps=(),
+    item_map_name_slot=0,
+    item_pursue_radius_sq=62500.0,
+    goody_direct_radius_sq=25600.0,
+    goody_abandon_radius_sq=360000.0,
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
     # meaningful — "spawn one bot"); CTF is the only team mode and accepts
@@ -1025,6 +1100,15 @@ def write_static_scratch_data(
                      struct.pack('<f', sk_pile_reached_radius_sq))
         layout.write(section, scratch_off, 'sk_pile_ttl',
                      struct.pack('<I', max(1, int(sk_pile_ttl_frames))))
+    if layout.has_field('item_static_map_count'):
+        write_item_static_table(section, scratch_off, layout, item_maps,
+                                item_map_name_slot)
+        layout.write(section, scratch_off, 'item_pursue_radius_sq',
+                     struct.pack('<f', item_pursue_radius_sq))
+        layout.write(section, scratch_off, 'goody_direct_radius_sq',
+                     struct.pack('<f', goody_direct_radius_sq))
+        layout.write(section, scratch_off, 'goody_abandon_radius_sq',
+                     struct.pack('<f', goody_abandon_radius_sq))
     # Pickup self-registration master switch (per-frame CPickupAI detour).
     if layout.has_field('pickup_register_enabled'):
         layout.write(section, scratch_off, 'pickup_register_enabled',

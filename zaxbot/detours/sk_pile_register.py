@@ -101,6 +101,20 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x89\x14\xC5' + le32(pile_pos_va + 4))            # pile_pos[slot].y
     a.raw(b'\x8B\x15' + le32(pile_ttl_va))                    # edx = TTL seed
     a.raw(b'\x89\x14\x85' + le32(pile_valid_va))              # pile_valid[slot] = TTL
+    if layout.has_field('sk_pile_node') and layout.has_field('sk_pile_dirty'):
+        # Bind the pile to its nearest graph node — the source seed of the
+        # graph-routed pile field — and flag the field rebuild. The ring
+        # slot index must survive wp_find_nearest (clobbers GPRs): spill it
+        # in sk_carry_tmp (its carry use above is finished).
+        a.raw(b'\xA3' + le32(carry_tmp_va))                   # spill slot idx
+        a.raw(b'\x8B\x0C\xC5' + le32(pile_pos_va))            # ecx = pile.x bits
+        a.raw(b'\x89\x0D' + le32(layout.va('wp_scratch')))
+        a.raw(b'\x8B\x0C\xC5' + le32(pile_pos_va + 4))        # ecx = pile.y bits
+        a.raw(b'\x89\x0D' + le32(layout.va('wp_scratch') + 4))
+        a.call_lbl('wp_find_nearest')                         # ebx = nearest or -1
+        a.raw(b'\xA1' + le32(carry_tmp_va))                   # eax = slot idx
+        a.raw(b'\x89\x1C\x85' + le32(layout.va('sk_pile_node')))  # node[slot] = ebx
+        a.raw(b'\xC7\x05' + le32(layout.va('sk_pile_dirty')) + le32(1))
     a.raw(b'\xFF\x05' + le32(pile_next_va))                   # ++cursor
 
     a.label('skpr_done')

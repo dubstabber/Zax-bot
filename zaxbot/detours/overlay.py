@@ -299,9 +299,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.call_lbl('switch_seek_eval')
     # SK pile-ring TTL: age each registered death-pile entry once per frame
     # so stale (human-grabbed) piles expire. Register-preserving 8-slot loop;
-    # inert stub on non-SK builds.
+    # inert stub on non-SK builds. The routing-field refresh runs right
+    # behind it: a TTL expiry (or registration / grab) sets sk_pile_dirty
+    # and the refresh reseeds the multi-source pile field — one bounded SPFA
+    # only on pile events, never per frame.
     if cfg.SK_ENABLED and layout.has_field('sk_pile_valid'):
         a.call_lbl('sk_pile_tick')
+        if layout.has_field('sk_pile_dirty'):
+            a.call_lbl('sk_pile_route_refresh')
     # Far CTF capture support. The bot force-tick above keeps the carrier
     # moving, but capture itself is driven by the base "checker" trigger at the
     # destination. Those entities are also camera-gated by the engine, so a bot

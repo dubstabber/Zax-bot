@@ -145,6 +145,12 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # non-SK builds. The routing fields build below only when the match is
     # actually SK (detect_mode gate after the CTF block).
     a.call_lbl('load_sk')
+    # Filler-item anchors (health/energy/shield) for the goody-pursuit layer
+    # — mode-independent, so the routing fields build unconditionally right
+    # here (multi-source per category; arms item_routing_active itself).
+    # Inert stubs on non-item builds.
+    a.call_lbl('load_items')
+    a.call_lbl('build_item_routes')
     # Static edge->door adjacency for the door-aware routing field. Doors and
     # the graph never move mid-match, so the point-segment sweep runs once
     # here (wp_load above loaded the graph; load_doors filled door_table).

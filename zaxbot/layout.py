@@ -200,6 +200,11 @@ def build_scratch_layout(
     sk_static_bin_max=0,
     sk_map_name_slot=0,
     sk_pile_table_max=0,
+    item_table_max=0,
+    item_static_map_max=0,
+    item_static_point_max=0,
+    item_map_name_slot=0,
+    item_categories=0,
 ):
     BOT_STATE_BASE = 0x180
     MAX_BOT_SLOTS = 16
@@ -1674,6 +1679,69 @@ def build_scratch_layout(
                   'sk: multi-source mineral BFS field (0 = mineral-bearing node)')
         _sk_field('sk_bin_dist', sk_bin_max_capped * overlay_vertex_max_capped * 4,
                   'sk: per-bin BFS rows, team-major (row = team * VMAX)')
+
+    # --- Generalized GOODY pursuit (graph-routed piles + filler items) -------
+    # Appended at the very tail. The block from item_routing_active through
+    # sk_pile_node is CONTIGUOUS and dumped whole by the R-snapshot `goody`
+    # chunk; the static pack + BFS fields sit after the tag (excluded, like
+    # every other dist field). item_dist is one multi-source row per filler
+    # CATEGORY (health/energy/shield), built once per match — fillers respawn
+    # in place, no presence tracking; sk_pile_dist is the multi-source row
+    # over the live pile ring's bound nodes, rebuilt event-driven via
+    # sk_pile_dirty (registration / TTL expiry / grab).
+    item_table_max_capped = max(0, item_table_max)
+    item_cats_capped      = max(0, item_categories)
+    if (item_table_max_capped > 0 and item_cats_capped > 0
+            and overlay_vertex_max_capped > 0):
+        gd_off = max([f.end for f in fields] + [f.end for f in overlay_fields])
+        gd_off = (gd_off + 7) & ~7
+
+        def _gd_field(name, size, desc):
+            nonlocal gd_off
+            overlay_fields.append(ScratchField(name, gd_off, size, desc))
+            gd_off += size
+
+        _gd_field('item_routing_active', 0x04,
+                  'goody: 1 = filler-item fields built this match (any mode)')
+        _gd_field('item_count', 0x04, 'goody: live filler anchors this map')
+        _gd_field('goody_tx', 0x04, 'goody: resolved pursuit target x (float, per think)')
+        _gd_field('goody_ty', 0x04, 'goody: resolved pursuit target y (float, per think)')
+        _gd_field('goody_node', 0x04, 'goody: resolved target\'s bound graph node (-1)')
+        _gd_field('goody_idx', 0x04, 'goody: resolved target index (pile slot / item idx)')
+        _gd_field('goody_scan_rad', 0x04,
+                  'goody: nearest-scan radius^2 input (float bits; FLT_MAX = unlimited)')
+        _gd_field('goody_scan_cat', 0x04,
+                  'goody: nearest-item-scan category filter (-1 = any)')
+        _gd_field('item_pursue_radius_sq', 0x04,
+                  'goody: filler-item opportunistic divert radius^2 (float)')
+        _gd_field('goody_direct_radius_sq', 0x04,
+                  'goody: straight-steer (direct phase) radius^2, piles + items (float)')
+        _gd_field('goody_abandon_radius_sq', 0x04,
+                  'goody: silently unlatch beyond this d^2 (float)')
+        if sk_pile_max_capped > 0:
+            _gd_field('sk_pile_dirty', 0x04,
+                      'goody: 1 = pile set changed, rebuild sk_pile_dist next flip')
+            _gd_field('sk_pile_node', sk_pile_max_capped * 4,
+                      'goody: nearest graph node per pile ring slot (-1 = unbound)')
+        _gd_field('tag_goody', 0x10, 'diag: goody pursuit dump chunk tag')
+        # Cold data after the tag.
+        _gd_field('item_static_map_count', 0x04, 'goody: packed filler map records')
+        _gd_field('item_static_maps',
+                  max(0, item_static_map_max) * (max(0, item_map_name_slot) + 8),
+                  'goody: map name + (item_count, item_first)')
+        _gd_field('item_static_points', max(0, item_static_point_max) * 12,
+                  'goody: all maps\' filler anchors (x f32, y f32, category u32)')
+        _gd_field('item_table', item_table_max_capped * 8,
+                  'goody: live filler anchor positions (float[2] each)')
+        _gd_field('item_cat', item_table_max_capped * 4,
+                  'goody: live filler category per anchor (0 health / 1 energy / 2 shield)')
+        _gd_field('item_node', item_table_max_capped * 4,
+                  'goody: nearest graph node per filler (-1 = unbound)')
+        _gd_field('item_dist', item_cats_capped * overlay_vertex_max_capped * 4,
+                  'goody: per-category multi-source BFS rows (row = cat * VMAX)')
+        if sk_pile_max_capped > 0:
+            _gd_field('sk_pile_dist', overlay_vertex_max_capped * 4,
+                      'goody: multi-source BFS row over live pile nodes (event-rebuilt)')
 
     fields.extend(overlay_fields)
     return ScratchLayout(base_va, scratch_size, fields)
