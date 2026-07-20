@@ -629,6 +629,152 @@ class PortalDataTests(unittest.TestCase):
         self.assertEqual(run('Hydroplant Bouncefest.zax', 0, 1, opened=(0,)),
                          ('seek', None, None))
 
+    def test_switch_seek_join_gate_on_battle_on_the_ice(self):
+        # Offline mirror of ctf_next_hop's per-bot ON-THE-WAY join gate for an
+        # ACTIVE team seek, with the RUNTIME's directional door semantics
+        # (edge_pass: a closed-door edge passes for team T from side S iff a
+        # T-usable opener lies on side S; an opener ON the door grants both).
+        # Live-diagnosed 2026-07-20: Battle on the Ice's south team door
+        # (door 1, team-0 walk-up, self-closing) flips door_blocked every few
+        # seconds; each re-close re-activated switch 1 (node 46) for team 0
+        # and the OLD unconditional join turned the whole team around
+        # (R snapshots: bot_seek=[1,1,1,1,1] with bots at nodes 12/13; slot 1
+        # backtracked 14->54). The gate keeps the descent local:
+        #   seek_dist[cur] + full(switch -> goal) <= full(cur -> goal) + SLACK
+        # so the south-side bots that need the switch still join while bots
+        # past the doorway (node 48) or far along the route (13) do not.
+        import math as _math
+        import struct as _struct
+        import heapq as _heapq
+        from pathlib import Path
+        from zaxbot.door_data import resolve_door_topology
+        from zaxbot.flag_data import resolve_flag_data
+
+        topo = {t.map_name.split('/')[-1]: t for t in resolve_door_topology()}
+        m = topo['Battle on the Ice.zax']
+        p = (Path(__file__).resolve().parents[1] / 'waypoints'
+             / 'Levels_Multiplayer_CTF_Battle on the Ice.zax.zwpt')
+        d = p.read_bytes()
+        _magic, _ver, vc, ec = _struct.unpack('<4sIII', d[:16])
+        verts = [_struct.unpack('<ff', d[16 + i*8:24 + i*8]) for i in range(vc)]
+        edges = [(w & 0xFFFF, w >> 16)
+                 for w in _struct.unpack(f'<{ec}I', d[16 + vc*8:16 + vc*8 + ec*4])]
+
+        def seg_d2(px, py, ax, ay, bx, by):
+            vx, vy = bx - ax, by - ay
+            wx, wy = px - ax, py - ay
+            L2 = vx*vx + vy*vy
+            t = 0.0 if L2 == 0 else max(0.0, min(1.0, (wx*vx + wy*vy) / L2))
+            ddx, ddy = px - (ax + t*vx), py - (ay + t*vy)
+            return ddx*ddx + ddy*ddy
+
+        edge_door = []
+        for e, (i, j) in enumerate(edges):
+            best, bd = None, cfg.DOOR_EDGE_RADIUS_SQ
+            for di, (dx, dy) in enumerate(m.doors):
+                d2 = seg_d2(dx, dy, *verts[i], *verts[j])
+                if d2 < bd:
+                    bd, best = d2, di
+            edge_door.append(best)
+
+        def pass_bits(e, team):
+            di = edge_door[e]
+            i, j = edges[e]
+            bits = 0
+            for (ox, oy, odi, mask) in m.openers:
+                if odi != di or not ((mask >> team) & 1):
+                    continue
+                dx, dy = m.doors[di]
+                for bit, n in ((1, i), (2, j)):
+                    if (ox-dx)*(verts[n][0]-dx) + (oy-dy)*(verts[n][1]-dy) + 1.0 > 0:
+                        bits |= bit
+            return bits
+
+        blocked = [True, True]     # authored default: both team doors closed
+
+        def bfs(team, start, gated):
+            dist = [-1] * vc
+            dist[start] = 0
+            pq = [(0, start)]
+            while pq:
+                du, u = _heapq.heappop(pq)
+                if du > dist[u]:
+                    continue
+                for e, (i, j) in enumerate(edges):
+                    v = j if i == u else (i if j == u else None)
+                    if v is None:
+                        continue
+                    if gated and edge_door[e] is not None and blocked[edge_door[e]]:
+                        # BFS expands u->v = bot walks v->u: side v's bit.
+                        if not (pass_bits(e, team) & (1 if v == i else 2)):
+                            continue
+                    w = max(1, round(_math.dist(verts[i], verts[j])
+                                     / cfg.WP_EDGE_LEN_QUANTUM))
+                    if dist[v] == -1 or du + w < dist[v]:
+                        dist[v] = du + w
+                        _heapq.heappush(pq, (du + w, v))
+            return dist
+
+        flags = {n.split('/')[-1]: pts for n, pts in resolve_flag_data()}
+        base_node = {t: min(range(vc),
+                            key=lambda k: (verts[k][0]-x)**2 + (verts[k][1]-y)**2)
+                     for (x, y, t) in flags['Battle on the Ice.zax']}
+        sw_nodes = [min(range(vc),
+                        key=lambda k: (verts[k][0]-x)**2 + (verts[k][1]-y)**2)
+                    for (x, y, _f) in m.switches]
+        # Pin the live-observed bindings: switch 1 (opens door 1) binds node
+        # 46; door 1 crosses edge (47,48) 30 px from node 47.
+        self.assertEqual(sw_nodes[1], 46)
+        self.assertEqual(base_node, {0: 44, 1: 111})
+
+        goal = base_node[1]                      # team-0 attackers -> base 1
+        full = bfs(0, goal, gated=False)
+        seek = bfs(0, sw_nodes[1], gated=True)   # active seek on switch 1
+        self.assertEqual(full[sw_nodes[1]], 206)
+
+        def joins(cur):
+            s, f = seek[cur], full[cur]
+            if s == -1 or full[sw_nodes[1]] == -1:
+                return False
+            return f == -1 or s + full[sw_nodes[1]] <= f + cfg.SWITCH_SEEK_JOIN_SLACK
+        # South-side bots (the switch IS their way through) join ...
+        self.assertTrue(joins(44))     # own base node, detour 0
+        self.assertTrue(joins(46))     # at the switch, detour 0
+        self.assertTrue(joins(47))     # south of the doorway, detour 16
+        # ... bots past the doorway or far along the route do NOT.
+        self.assertFalse(joins(48))    # NORTH of the doorway, detour 38
+        self.assertFalse(joins(51))    # detour 60
+        self.assertFalse(joins(14))    # the live slot-1 backtrack, detour 118
+        self.assertFalse(joins(13))    # snap6's far recruits, detour 138
+
+        # --- Wedge-cluster hard reset (live 2026-07-20 snaps 1-3): a team-1
+        # bot north of the CLOSED south team door stood latched onto in-base
+        # nodes (cur flipped 77<->47 with prev=78, marker (78,77)) because
+        # every recovery re-picked cross-wall nodes: node 78's arrival ball
+        # even pokes through the entrance wall. The hard reset acquires the
+        # nearest node EXCLUDING the wedge cluster {failed cur, prev, marker
+        # nodes} — from the live position that must pick 48, the entry to the
+        # around-route (team-1 open field into the south base is finite via
+        # the east side; only node 47 is truly sealed).
+        bot = (1557.4, 2770.9)         # snap 2 live position
+        def nearest_excluding(p, excl):
+            best, bd = -1, None
+            for k in range(vc):
+                if k in excl:
+                    continue
+                d2 = (verts[k][0]-p[0])**2 + (verts[k][1]-p[1])**2
+                if bd is None or d2 < bd:
+                    bd, best = d2, k
+            return best
+        self.assertEqual(nearest_excluding(bot, set()), 78)          # the trap
+        self.assertEqual(nearest_excluding(bot, {47, 77, 78}), 48)   # the escape
+        # The escape node genuinely reaches the goal around the wall for
+        # team 1 while the wedge-cluster nodes' field values lie (they are
+        # near-goal but physically unreachable from the bot's side).
+        open1 = bfs(1, base_node[0], gated=True)
+        self.assertNotEqual(open1[48], -1)
+        self.assertEqual(open1[47], -1)
+
     def test_door_opener_topology_is_extracted(self):
         # Openers drive DIRECTIONAL closed-door passability: bot-usable
         # walk-in triggers only (touching/pass-through, authored active;
@@ -1363,8 +1509,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '99ac19d714f0956e401f8935a8f020abff9a08d8a72f1e8236033a0234c43e44'
-    HOOK_ENTRY_SIZE = 38674
+    SECTION_SHA256 = '1b16041f3d72fd86a0c75286eda6d886755668d49f507960b2f7282b46aad0ed'
+    HOOK_ENTRY_SIZE = 39389
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

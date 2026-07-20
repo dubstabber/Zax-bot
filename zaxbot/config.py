@@ -831,6 +831,25 @@ SWITCH_SEEK_TIMEOUT_FRAMES = 900   # ~15 s at 60 Hz before an active seek expire
 # post-open route must beat the current open route), so a low trigger
 # threshold cannot cause silly cross-map detours. Must stay <= 127 (imm8).
 SWITCH_SEEK_SHORTCUT_GAIN  = 20
+# Per-bot ON-THE-WAY join gate for an ACTIVE team seek. A bot arriving at a
+# node joins the descent only when the switch detour is local:
+#   seek_dist[cur] + full_dist(switch_node -> goal)
+#     <= full_dist(cur -> goal) + JOIN_SLACK
+# (a bot whose full-field goal distance is itself unreachable joins
+# unconditionally — nothing better exists). Live-diagnosed on Battle on the
+# Ice (2026-07-20 R snapshots): the join used to be unconditional for every
+# team bot that could reach the switch, so whenever the self-closing south
+# team door re-closed and a trailing bot re-requested its adjacent switch,
+# teammates PAST the door — one at node 13/14, half the map away — turned
+# around and walked backwards toward it (snap6: bot_seek=[1,1,1,1,1]; slot 1
+# visibly backtracked 14->54 and flipped forward again on the next rebuild).
+# UNITS: WP_EDGE_LEN_QUANTUM (16 px) quanta, same as every BFS field; 24 =
+# ~384 px of acceptable local detour. Sized from the live map's gap: the
+# south-side node 47 detours 16 quanta (joins — it must, the switch is its
+# way through) while node 48, already NORTH of the doorway, detours 38
+# (must NOT join — descending back through the door was the reported
+# backwards-forwards shuttle). Must stay <= 127 (imm8).
+SWITCH_SEEK_JOIN_SLACK     = 24
 # Roam-time switch WANDER-BUMP (the "switches are part of the random path"
 # layer). The seek machinery above only serves ROUTED bots — a goal-less bot
 # (DM roam, CTF missing-flag search, suspension roam) never requests one, and
@@ -974,6 +993,32 @@ FLAG_ROUTE_MAX        = 2
 # behavior that visibly un-sticks it when the flag state changes), then
 # routing resumes automatically.
 WP_ROUTE_SUSPEND_FRAMES = 240
+# Wedge-cluster HARD RESET (live-diagnosed 2026-07-20, Battle on the Ice R
+# snaps 1-3): a bot on the WRONG SIDE of a wall/door whose latched nodes sit
+# across it cycles the local recovery forever — the alternate-neighbour path
+# only explores neighbours of prev (all across the wall), retreat swaps within
+# the same pair, and the unlatched reacquire re-picks the Euclidean-nearest
+# node (also across the wall; live: cur flipped 77<->47 with prev=78 while the
+# bot stood north of the closed south door, and the reachable around-route via
+# node 48 was never tried). After this many consecutive recovery actions
+# WITHOUT a single node arrival, the follower cold-acquires the nearest node
+# EXCLUDING the wedge cluster (failed cur, prev, and the failed-edge marker's
+# two nodes) via wp_find_nearest_ex — on the live geometry that excludes
+# {47,77,78} and picks 48, the entry to the around-route. The marker is KEPT
+# through the reset as wedge memory. Any genuine arrival resets the counter.
+# Must stay <= 127 (imm8).
+WP_WEDGE_RESET_CYCLES = 3
+# FIGHT-STALL suppression (user-reported 2026-07-20: "bots that hold the flag
+# do not always escape to the base when engaged in fighting"): a routed
+# progress stall with a live enemy this close (d^2, px^2) is usually the fight
+# itself — knockback and body-blocking — not geometry. Arming the routing
+# suspension there made ctf_pick_goal report no goal, so a flag CARRIER
+# roamed randomly mid-fight instead of pressing home. While the fire scan's
+# per-bot enemy-near stamp is set, the progress-timeout skips the suspension
+# (markers, alternates and the wedge hard reset still run). 240 px ~ just
+# beyond melee/body-block range; raise toward FIRE_RANGE if carriers still
+# loiter in longer-range duels.
+FIGHT_STALL_RADIUS_SQ = 240.0 * 240.0
 # Physical-length routing quantum: every graph edge's traversal cost in the
 # shared BFS (bfs_run — full/open/seek/drop fields alike) is its pixel length
 # divided by this, rounded, min 1. Hop counting was live-refuted on Hydroplant

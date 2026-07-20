@@ -933,6 +933,32 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
             a.raw(b'\x83\xF9\xFF')                        # switch reachable from here?
             a.jz('cnh_seek_fb')
             a.raw(b'\x89\xC5')                            # ebp = seek row
+            # --- ON-THE-WAY join gate. The active seek serves its REQUESTER;
+            # a bot joins the descent only when the switch is a LOCAL detour
+            # for it too: seek_walk(cur -> switch) + full(switch -> goal) <=
+            # full(cur -> goal) + JOIN_SLACK. Unconditional joining was
+            # live-diagnosed on Battle on the Ice (2026-07-20): every rebuild
+            # of the flapping self-closing team door re-activated the
+            # adjacent switch, and teammates far PAST the door — one half the
+            # map away at node 13 — turned around to descend to it (snap6:
+            # bot_seek all set; slot 1 backtracked 14->54). A bot whose
+            # full-field goal distance is unreachable joins unconditionally
+            # (nothing better exists for it). edx = team, ebx = cur,
+            # edi = goal full-row offset, ecx = seek_dist[cur].
+            a.raw(b'\x8B\x04\x95' + le32(seek_node_va))   # eax = seek_node[team]
+            a.raw(b'\x3B\x05' + le32(vcount_va))          # defensive range
+            a.jae('cnh_seek_fb')
+            a.raw(b'\x8B\x84\x87' + le32(flag_dist_va))   # eax = full[goal][switch node]
+            a.raw(b'\x83\xF8\xFF')                        # goal full-unreachable from switch?
+            a.jz('cnh_seek_fb')                           # -> switch on no path to goal
+            a.raw(b'\x01\xC8')                            # eax += ecx (walk + post-open route)
+            a.raw(b'\x8B\xB4\x9F' + le32(flag_dist_va))   # esi = full[goal][cur]
+            a.raw(b'\x83\xFE\xFF')                        # cur full-unreachable?
+            a.jz('cnh_seek_join')                         # -> nothing better; join
+            a.raw(b'\x83\xC6' + bytes([cfg.SWITCH_SEEK_JOIN_SLACK]))  # esi += slack
+            a.raw(b'\x39\xF0')                            # cmp detour, full[cur]+slack
+            a.ja('cnh_seek_fb')                           # off-path -> keep normal routing
+            a.label('cnh_seek_join')
             a.raw(b'\x8B\x15' + le32(bot_slot_va))        # edx = slot
             a.raw(b'\xC7\x04\x95' + le32(bot_seek_va) + le32(1))  # bot_seek[slot] = 1
             a.jmp('cnh_field_ok')                         # ecx = cur seek dist

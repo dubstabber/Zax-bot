@@ -24,6 +24,8 @@ Entry: ECX = controller, ``[esp+4]`` = char, ``[esp+8]`` = float* out_angle.
 Return: AL = 1 to fire, 0 to skip.
 """
 
+import struct
+
 from .. import addresses as ax
 from .. import config as cfg
 from ..asm import Asm, le32
@@ -51,6 +53,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
                            label_prefix='s5436f0')
     emit_addr_to_slot(a, layout)                          # eax = slot
     a.raw(b'\xA3' + le32(bot_slot_tmp_va))                # mov [bot_slot_tmp], eax
+    if layout.has_field('bot_enemy_near'):
+        # Fresh per-frame fight signal; set again below only when this
+        # frame's pick_target found an enemy in close range. Consumed by the
+        # movement watchdog's fight-stall suspension skip.
+        a.raw(b'\xC7\x04\x85' + le32(layout.va('bot_enemy_near')) + le32(0))
     if cfg.BOT_FORCE_TICK_ENABLED and layout.has_field('bot_last_item_scan'):
         a.raw(b'\x83\x3C\x85' + le32(layout.va('bot_last_item_scan')) + b'\x02')
         a.jz('s5436f0_no_fire')                           # page-flip recovery tick: move only
@@ -75,6 +82,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.call_lbl('pick_target')                             # AL = 1 if target picked
     a.raw(b'\x84\xC0')                                    # test al, al
     a.jz('s5436f0_no_fire')
+    if layout.has_field('bot_enemy_near'):
+        # Fight-stall stamp: enemy within FIGHT_STALL_RADIUS_SQ. best_dist_sq
+        # holds non-negative IEEE float bits, so an unsigned integer compare
+        # against the packed constant is exact — no FPU needed.
+        a.raw(b'\xA1' + le32(layout.va('best_dist_sq')))  # eax = target d^2 bits
+        a.raw(b'\x3D' + struct.pack('<f', float(cfg.FIGHT_STALL_RADIUS_SQ)))
+        a.ja('s5436f0_far_target')                        # beyond fight range
+        a.raw(b'\x8B\x15' + le32(bot_slot_tmp_va))        # edx = slot
+        a.raw(b'\xC7\x04\x95' + le32(layout.va('bot_enemy_near')) + le32(1))
+        a.label('s5436f0_far_target')
 
     # --- (5) Dispatch on the bot's current weapon. compute_proj_speed writes
     # `proj_speed` (per-weapon match, or default fallback) and `is_hitscan`

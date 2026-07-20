@@ -223,6 +223,8 @@ def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('route_block_hits')) + le32(0))  # reset blocked-edge retry count
     if layout.has_field('bot_seek'):
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_seek')) + le32(0))  # drop seek participation
+    if layout.has_field('bot_wedge_cycles'):
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_wedge_cycles')) + le32(0))  # fresh wedge counter
     if layout.has_field('bot_portal_target'):
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_portal_target')) + le32(0))  # drop pad approach
     if layout.has_field('bot_portal_cd'):
@@ -320,6 +322,8 @@ def _emit_stuck_detection(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pickup_valid')) + le32(0))  # failed-edge marker
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_flee_ticks')) + le32(0))    # slide_turn
         a.raw(b'\xC7\x04\x8D' + le32(stuck_count_va) + le32(0))
+        if layout.has_field('bot_wedge_cycles'):
+            a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_wedge_cycles')) + le32(0))  # new area, fresh counter
         if layout.has_field('bot_portal_target'):
             a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_portal_target')) + le32(0))
         if layout.has_field('bot_drop_target'):
@@ -679,6 +683,16 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         door_blocked_va     = layout.va('door_blocked')
         door_count_va       = layout.va('door_count')
 
+    # Wedge-cluster HARD RESET state (see the s542360_wp_hard_reset block and
+    # cfg.WP_WEDGE_RESET_CYCLES). fight_stall additionally lets the routed
+    # progress-timeout skip the suspension while an enemy is in close range
+    # (bot_enemy_near stamped by the fire detour's pick_target).
+    wedge_reset = layout.has_field('bot_wedge_cycles') and layout.has_field('wpfn_excl')
+    if wedge_reset:
+        bot_wedge_cycles_va = layout.va('bot_wedge_cycles')
+        wpfn_excl_va        = layout.va('wpfn_excl')
+    fight_stall = layout.has_field('bot_enemy_near')
+
     # Closed-door commitment recovery. The door-BLIND commit paths (cold-acquire
     # nearest node, reacquire, retreat) and any next-hop made while a door was
     # open can leave a bot latched onto a target node it must reach ACROSS a
@@ -690,10 +704,12 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     # the reachable side. Needs the edge list + per-edge door binding.
     door_reroute = (routing and door_gate
                     and layout.has_field('edge_door')
+                    and layout.has_field('door_table')
                     and layout.has_field('overlay_edges')
                     and layout.has_field('overlay_edge_count'))
     if door_reroute:
         edge_door_va         = layout.va('edge_door')
+        door_table_va        = layout.va('door_table')
         overlay_edges_va     = layout.va('overlay_edges')
         overlay_edge_count_va = layout.va('overlay_edge_count')
 
@@ -875,10 +891,21 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     # arrived), so a bot steering across a door that opens mid-edge stays
     # committed to the old, now-suboptimal path until it dies and respawns (a
     # bot pressed against a still-closed door never arrives at a node to
-    # re-route). When this bot's stored epoch lags the global, invalidate
-    # current_wp so the cold-acquire below re-runs THIS think and ctf_next_hop
-    # picks the newly-opened route. Gated on active CTF routing; debounced to
-    # at most once per DOOR_ROUTE_REBUILD_COOLDOWN_FRAMES by the rebuild itself.
+    # re-route). When this bot's stored epoch lags the global, sync it and,
+    # for a bot NOT latched onto an edge, invalidate current_wp so the
+    # cold-acquire below re-runs ctf_next_hop THIS think. An EDGE-LATCHED bot
+    # (prev_wp != -1) KEEPS its target: live Battle on the Ice snapshots
+    # (2026-07-20) caught the old blanket invalidate snapping bots backward on
+    # every rebuild — a self-closing door there flips door_blocked every few
+    # seconds, and the Euclidean nearest-node cold-acquire re-latched the node
+    # BEHIND a bot that had just crossed the doorway (node 47 sits 30 px on
+    # the far side; the 64 px arrival radius then "arrived" it across the
+    # closed door and re-planned from the wrong side) — the reported
+    # backwards-and-forwards shuttle. A latched bot re-plans against the
+    # rebuilt field at its next arrival, and a now-blocked current edge is
+    # handled the same think by the closed-door commitment recovery below.
+    # Gated on active CTF routing; debounced to at most once per
+    # DOOR_ROUTE_REBUILD_COOLDOWN_FRAMES by the rebuild itself.
     if routing and layout.has_field('route_epoch') and layout.has_field('bot_route_epoch'):
         route_epoch_va = layout.va('route_epoch')
         bot_route_epoch_va = layout.va('bot_route_epoch')
@@ -889,6 +916,8 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x3B\x04\x8D' + le32(bot_route_epoch_va))      # cmp eax, bot_route_epoch[slot]
         a.jz('s542360_epoch_done')
         a.raw(b'\x89\x04\x8D' + le32(bot_route_epoch_va))      # bot_route_epoch[slot] = epoch
+        a.raw(b'\x83\x3C\x8D' + le32(prev_wp_va) + b'\xFF')    # cmp prev_wp[slot], -1
+        a.jnz('s542360_epoch_done')                            # edge-latched -> keep target
         a.raw(b'\xC7\x04\x8D' + le32(current_wp_va)
               + b'\xFF\xFF\xFF\xFF')                           # invalidate -> cold re-acquire
         a.label('s542360_epoch_done')
@@ -1546,31 +1575,40 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
         a.jae('s542360_cdr_done')                             # stale idx
         a.raw(b'\x83\x3C\x95' + le32(door_blocked_va) + b'\x00')  # door blocked?
         a.jz('s542360_cdr_done')                              # open -> normal handling
-        # Closed door on the committed edge. dsq(bot,prev) vs dsq(bot,cur);
-        # edi = prev idx still live, cur idx in dy_accum.
-        a.raw(b'\x8D\x04\xFD' + le32(overlay_vertices_va))    # lea eax, [edi*8 + verts] (prev)
-        a.raw(b'\xD9\x00')                                    # fld prev.x
-        a.raw(b'\xD8\x25' + le32(bot_pos_va))                 # fsub bot.x
-        a.raw(b'\xD8\xC8')                                    # fmul st,st
-        a.raw(b'\xD9\x40\x04')                                # fld prev.y
-        a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))             # fsub bot.y
-        a.raw(b'\xD8\xC8')                                    # fmul st,st
-        a.raw(b'\xDE\xC1')                                    # faddp -> dsq_prev
-        a.raw(b'\xD9\x1D' + le32(wp_seg_x_va))                # fstp wp_seg_x = dsq_prev
-        a.raw(b'\xA1' + le32(dy_accum_va))                    # eax = cur idx
-        a.raw(b'\x8D\x04\xC5' + le32(overlay_vertices_va))    # lea eax, [eax*8 + verts] (cur)
-        a.raw(b'\xD9\x00')                                    # fld cur.x
-        a.raw(b'\xD8\x25' + le32(bot_pos_va))                 # fsub bot.x
-        a.raw(b'\xD8\xC8')                                    # fmul st,st
-        a.raw(b'\xD9\x40\x04')                                # fld cur.y
-        a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))             # fsub bot.y
-        a.raw(b'\xD8\xC8')                                    # fmul st,st
-        a.raw(b'\xDE\xC1')                                    # faddp -> dsq_cur (st0)
-        a.raw(b'\xD9\x05' + le32(wp_seg_x_va))                # fld dsq_prev (st0=prev, st1=cur)
-        a.raw(b'\xDF\xF1')                                    # fcomip st0,st1 (CF=1 if prev<cur); pop
-        a.raw(b'\xDD\xD8')                                    # fstp st(0) (drop dsq_cur; EFLAGS kept)
-        a.jae('s542360_cdr_done')                             # nearer cur -> arrival handles it
-        # Nearer prev: re-plan door-aware from prev by advancing from it.
+        # Closed door on the committed edge. Has the bot CROSSED the door?
+        # Test the DOOR side, not node proximity: the door is rarely at the
+        # edge midpoint (Battle on the Ice: 30 px from node 47, 170 px from
+        # node 48), so the old "nearer prev than cur" test mislabelled a bot
+        # standing just past the doorway as not-crossed and walked it back
+        # INTO the closed door (live 2026-07-20 dpursuit/rstate snapshots:
+        # the backwards-forwards shuttle at the self-closing team door).
+        # crossed = dot(bot - door, cur - prev) > 0 -> no-op (the bot is on
+        # the cur side; arrival at cur re-plans); <= 0 (incl. degenerate
+        # zero/NaN) -> back up to prev. edi = prev idx, edx = door idx (in
+        # range, checked above), cur idx in dy_accum.
+        a.raw(b'\x8D\x04\xD5' + le32(door_table_va))          # lea eax, [edx*8 + door_table]
+        a.raw(b'\x8D\x0C\xFD' + le32(overlay_vertices_va))    # lea ecx, [edi*8 + verts] (prev)
+        a.raw(b'\x8B\x1D' + le32(dy_accum_va))                # ebx = cur idx
+        a.raw(b'\x8D\x1C\xDD' + le32(overlay_vertices_va))    # lea ebx, [ebx*8 + verts] (cur)
+        a.raw(b'\xD9\x05' + le32(bot_pos_va))                 # fld bot.x
+        a.raw(b'\xD8\x20')                                    # fsub door.x ([eax])
+        a.raw(b'\xD9\x03')                                    # fld cur.x ([ebx])
+        a.raw(b'\xD8\x21')                                    # fsub prev.x ([ecx])
+        a.raw(b'\xDE\xC9')                                    # fmulp -> (b.x-d.x)*(c.x-p.x)
+        a.raw(b'\xD9\x05' + le32(bot_pos_va + 4))             # fld bot.y
+        a.raw(b'\xD8\x60\x04')                                # fsub door.y ([eax+4])
+        a.raw(b'\xD9\x43\x04')                                # fld cur.y ([ebx+4])
+        a.raw(b'\xD8\x61\x04')                                # fsub prev.y ([ecx+4])
+        a.raw(b'\xDE\xC9')                                    # fmulp
+        a.raw(b'\xDE\xC1')                                    # faddp -> dot product (st0)
+        a.raw(b'\xD9\xE4')                                    # ftst (st0 vs +0.0)
+        a.raw(b'\xDF\xE0')                                    # fnstsw ax — eax is dead here
+                                                              # (door ptr fully consumed;
+                                                              # AGENTS constraint #6)
+        a.raw(b'\x9E')                                        # sahf (ZF=C3, CF=C0)
+        a.raw(b'\xDD\xD8')                                    # fstp st0 (pop; EFLAGS kept)
+        a.ja('s542360_cdr_done')                              # dot > 0: crossed -> no-op
+        # Still on the prev side of the door: re-plan door-aware from prev.
         a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
         a.raw(b'\x8B\x04\x8D' + le32(prev_wp_va))             # eax = prev_wp[slot]
         a.raw(b'\x89\x04\x8D' + le32(current_wp_va))          # current_wp[slot] = prev
@@ -1932,6 +1970,15 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
             a.label('s542360_wp_door_impatient')
             a.raw(b'\xC7\x04\x8D' + le32(bot_door_patience_va) + le32(0))
         a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        if fight_stall:
+            # FIGHT STALL: a routed progress stall with a live enemy in close
+            # range is usually the fight (knockback, body-block), not
+            # geometry. Suspending here made ctf_pick_goal report no goal, so
+            # a flag CARRIER roamed randomly mid-fight instead of pressing
+            # home (user-reported 2026-07-20). Keep routing; the marker /
+            # alternate / hard-reset machinery below still runs.
+            a.raw(b'\x83\x3C\x8D' + le32(layout.va('bot_enemy_near')) + b'\x00')
+            a.jnz('s542360_wp_reacq_no_suspend')
         a.raw(b'\xC7\x04\x8D' + le32(route_suspend_va)
               + le32(cfg.WP_ROUTE_SUSPEND_FRAMES))
         a.label('s542360_wp_reacq_no_suspend')
@@ -1990,6 +2037,14 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))           # slide_turn = 0
     if door_gate:
         a.call_lbl('door_capture_wedge')                  # latch nearest blocked door (pushad-safe)
+    if wedge_reset:
+        # One recovery action taken with no arrival since — count toward the
+        # wedge hard reset (see s542360_wp_hard_reset).
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\xFF\x04\x8D' + le32(bot_wedge_cycles_va))  # ++wedge_cycles[slot]
+        a.raw(b'\x83\x3C\x8D' + le32(bot_wedge_cycles_va)
+              + bytes([cfg.WP_WEDGE_RESET_CYCLES]))
+        a.jae('s542360_wp_hard_reset')
     a.jmp('s542360_wp_steer')
 
     # No alternate: swap cur <-> prev (old behavior).
@@ -2018,6 +2073,12 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))           # slide_turn = 0
     if door_gate:
         a.call_lbl('door_capture_wedge')                  # latch nearest blocked door (pushad-safe)
+    if wedge_reset:
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\xFF\x04\x8D' + le32(bot_wedge_cycles_va))  # ++wedge_cycles[slot]
+        a.raw(b'\x83\x3C\x8D' + le32(bot_wedge_cycles_va)
+              + bytes([cfg.WP_WEDGE_RESET_CYCLES]))
+        a.jae('s542360_wp_hard_reset')
     a.jmp('s542360_wp_steer')
 
     a.label('s542360_wp_reacq_nearest')
@@ -2030,7 +2091,10 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     a.jz('s542360_wp_steer')                              # no candidate -> keep cur
     a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # reload slot
     a.raw(b'\x3B\x1C\x8D' + le32(current_wp_va))          # same nearest as failed cur?
-    a.jz('s542360_wp_steer')                              # preserve high wp_try + slide sweep
+    if wedge_reset:
+        a.jz('s542360_wp_sweep_check')                    # keep sweeping, but bounded
+    else:
+        a.jz('s542360_wp_steer')                          # preserve high wp_try + slide sweep
     a.raw(b'\x89\x1C\x8D' + le32(current_wp_va))          # current_wp[slot] = nearest
     a.raw(b'\xC7\x04\x8D' + le32(prev_wp_va) + b'\xFF\xFF\xFF\xFF')   # prev_wp = -1
     a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # best_dsq = FLT_MAX
@@ -2041,9 +2105,86 @@ def _emit_waypoint_follow(a: Asm, layout: ScratchLayout) -> None:
     if door_gate:
         a.raw(b'\xC7\x04\x8D' + le32(route_block_door_va) + b'\xFF\xFF\xFF\xFF')
     a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))           # slide_turn = 0
+    if wedge_reset:
+        # A fresh nearest node is still a recovery action, not an arrival —
+        # if these keep chaining without any arrival the bot is orbiting a
+        # wall pocket; count toward the hard reset.
+        a.raw(b'\xFF\x04\x8D' + le32(bot_wedge_cycles_va))  # ++wedge_cycles[slot]
+        a.raw(b'\x83\x3C\x8D' + le32(bot_wedge_cycles_va)
+              + bytes([cfg.WP_WEDGE_RESET_CYCLES]))
+        a.jae('s542360_wp_hard_reset')
     a.jmp('s542360_wp_steer')
 
+    if wedge_reset:
+        # Unlatched bot stuck on the SAME nearest node: keep the high wp_try
+        # so the wall-slide sweep continues — but bound it. If wp_try passes
+        # 4 full timeout windows without a single arrival, the node is
+        # presumed unreachable from this side (live 2026-07-20: the reacquire
+        # kept re-picking the wrong-side node across the wall) -> hard reset.
+        a.label('s542360_wp_sweep_check')
+        a.raw(b'\xA1' + le32(wp_progress_timeout_va))     # eax = timeout knob
+        a.raw(b'\xC1\xE0\x02')                            # eax *= 4
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x39\x04\x8D' + le32(wp_try_va))          # cmp wp_try[slot], eax
+        a.jae('s542360_wp_hard_reset')
+        a.jmp('s542360_wp_steer')
+
+        # --- Wedge-cluster HARD RESET (live 2026-07-20, Battle on the Ice
+        # R snaps 1-3). A bot on the WRONG SIDE of a wall/door whose latched
+        # nodes sit across it cycles the local recovery forever: the
+        # alternate-neighbour path only explores neighbours of prev (all
+        # across the wall — live: cur flipped 77<->47 with prev=78 while the
+        # bot stood north of the closed south team door), retreat swaps
+        # within the same pair, and the unlatched reacquire re-picks the
+        # Euclidean-nearest node (78, also across the wall) — the reachable
+        # around-route entry (48) was never tried. After WP_WEDGE_RESET_
+        # CYCLES recovery actions without a single arrival (or a sweep stuck
+        # 4 windows on one node), cold-acquire the nearest node EXCLUDING
+        # the wedge cluster: failed cur, prev, and the failed-edge marker's
+        # two nodes (+1-packed). The marker is deliberately KEPT as wedge
+        # memory so consecutive resets keep widening the exclusion set.
+        a.label('s542360_wp_hard_reset')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8B\x04\x8D' + le32(current_wp_va))
+        a.raw(b'\xA3' + le32(wpfn_excl_va))               # excl[0] = cur
+        a.raw(b'\x8B\x04\x8D' + le32(prev_wp_va))
+        a.raw(b'\xA3' + le32(wpfn_excl_va + 4))           # excl[1] = prev (-1 ok)
+        a.raw(b'\xC7\x05' + le32(wpfn_excl_va + 8) + b'\xFF\xFF\xFF\xFF')
+        a.raw(b'\xC7\x05' + le32(wpfn_excl_va + 12) + b'\xFF\xFF\xFF\xFF')
+        a.raw(b'\x8B\x1C\x8D' + le32(failed_edge_va))     # ebx = marker (+1-packed, 0 = none)
+        a.raw(b'\x85\xDB')
+        a.jz('s542360_wp_hr_nomark')
+        a.raw(b'\x0F\xB7\xC3')                            # movzx eax, bx
+        a.raw(b'\x48')                                    # dec eax (undo +1)
+        a.raw(b'\xA3' + le32(wpfn_excl_va + 8))           # excl[2] = marker lo node
+        a.raw(b'\x89\xD8')                                # eax = marker
+        a.raw(b'\xC1\xE8\x10')                            # shr eax, 16
+        a.raw(b'\x48')                                    # dec eax
+        a.raw(b'\xA3' + le32(wpfn_excl_va + 12))          # excl[3] = marker hi node
+        a.label('s542360_wp_hr_nomark')
+        a.raw(b'\xA1' + le32(bot_pos_va))                 # stage bot pos -> wp_scratch
+        a.raw(b'\xA3' + le32(wp_scratch_va))
+        a.raw(b'\xA1' + le32(bot_pos_va + 4))
+        a.raw(b'\xA3' + le32(wp_scratch_va + 4))
+        a.call_lbl('wp_find_nearest_ex')                  # ebx = escape idx or -1
+        a.raw(b'\x83\xFB\xFF')
+        a.jz('s542360_wp_steer')                          # nothing outside the cluster
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x89\x1C\x8D' + le32(current_wp_va))      # current_wp[slot] = escape node
+        a.raw(b'\xC7\x04\x8D' + le32(prev_wp_va) + b'\xFF\xFF\xFF\xFF')
+        a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(bot_wedge_cycles_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(slide_turn_va) + le32(0))
+        if routing:
+            a.raw(b'\xC7\x04\x8D' + le32(route_block_hits_va) + le32(0))
+        a.jmp('s542360_wp_steer')
+
     a.label('s542360_wp_arrived')
+    if wedge_reset:
+        # Any genuine node arrival = real progress; the wedge counter resets.
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\xC7\x04\x8D' + le32(bot_wedge_cycles_va) + le32(0))
     # Reached the node: advance to a CONNECTED neighbour (random; prefers !=
     # prev). When not latched (prev == -1) pass cur as prev so the advance
     # latches and any neighbour is acceptable.

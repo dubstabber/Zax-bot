@@ -291,6 +291,18 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         emit_chunk(layout.va('tag_skstate'),
                    b'\xB8' + le32(layout.va('sk_routing_active')),
                    skstate_dump_len, 'snap_skip_skstate')
+    # Wedge-escape + fight-stall state: the wp_find_nearest_ex exclusion list
+    # (which nodes the last hard reset ruled out), per-bot wedge-cycle
+    # counters, and the per-bot enemy-near stamps — one R press pins whether
+    # a milling bot is accruing toward a hard reset and whether the movement
+    # watchdog currently sees its stall as a fight.
+    if layout.has_field('tag_wedge') and layout.has_field('wpfn_excl'):
+        wedge_dump_len = (layout.field('bot_enemy_near').offset
+                          + layout.field('bot_enemy_near').size
+                          - layout.field('wpfn_excl').offset)
+        emit_chunk(layout.va('tag_wedge'),
+                   b'\xB8' + le32(layout.va('wpfn_excl')),
+                   wedge_dump_len, 'snap_skip_wedge')
     # Goody pursuit state: item field gate/count, the per-think resolved
     # target (tx/ty/node/idx), scan inputs, radius knobs, pile dirty flag +
     # node binds — one R press pins what a latched bot is chasing and why.

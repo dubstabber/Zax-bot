@@ -158,6 +158,38 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     every few frames) until a heading escapes the wall/pocket and the bot makes
     progress again (which resets `wp_try` → straight at the node). Engine-
     internal-independent.
+  - **Wedge-cluster HARD RESET** (`bot_wedge_cycles[slot]` +
+    `wp_find_nearest_ex` + `wpfn_excl[4]`; `cfg.WP_WEDGE_RESET_CYCLES`,
+    R-chunk `wedge`): the progress-timeout recovery is LOCAL — alternate
+    neighbour of prev, retreat swap, or Euclidean-nearest reacquire — and a
+    bot on the WRONG SIDE of a wall/door whose latched nodes sit across it
+    cycles those forever (live 2026-07-20, Battle on the Ice snaps 1-3: a
+    team-1 bot north of the closed south team door held prev=78 with cur
+    flipping 77↔47 — all three nodes across the entrance wall; node 78 is ON
+    the entrance line so its 64 px arrival ball pokes through the wall and
+    "arrives" bots from the wrong side, after which the door-aware machinery
+    disengages because the latched in-base edge carries no door — while the
+    genuinely reachable around-route entry (node 48, team-1 open field into
+    the base is finite via the east side) was never tried). Every recovery
+    action (alternate taken, retreat, fresh-nearest reacquire) increments the
+    per-bot counter; ANY node arrival resets it. At `WP_WEDGE_RESET_CYCLES`
+    (or when the keep-sweeping same-nearest state exceeds 4 timeout windows)
+    the follower cold-acquires the nearest node EXCLUDING the wedge cluster —
+    failed cur, prev, and the failed-edge marker's two nodes — via
+    `wp_find_nearest_ex` (FLT_MAX-seeded scan skipping `wpfn_excl[0..3]`).
+    The failed-edge marker is KEPT through the reset as wedge memory so
+    consecutive resets widen the exclusion set. On the live geometry the
+    first reset excludes {47,77,78} and picks 48 (pinned in tests).
+  - **Fight-stall suspension skip** (`bot_enemy_near[slot]`,
+    `cfg.FIGHT_STALL_RADIUS_SQ`): the fire detour's `pick_target` stamps a
+    per-bot flag when the chosen target is within 240 px; while set, a routed
+    progress-timeout skips ARMING the routing suspension (markers, alternates
+    and the hard reset still run). Reason (user-reported 2026-07-20): combat
+    knockback/body-blocking stalls progress, and the suspension made
+    `ctf_pick_goal` report no goal — so a flag CARRIER roamed randomly
+    mid-fight instead of pressing toward its base. The stamp is cleared each
+    frame at the top of the fire detour and skipped on force-tick recovery
+    frames (far bots keep today's suspension behaviour).
   - DIAGNOSTIC: the controller block vector at `+0x14/+0x18` is mirrored into
     the dormant `bot_wander_x/y[slot]` so an `ai_move` R-dump reveals whether
     the engine populates it near walls — the data needed to later add a smoother
@@ -361,7 +393,10 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     approach AND the far-base force-tick all fall back to random graph roaming
     (exactly the behavior that empirically un-sticks such bots), then routing
     resumes. The follower decrements the counter once per think; respawn
-    clears it. The CTF **final approach also has its own watchdog** now — it
+    clears it. EXCEPTION: while `bot_enemy_near[slot]` is set the timeout
+    does NOT arm the suspension (see the fight-stall bullet in the follower
+    section — a combat stall must not turn a carrier into a random roamer).
+    The CTF **final approach also has its own watchdog** now — it
     used to jump straight to the emit, bypassing arrival/progress machinery
     entirely, so a carrier with a blocked straight line from the goal node to
     the base steered into the obstacle forever. It now mirrors the node
@@ -688,9 +723,22 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     team-1 bot at node 28 with `route_use_open=0` and `current_wp=18` steering
     into the closed pillar gate while the just-opened blue gate made node 28's
     open distance finite). Fix: `rebuild_open_routes` increments `route_epoch`;
-    the follower, when a routed bot's `bot_route_epoch[slot]` lags, syncs it and
-    sets `current_wp=-1` so the existing cold-acquire re-runs `ctf_next_hop`
-    against the freshly rebuilt open field THAT think. Both epochs reset to 0 on
+    the follower, when a routed bot's `bot_route_epoch[slot]` lags, syncs it
+    and — only for a bot NOT latched onto an edge (`prev_wp == -1`) — sets
+    `current_wp=-1` so the cold-acquire re-runs `ctf_next_hop` THAT think. An
+    EDGE-LATCHED bot KEEPS its target: the original blanket invalidate was
+    live-refuted on Battle on the Ice (2026-07-20 snapshots) — its
+    self-closing south team door flips `door_blocked` every few seconds, and
+    the Euclidean nearest-node cold-acquire re-latched the node BEHIND a bot
+    that had just crossed the doorway (node 47 sits 30 px on the far side;
+    the 64 px arrival radius then "arrived" it across the closed door and
+    re-planned from the wrong side) — one third of the reported
+    backwards-and-forwards shuttle. A latched bot re-plans against the
+    rebuilt field at its next arrival, and a now-blocked current edge is
+    handled the SAME think by the commitment recovery below (which is why
+    dropping the invalidate is safe for the original Torture scenario: the
+    recovery backs the bot off the pillar-gate edge to node 28 and the
+    arrival re-plan takes the blue gate). Both epochs reset to 0 on
     match change (`detour_df90`) so bots do not force-acquire at match start;
     debounced by the rebuild cooldown, gated on `flag_routing_active`. This is
     the deterministic complement to the per-bot suspension (whose progress
@@ -705,14 +753,23 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     (live-reported; R-snapshots showed a bot on the PREV side of a closed pillar
     gate with `current_wp` on the far node, `route_use_open=1`, `wp_try=0`,
     `stuck=0`). Each think, if the latched `(prev,cur)` edge is bound to a
-    currently-blocked door AND the bot is still nearer prev than cur (has not
-    crossed), back `current_wp` up to prev and fall into the arrival/advance path
-    so `ctf_next_hop` re-plans door-aware from the reachable node (offline-
+    currently-blocked door AND the bot has NOT crossed the door, back
+    `current_wp` up to prev and fall into the arrival/advance path so
+    `ctf_next_hop` re-plans door-aware from the reachable node (offline-
     verified: 15→14 across closed door 9 re-plans 15→16; 5→6 across closed door
     15 re-plans 5→1). Fires only in that exact stuck state — door open or
-    already-crossed is a no-op. NOTE: `.zaxbot` code headroom is ~2.2 KB below
-    `SCRATCH_OFF` (hook_entry_size 38674 of 40960 after the SK layer + the
-    graph-routed goody pursuit; the boundary sits at 0xA000 with the section
+    already-crossed is a no-op. The crossed test is the DOOR-SIDE sign
+    `dot(bot − door_center, v_cur − v_prev) > 0`, NOT node proximity: doors
+    are rarely at the edge midpoint (Battle on the Ice: 30 px from node 47,
+    170 px from node 48), so the original "nearer prev than cur" test
+    mislabelled a bot standing just past the doorway as not-crossed and
+    walked it back INTO the closed door (2026-07-20 snapshots, part of the
+    self-closing-door shuttle). Degenerate dot <= 0 (bot exactly on the door
+    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~2.2 KB
+    below `SCRATCH_OFF` (hook_entry_size 39389 of 40960 after the SK layer,
+    the goody pursuit, the self-closing-door fixes and the wedge hard
+    reset; the
+    boundary sits at 0xA000 with the section
     at 0x26000, scratch ~2.0 KB free). When it runs low again, bump
     `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
@@ -765,7 +822,23 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     red bot only from inside). Best-of-round activates (`seek_active[team]` =
     idx+1, field re-built for the winner); participating bots
     (`bot_seek[slot]`, re-earned each arrival) descend `seek_dist[team]` and
-    FINAL-APPROACH the switch center at its node to physically bump it. The
+    FINAL-APPROACH the switch center at its node to physically bump it.
+    Participation carries a per-bot ON-THE-WAY gate
+    (`SWITCH_SEEK_JOIN_SLACK`, 24 quanta): a bot joins only when
+    `seek_dist[cur] + full(switch→goal) <= full(cur→goal) + SLACK` (a bot
+    whose full-field goal distance is unreachable joins unconditionally).
+    Unconditional joining was live-refuted on Battle on the Ice (2026-07-20
+    R snapshots, the "bots shuttle backwards and forwards past self-closing
+    doors" report): the south team door there re-closes seconds after its
+    walk-up opener fires, each re-close re-activated its adjacent switch 1
+    (node 46, the only viable candidate — switch 0 sits sealed inside the
+    enemy base), and EVERY team bot that could reach it joined
+    (`bot_seek=[1,1,1,1,1]` with bots at nodes 12/13; slot 1 visibly
+    backtracked 14→54, then flipped forward again on the next rebuild).
+    The slack is sized from that map's gap: south-side node 47 detours 16
+    quanta (must join — the switch is its way through) while node 48, just
+    NORTH of the doorway, detours 38 (must not turn back). Pinned in
+    tests with the runtime's directional edge_pass semantics. The
     opened door then flows through door_dirty → `rebuild_open_routes`, which
     CLEARS all seek state (stale by definition) and bumps the epoch — bots
     re-request if still blocked, which also CHAINS seeks (Torture: a sealed

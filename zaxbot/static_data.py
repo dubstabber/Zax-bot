@@ -63,6 +63,9 @@ DUMP_TAGS = (
     # Goody pursuit state (item field gate/count, resolved target, pile
     # dirty flag + node binds; the static pack + fields are excluded).
     ('tag_goody', 'goody'),
+    # Wedge-escape + fight-stall state (wpfn_excl, per-bot wedge counter,
+    # per-bot enemy-near stamp).
+    ('tag_wedge', 'wedge'),
 )
 
 

@@ -62,6 +62,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     byte-identity baseline."""
     _emit_read_host_pos(a, layout)
     _emit_find_nearest(a, layout)
+    _emit_find_nearest_ex(a, layout)
     _emit_advance(a, layout)
     _emit_drop(a, layout)
     _emit_select(a, layout)
@@ -145,6 +146,70 @@ def _emit_find_nearest(a: Asm, layout: ScratchLayout) -> None:
     a.label('wp_fn_pop_done')
     a.raw(b'\xDD\xD8')                                           # fstp st(0)  (pop best)
     a.label('wp_fn_done')
+    a.raw(b'\xC3')                                               # ret
+
+
+def _emit_find_nearest_ex(a: Asm, layout: ScratchLayout) -> None:
+    """wp_find_nearest_ex: like wp_find_nearest, but skips up to four vertex
+    indices listed in wpfn_excl[0..3] (-1 = unused slot). Used by the wedge
+    HARD RESET in bot_movement to acquire the nearest node OUTSIDE the wedge
+    cluster (a bot on the wrong side of a wall keeps re-picking the same
+    cross-wall nodes otherwise — live 2026-07-20). Pre: wp_scratch = query
+    pos, wpfn_excl fully written by the caller (stale contents from an
+    earlier reset are harmless only because every caller writes all four).
+    Post: EBX = best non-excluded idx, or -1 if none. Clobbers EAX/EBX/ECX/
+    ESI/EDI and FPU stack (leaves it balanced)."""
+    if not layout.has_field('wpfn_excl'):
+        a.label('wp_find_nearest_ex')
+        a.raw(b'\xBB\xFF\xFF\xFF\xFF')                           # ebx = -1
+        a.raw(b'\xC3')
+        return
+    overlay_vertices_va     = layout.va('overlay_vertices')
+    overlay_vertex_count_va = layout.va('overlay_vertex_count')
+    wp_scratch_va           = layout.va('wp_scratch')
+    wpfn_excl_va            = layout.va('wpfn_excl')
+    wpfn_tmp_va             = layout.va('wpfn_tmp')
+
+    a.label('wp_find_nearest_ex')
+    a.raw(b'\xBB\xFF\xFF\xFF\xFF')                               # mov ebx, -1
+    a.raw(b'\x8B\x3D' + le32(overlay_vertex_count_va))           # mov edi, [vertex_count]
+    a.raw(b'\x85\xFF'); a.jz('wp_fnx_done')
+    # Seed best = FLT_MAX (unlike wp_find_nearest, vertex 0 may be excluded,
+    # so the seed cannot come from a vertex).
+    a.raw(b'\xC7\x05' + le32(wpfn_tmp_va) + le32(0x7F7FFFFF))
+    a.raw(b'\xD9\x05' + le32(wpfn_tmp_va))                       # fld FLT_MAX (best)
+    a.raw(b'\x31\xF6')                                           # esi = 0
+
+    a.label('wp_fnx_loop')
+    a.raw(b'\x39\xFE'); a.jae('wp_fnx_pop_done')                 # if esi >= count, done
+    a.raw(b'\x3B\x35' + le32(wpfn_excl_va + 0)); a.jz('wp_fnx_next')
+    a.raw(b'\x3B\x35' + le32(wpfn_excl_va + 4)); a.jz('wp_fnx_next')
+    a.raw(b'\x3B\x35' + le32(wpfn_excl_va + 8)); a.jz('wp_fnx_next')
+    a.raw(b'\x3B\x35' + le32(wpfn_excl_va + 12)); a.jz('wp_fnx_next')
+    a.raw(b'\xD9\x04\xF5' + le32(overlay_vertices_va + 0))       # fld [v.x] (esi*8)
+    a.raw(b'\xD8\x25' + le32(wp_scratch_va + 0))                 # fsub [scratch.x]
+    a.raw(b'\xD8\xC8')                                           # fmul st(0), st(0)
+    a.raw(b'\xD9\x04\xF5' + le32(overlay_vertices_va + 4))       # fld [v.y]
+    a.raw(b'\xD8\x25' + le32(wp_scratch_va + 4))                 # fsub [scratch.y]
+    a.raw(b'\xD8\xC8')                                           # fmul st(0), st(0)
+    a.raw(b'\xDE\xC1')                                           # faddp -> dsq; ST1 = best
+    a.raw(b'\xD8\xD1')                                           # fcom st(1)
+    a.raw(b'\xDF\xE0')                                           # fnstsw ax (eax is scratch)
+    a.raw(b'\x9E')                                               # sahf
+    a.jae('wp_fnx_skip')                                         # dsq >= best -> skip
+    a.raw(b'\xD9\xC9')                                           # fxch st(1)
+    a.raw(b'\xDD\xD8')                                           # fstp st(0)  (pop old best)
+    a.raw(b'\x89\xF3')                                           # mov ebx, esi
+    a.jmp('wp_fnx_next')
+    a.label('wp_fnx_skip')
+    a.raw(b'\xDD\xD8')                                           # fstp st(0)  (pop dsq)
+    a.label('wp_fnx_next')
+    a.raw(b'\x46')                                               # inc esi
+    a.jmp('wp_fnx_loop')
+
+    a.label('wp_fnx_pop_done')
+    a.raw(b'\xDD\xD8')                                           # fstp st(0)  (pop best)
+    a.label('wp_fnx_done')
     a.raw(b'\xC3')                                               # ret
 
 
