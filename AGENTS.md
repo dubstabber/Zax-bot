@@ -22,12 +22,36 @@ The detailed notes live in `docs/`:
 - `zax_patch.py` - thin entrypoint that rebuilds and writes the patched image.
 - `zaxbot/` - actual patch implementation:
   - `addresses.py` - verified original-image VAs and prologue bytes.
-  - `config.py` - section size, scratch policy, synthetic ids, bot names.
+  - `config/` - per-feature knob modules (`movement`, `door`, `sk`, ...);
+    the `__init__` facade re-exports everything, so `cfg.X` works for every
+    knob. Put a new knob in the module owning its feature.
+  - `layout/` - scratch-field layout: `model.py` (field classes + per-bot
+    tables), per-feature block modules, `builder.py` (assembles the layout
+    in offset-load-bearing order), `from_config.py` (production capacities
+    from `cfg`).
+  - `static_data/` - build-time scratch packing: `common.py` (prompts/tags/
+    name+color writers), `tables.py` (per-feature static tables),
+    `scratch.py` (`write_static_scratch_data`), `from_config.py` (the
+    cfg->kwargs mapping used by `hook/entry.py`).
   - `patch_manifest.py` - enabled redirects into `.zaxbot`.
+  - `portal_data.py` / `flag_data.py` / `door_data.py` - build-time Data.dat
+    parses (teleporters+routes, CTF flag anchors, doors/openers/switches).
   - `sk_data.py` - build-time Data.dat parse of SK minerals + team-bound bins.
   - `item_data.py` - build-time parse of filler items (health/energy/shield).
-  - `hook/` - dispatcher, mode detection, spawn, snapshot.
-  - `detours/` - capture, safety, controller, fire/aim detours.
+  - `hook/` - dispatcher, mode detection, spawn, snapshot; `entry.py` is the
+    build orchestrator (emit order is load-bearing).
+  - `detours/` - one module per detour. The three big ones are packages
+    split per stage/domain, each preserving the original emit order:
+    - `world_scan/` - per-match world-data loaders + periodic scans
+      (`portals`, `flags`, `doors`, `plasma`, `switches`, `sk`, `items`,
+      `goody`, `hazard_pickup`).
+    - `flag_route/` - routing: `_ctx.py` (shared VA/gate context),
+      `fields` (BFS/SPFA builders), `goal`, `next_hop`, `seek`, `drop`,
+      `sk_routes`.
+    - `bot_movement/` - the follower: `follow_ctx.py` (shared context),
+      `setup`, `divert`, `follow_entry`, `follow_pursuits`,
+      `follow_recovery`, `follow_final_approach`, `follow_watchdog`,
+      `follow_arrive`, `follow_steer`, `vector_emit`, `tuning`.
 - `zax_dump.bin` - appendable tagged runtime snapshots written by R.
 - `tools/diffdump.py` - parser/comparator for `zax_dump.bin`.
 - `zax_step.log` - one-byte spawn progress markers (`A/M/2/B/C/D/S/T/P/E/V/N/F/W`).
@@ -87,7 +111,7 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   PC2 does not reliably see the chosen name because the synthetic DirectPlay
   player-data store is not populated.
 - Each bot name owns a deterministic `(color1, color2)` pair from
-  `BOT_COLORS` in `zaxbot/config.py`. Coloring is split across two phases:
+  `BOT_COLORS` in `zaxbot/config/spawn.py`. Coloring is split across two phases:
   - **Pre-spawn** (before `sub_59DF90`): the patch writes the chosen
     `(color1, color2)` into the bot's pcfg at `*(stats+0x1C)+4/+8`. SK
     paints each player's collector during character creation by reading
@@ -127,7 +151,7 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     range id doesn't bite anything.
 
   Unknown vtables drop a one-shot 0x200-byte dump of the game-type object
-  and fall back to DM. `zaxbot/config.py` exposes a `FORCE_MODE` knob for
+  and fall back to DM. `zaxbot/config/spawn.py` exposes a `FORCE_MODE` knob for
   offline testing.
 - Bots navigate the authored waypoint graph via `detour_542360`. The model is
   a **pure node-to-node follower with a reactive wall-slide**, grounded in how
@@ -208,7 +232,7 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   compensation (`cfg.MUZZLE_OFFSET = 20px`); `bot_fire_aim` rolls
   `cfg.LEAD_PROBABILITY` (default 0.5) per shot to mix prediction with
   straight-shooting for a less robotic feel.
-- `zaxbot/config.py` can force newly spawned bots to equip an inventory item
+- `zaxbot/config/spawn.py` can force newly spawned bots to equip an inventory item
   by name (`FORCE_BOT_ITEM_NAME`) for lead-shot testing. The force path
   resolves the engine item definition by name, creates a transient pickup
   item for the new bot, then switches the bot's Primary slot to the

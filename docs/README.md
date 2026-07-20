@@ -14,11 +14,25 @@ Current control path:
 - `Zax.exe.bak` is the pristine original. Never modify it.
 - `Zax.exe` is rebuilt from `Zax.exe.bak` every time `python3 zax_patch.py` runs.
 - `zax_patch.py` is now a thin entrypoint. The actual patch lives in `zaxbot/`:
-  - `zaxbot/config.py` - section size, scratch layout policy, bot ids/names.
+  - `zaxbot/config/` - per-feature knob modules behind a re-exporting facade
+    (`cfg.X` works for every knob; put a new knob in its feature's module).
   - `zaxbot/addresses.py` - original-image VAs and verified prologues.
+  - `zaxbot/layout/` - scratch-field layout (field classes in `model.py`,
+    per-feature blocks, `builder.py` orchestrator, `from_config.py`).
+  - `zaxbot/static_data/` - build-time scratch packing (per-feature tables +
+    `write_static_scratch_data` + the cfg mapping in `from_config.py`).
   - `zaxbot/patch_manifest.py` - enabled hook/detour sites.
-  - `zaxbot/hook/` - dispatcher, mode detection, spawn, snapshot.
-  - `zaxbot/detours/` - prologue detours for capture, safety, control, fire/aim.
+  - `zaxbot/hook/` - dispatcher, mode detection, spawn, snapshot; `entry.py`
+    orchestrates the build (emit order is load-bearing).
+  - `zaxbot/detours/` - one module per detour; `world_scan/`, `flag_route/`
+    and `bot_movement/` are packages split per stage/domain, emitted in a
+    fixed order (see `AGENTS.md` for the full map).
+
+The 2026-07 refactor split the former `config.py` / `layout.py` /
+`static_data.py` / `world_scan.py` / `flag_route.py` / `bot_movement.py`
+monoliths into those packages **byte-identically**: the rebuilt `Zax.exe`
+hash was pinned before/after every step. When restructuring emitters, keep
+emit order and re-verify byte identity (build twice, compare hashes).
 - `Zax.exe.i64` is an IDA database for the original image only. It does not contain
   the appended `.zaxbot` section.
 
