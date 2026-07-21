@@ -78,6 +78,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     menu_mode_va   = layout.va('menu_mode')
     chosen_team_va = layout.va('chosen_team')
     str_title_va   = layout.va('menu_str_title')
+    str_blank_va   = layout.va('menu_str_blank')
     str_addbot_va  = layout.va('menu_str_addbot')
     str_blue_va    = layout.va('menu_str_blue')
     str_red_va     = layout.va('menu_str_red')
@@ -120,7 +121,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.call_va(ax.WIDGET_ALLOC_VA)
     a.raw(b'\x85\xC0'); a.jz('bm_ret')
     a.raw(b'\x89\xC3')                                     # mov ebx, eax    (dialog)
-    a.raw(b'\x6A\x00')                                     # push 0          (a3)
+    # a3 = window title -> drawn in the header/title bar (sub_403D00 stores it at
+    # this+0x80 and sizes the window for it). The confirm dialog passes 0 (no
+    # header); passing a title gives the title bar the Esc exit menu has.
+    a.raw(b'\x68' + le32(str_title_va))                   # push str_title  (a3 title)
     a.raw(b'\xFF\x35' + le32(menu_parent_va))             # push [menu_parent] (a2 desktop)
     a.raw(b'\x89\xD9')                                     # mov ecx, ebx
     a.call_va(ax.WIN_BASE_CTOR_VA)                         # ret 8
@@ -131,7 +135,9 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.call_va(ax.WIDGET_ALLOC_VA)
     a.raw(b'\x85\xC0'); a.jz('bm_title_skip')
     a.raw(b'\x89\xC7')                                     # mov edi, eax    (label)
-    a.raw(b'\x68' + le32(str_title_va))                   # push text       (a3)
+    # Blank spacer: the window header already shows the title; this first child
+    # exists only as the stack anchor for the anchor-12 buttons below it.
+    a.raw(b'\x68' + le32(str_blank_va))                   # push text       (a3)
     a.raw(b'\x53')                                         # push ebx        (a2 parent)
     a.raw(b'\x89\xF9')                                     # mov ecx, edi
     a.call_va(ax.LABEL_CTOR_VA)                            # ret 8

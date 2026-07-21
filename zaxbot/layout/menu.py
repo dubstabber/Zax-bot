@@ -40,7 +40,8 @@ def extend_menu(c):
     # Fixed label strings (NUL-terminated ASCII, packed by static_data). The
     # widget text setters copy them, so the scratch storage only needs to
     # outlive the copy.
-    add('menu_str_title',  0x14, 'gui: window title label')
+    add('menu_str_title',  0x14, 'gui: window title (drawn in the header/title bar)')
+    add('menu_str_blank',  0x14, 'gui: empty spacer label (first child; button-stack anchor)')
     add('menu_str_addbot', 0x14, 'gui: "Add Bot" button label (DM/SK)')
     add('menu_str_blue',   0x14, 'gui: "Add Blue Bot" button label (CTF)')
     add('menu_str_red',    0x14, 'gui: "Add Red Bot" button label (CTF)')
