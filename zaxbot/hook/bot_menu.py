@@ -164,6 +164,13 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x8B\x0D' + le32(menu_parent_va))             # mov ecx, [menu_parent] (this = desktop)
     a.call_va(ax.WIDGET_SHOW_MODAL_VA)                     # ret 8
     a.raw(b'\xC7\x05' + le32(menu_open_va) + le32(1))     # menu_open = 1
+    # Enter UI/menu mode: ++uimgr[0x2C]. Suppresses the gameplay crosshair +
+    # input and switches to the pointer cursor (the Esc-menu behavior). Balanced
+    # by the leave-mode call in menu_dtor, gated on menu_open.
+    a.raw(b'\x8B\x0D' + le32(ax.UI_MANAGER_GLOBAL_VA))    # mov ecx, [uimgr]
+    a.raw(b'\x85\xC9')                                     # test ecx, ecx
+    a.jz('bm_ret')
+    a.call_va(ax.UI_ENTER_MODE_VA)                         # ++uimgr[0x2C]
     a.label('bm_ret')
     a.raw(b'\xC3')                                         # ret
 
@@ -219,7 +226,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.label('menu_dtor')
     a.raw(b'\x56')                                         # push esi
     a.raw(b'\x89\xCE')                                     # mov esi, ecx   (this)
+    # Leave UI/menu mode: --uimgr[0x2C], but ONLY if we entered (menu_open==1),
+    # so the counter stays balanced across any teardown path / double-dtor.
+    a.raw(b'\x83\x3D' + le32(menu_open_va) + b'\x00')     # cmp [menu_open], 0
+    a.jz('md_was_closed')
     a.raw(b'\xC7\x05' + le32(menu_open_va) + le32(0))     # menu_open = 0
+    a.raw(b'\x8B\x0D' + le32(ax.UI_MANAGER_GLOBAL_VA))    # mov ecx, [uimgr]
+    a.raw(b'\x85\xC9')                                     # test ecx, ecx
+    a.jz('md_was_closed')
+    a.call_va(ax.UI_LEAVE_MODE_VA)                         # --uimgr[0x2C]
+    a.label('md_was_closed')
     a.raw(b'\xC7\x05' + le32(menu_btn0_va) + le32(0))
     a.raw(b'\xC7\x05' + le32(menu_btn1_va) + le32(0))
     a.raw(b'\xC7\x05' + le32(menu_btn2_va) + le32(0))

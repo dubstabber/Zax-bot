@@ -674,6 +674,16 @@ PART_LAYER_IDX_OFF     = 0xDC       # participant layer index (-1 = not in world
 # the world manager.
 UI_MANAGER_GLOBAL_VA   = 0x6C02CC   # app/UI manager pointer (== RENDERER_OWNER_VA)
 UI_DESKTOP_ROOT_OFF    = 0x34       # *(uimgr + 0x34) = desktop/screen-host root (sub_4CDF30 -> this[13])
+# "UI is active" is a modal/menu-depth counter at *(uimgr + 0x2C). While > 0
+# the engine suppresses gameplay input (checked in sub_470050 via the app-mgr
+# vtable slot 30 = sub_4CDD70 `return this[11] > 0`) and switches from the
+# gameplay crosshair to the menu pointer cursor — the "Window with pause"
+# behavior the Esc exit menu uses. Enter/leave are app-mgr vtable slots 28/29
+# (2-instruction inc/dec, __thiscall ecx = uimgr, plain ret). A hand-built
+# modal on the desktop does NOT touch this counter, so the bot menu must
+# bracket itself: enter on show, leave on teardown.
+UI_ENTER_MODE_VA       = 0x4CDD50   # __thiscall(ecx=uimgr): ++uimgr[0x2C]  (enter UI/menu mode)
+UI_LEAVE_MODE_VA       = 0x4CDD60   # __thiscall(ecx=uimgr): --uimgr[0x2C]  (leave UI/menu mode)
 WIDGET_ALLOC_VA        = 0x417710   # __thiscall(ecx=size) -> pooled object; plain ret
 WIN_BASE_CTOR_VA       = 0x403D00   # sub_403D00(this, parent, 0) base CWindow ctor; ret 8
 WIN_BASE_VTABLE_VA     = 0x5EAAC4   # off_5EAAC4 base CWindow vtable (77 slots / 0x134 bytes)
