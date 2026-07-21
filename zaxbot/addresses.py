@@ -642,6 +642,57 @@ PART_POS_X_OFF         = 0xC0       # participant "last known position" X (float
 PART_POS_Y_OFF         = 0xC4       # participant "last known position" Y (float)
 PART_LAYER_IDX_OFF     = 0xDC       # participant layer index (-1 = not in world); bots get 0 at spawn
 
+# --- In-game widget/dialog system (bot menu GUI) ---------------------------
+# The engine's retained-mode widget tree, reused to build the B-key bot menu
+# the same way the Esc quit dialog is built (sub_5BF240 -> sub_46B050 pattern).
+# A dialog is a plain CWindow (base vtable WIN_BASE_VTABLE_VA) whose command
+# handler (vtable slot 21) and destructor (slot 0) are overridden — exactly how
+# the "lose your changes?" confirm dialog (sub_4721B0, vtable off_5F02B0)
+# derives from the base. All object sizes passed to the allocator are byte
+# counts (WIDGET_ALLOC_VA is a pooled `operator new`), and every child text is a
+# plain char* (copied into the widget's own CString).
+#
+# Construction recipe (mirrors sub_4721B0 verbatim):
+#   dlg = WIDGET_ALLOC_VA(ecx=DIALOG_OBJ_SIZE)
+#   WIN_BASE_CTOR_VA(dlg, parent, 0)            ; base ctor, sets base vtable
+#   *(dlg) = <our cloned vtable>                ; override vtable
+#   lbl = WIDGET_ALLOC_VA(0x128); LABEL_CTOR_VA(lbl, dlg, "title")
+#   WIDGET_ADD_CHILD_VA(dlg, lbl, WIDGET_ANCHOR_TITLE, 0, -1000, -1000, 0)
+#   btn = WIDGET_ALLOC_VA(0x138); BUTTON_CTOR_VA(btn, dlg, "text", 0)
+#   WIDGET_ADD_CHILD_VA(dlg, btn, WIDGET_ANCHOR_BELOW, 0, -1000, -1000, 0)
+#   WIDGET_SET_DEFAULT_VA(dlg, btn)             ; keyboard focus/default
+#   WIDGET_SHOW_MODAL_VA(parent, dlg, WIDGET_SHOW_ANCHOR)
+# The parent is the DESKTOP ROOT widget, NOT the world manager. `*dword_713F14`
+# is a `CGame` (vtable `off_602DC8`), not a `CWindow`, so parenting a dialog to
+# it faults inside `sub_40C6E0` (which derefs `parent+0xE8` / `parent->vtbl
+# [0x80]` expecting widget layout — this was the observed live crash). The
+# engine attaches every screen and dialog to `sub_4CDF30(uimgr)` =
+# `*(uimgr + 0x34)`, the screen-host / desktop root that owns the pushed-screen
+# list (verified in the main-menu creation paths `sub_59BAB0` and `sub_5A0E80`,
+# and the screen-stack walk `sub_5A11F0`). `sub_5BF240`'s parent is likewise its
+# own screen — that vtable is `CMainMenu` (`~CMainMenu` in `sub_5BE4B0`), never
+# the world manager.
+UI_MANAGER_GLOBAL_VA   = 0x6C02CC   # app/UI manager pointer (== RENDERER_OWNER_VA)
+UI_DESKTOP_ROOT_OFF    = 0x34       # *(uimgr + 0x34) = desktop/screen-host root (sub_4CDF30 -> this[13])
+WIDGET_ALLOC_VA        = 0x417710   # __thiscall(ecx=size) -> pooled object; plain ret
+WIN_BASE_CTOR_VA       = 0x403D00   # sub_403D00(this, parent, 0) base CWindow ctor; ret 8
+WIN_BASE_VTABLE_VA     = 0x5EAAC4   # off_5EAAC4 base CWindow vtable (77 slots / 0x134 bytes)
+WIN_BASE_TEARDOWN_VA   = 0x403D70   # sub_403D70(this) base teardown chain; plain ret
+WIN_POOL_FREE_VA       = 0x54D130   # __fastcall(ecx=this, edx=size) pool free; plain ret
+LABEL_CTOR_VA          = 0x4127D0   # sub_4127D0(this, parent, char* text) text label; ret 8
+BUTTON_CTOR_VA         = 0x40F9B0   # sub_40F9B0(this, parent, char* text, 0) push button; ret 0xC
+WIDGET_ADD_CHILD_VA    = 0x40C7C0   # sub_40C7C0(this, child, anchor, 0, x, y, flags); ret 0x18
+WIDGET_SET_DEFAULT_VA  = 0x40CA40   # sub_40CA40(this, child) mark keyboard default/focus; ret 4
+WIDGET_SHOW_MODAL_VA   = 0x40C6E0   # sub_40C6E0(this=parent, dialog, anchor) show modal; ret 8
+WIDGET_DTOR_VTBL_OFF   = 0x00       # slot 0: (deleting) destructor(this, char flag); ret 4
+WIDGET_CLOSE_VTBL_OFF  = 0x14       # slot 5: close/dismiss(this) (sub_40BB90); plain ret
+WIDGET_CMD_VTBL_OFF    = 0x54       # slot 21: notify handler(this, widget, code); ret 8
+WIDGET_VTABLE_DWORDS   = 0x4D       # 77 vtable slots to clone from WIN_BASE_VTABLE_VA
+DIALOG_OBJ_SIZE        = 0x140      # dialog object allocation size (same as the confirm dialog)
+WIDGET_ANCHOR_TITLE    = 1          # add-child anchor: title area (top)
+WIDGET_ANCHOR_BELOW    = 12         # add-child anchor: centered X, below the previous sibling
+WIDGET_SHOW_ANCHOR     = 6          # show-modal anchor: centered on the parent
+
 # --- KERNEL32 IAT slots ----------------------------------------------------
 IMP_CREATEFILEA      = 0x5EA0D4
 IMP_WRITEFILE        = 0x5EA0DC

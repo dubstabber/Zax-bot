@@ -22,8 +22,9 @@ Current control path:
   - `zaxbot/static_data/` - build-time scratch packing (per-feature tables +
     `write_static_scratch_data` + the cfg mapping in `from_config.py`).
   - `zaxbot/patch_manifest.py` - enabled hook/detour sites.
-  - `zaxbot/hook/` - dispatcher, mode detection, spawn, snapshot; `entry.py`
-    orchestrates the build (emit order is load-bearing).
+  - `zaxbot/hook/` - dispatcher, mode detection, spawn, snapshot, `bot_menu.py`
+    (B-key graphical bot menu); `entry.py` orchestrates the build (emit order is
+    load-bearing).
   - `zaxbot/detours/` - one module per detour; `world_scan/`, `flag_route/`
     and `bot_movement/` are packages split per stage/domain, emitted in a
     fixed order (see `AGENTS.md` for the full map).

@@ -1,13 +1,17 @@
-"""WM_KEYDOWN dispatcher: IDLE / MENU_OPEN state machine.
+"""WM_KEYDOWN dispatcher.
 
 Reached from the patched ``call sub_599580`` site with ECX = VK code. On every
 key:
-- IDLE state, key B   -> MP gate -> ``detect_mode`` -> show prompt -> MENU_OPEN
-- IDLE state, key R   -> MP gate -> ``do_snapshot`` (Phase A diff oracle)
-- MENU_OPEN state, '1'..'4' (in mode's range) -> ``do_spawn_with_team``
-- MENU_OPEN state, anything else              -> cancel back to IDLE
+- key B -> MP gate -> ``detect_mode`` -> ``build_bot_menu`` (the graphical bot
+  menu; hook/bot_menu.py). Bots are spawned by the dialog's buttons, not by a
+  digit key — the old text-prompt + digit state machine it replaced is gone.
+- key R -> MP gate -> ``do_snapshot`` (Phase A diff oracle)
+- keys N/J/X/, -> MP-gated waypoint editor (drop / select / delete / save)
+- key O -> toggle the authoring overlay
 
-All paths tail-jmp to ``sub_599580`` so normal key handling is unaffected."""
+All paths tail-jmp to ``sub_599580`` so normal key handling is unaffected.
+NOTE: the ``menu_state`` / ``prompts_table`` / ``max_for_mode`` / ``prompt_*``
+scratch fields are vestigial reserved space from that removed text menu."""
 
 from .. import addresses as ax
 from .. import config as cfg
@@ -17,11 +21,7 @@ from .helpers import mp_gate
 
 
 def emit(a: Asm, layout: ScratchLayout) -> None:
-    menu_state_va    = layout.va('menu_state')
     menu_mode_va     = layout.va('menu_mode')
-    prompts_table_va = layout.va('prompts_table')
-    max_for_mode_va  = layout.va('max_for_mode')
-    chosen_team_va   = layout.va('chosen_team')
     overlay_enabled_va = layout.va('overlay_enabled')
     pickup_register_enabled_va = layout.va('pickup_register_enabled')
     pickup_count_va = layout.va('pickup_count')
@@ -29,10 +29,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # =======================================================================
     # Dispatcher entry: ECX = VK.
     # =======================================================================
-    a.raw(b'\x83\x3D' + le32(menu_state_va) + b'\x00')       # cmp dword [menu_state], 0
-    a.jnz('handle_menu_open')
-
-    # --- IDLE state: B opens menu; R takes a diagnostic snapshot
+    # --- B opens the bot menu; R takes a diagnostic snapshot
     # (R's snapshot includes the waypoint-graph diag chunks now;
     # no separate hotkey since W is bound to "move up" in-game).
     # N/J/X drive the waypoint editor (drop / select / delete);
@@ -48,16 +45,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x80\xF9' + bytes([ax.VK_B]))                    # cmp cl, VK_B
     a.jnz('passthru')
 
+    # B opens the graphical bot menu (build_bot_menu, hook/bot_menu.py) instead
+    # of the old on-screen text prompt. detect_mode picks the button set
+    # (CTF => Blue/Red spawn buttons; DM/SK => a single Add Bot); build_bot_menu
+    # self-guards on menu_open so a second B while the dialog is up is a no-op.
     a.raw(b'\x60')                                            # pushad
     mp_gate(a, 'pop_passthru')                                # mgr -> level -> mpd; mpd in eax
     a.call_lbl('detect_mode')                                 # eax = mode (0/1/2)
     a.raw(b'\xA3' + le32(menu_mode_va))                       # mov [menu_mode], eax
-    a.raw(b'\x8B\x04\x85' + le32(prompts_table_va))           # mov eax,[prompts_table + eax*4]
-    a.raw(b'\x6A\xFF')                                         # push -1
-    a.raw(b'\x50')                                             # push eax (prompt va)
-    a.call_va(ax.SHOWMSG_VA)                                   # __stdcall, pops 8
-    a.raw(b'\xC7\x05' + le32(menu_state_va) + le32(1))         # menu_state = 1
-    a.raw(b'\x61')                                             # popad
+    a.call_lbl('build_bot_menu')                              # construct + show the GUI
+    a.raw(b'\x61')                                            # popad
     a.jmp_va(ax.ORIG_TARGET_VA)
 
     a.label('pop_passthru')
@@ -128,24 +125,6 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.call_va(ax.SHOWMSG_VA)
     a.label('overlay_toggle_done')
     a.raw(b'\x61')
-    a.jmp_va(ax.ORIG_TARGET_VA)
-
-    # --- MENU_OPEN: digit '1'..'4' in range -> spawn; otherwise cancel ---
-    a.label('handle_menu_open')
-    a.raw(b'\x60')                                             # pushad
-    a.raw(b'\x80\xF9\x31'); a.jb('close_menu')                # cl < '1' -> cancel
-    a.raw(b'\x80\xF9\x34'); a.ja('close_menu')                # cl > '4' -> cancel
-    a.raw(b'\x0F\xB6\xC1')                                     # movzx eax, cl
-    a.raw(b'\x83\xE8\x31')                                     # sub eax, 0x31  (now 0..3)
-    a.raw(b'\x8B\x0D' + le32(menu_mode_va))                    # mov ecx, [menu_mode]
-    a.raw(b'\x83\xF9\x03'); a.jae('close_menu')                # mode wrap-around safety
-    a.raw(b'\x3B\x04\x8D' + le32(max_for_mode_va))             # cmp eax, [max_table + ecx*4]
-    a.jae('close_menu')
-    a.raw(b'\xA3' + le32(chosen_team_va))                      # mov [chosen_team], eax
-    a.call_lbl('do_spawn_with_team')
-    a.label('close_menu')
-    a.raw(b'\xC7\x05' + le32(menu_state_va) + le32(0))         # menu_state = 0
-    a.raw(b'\x61')                                             # popad
     a.jmp_va(ax.ORIG_TARGET_VA)
 
     a.label('wp_overlay_on_msg')

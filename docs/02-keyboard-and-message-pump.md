@@ -25,18 +25,51 @@ translation.
 
 Current dispatcher behavior (`zaxbot/hook/dispatcher.py`):
 
-- idle + **B**: MP-gate, call `detect_mode`, show a prompt with `sub_59B260`,
-  set `menu_state = 1`.
-- idle + **R**: MP-gate, call `do_snapshot`.
-- idle + **O**: MP-gate, toggle `overlay_enabled`, sync pickup-registration
-  markers to that state, and show an on-screen confirmation; the page-flip
-  detour is installed but drawing starts off.
-- idle + **N/J/X/,**: MP-gated waypoint editor controls: drop/snap, select,
-  delete, save.
-- menu open + digit `1..4`: validate against `max_for_mode[mode]`, store
-  `chosen_team`, call `do_spawn_with_team`, close the menu.
-- menu open + anything else: close the menu.
+- **B**: MP-gate, call `detect_mode`, then `build_bot_menu` — the graphical bot
+  menu (`zaxbot/hook/bot_menu.py`). It opens a modal dialog built from the
+  engine's own widget tree (see the "Bot menu GUI" section below). Buttons
+  spawn bots; there is no digit-key step anymore.
+- **R**: MP-gate, call `do_snapshot`.
+- **O**: MP-gate, toggle `overlay_enabled`, sync pickup-registration markers to
+  that state, and show an on-screen confirmation; the page-flip detour is
+  installed but drawing starts off.
+- **N/J/X/,**: MP-gated waypoint editor controls: drop/snap, select, delete,
+  save.
 - all other keys: tail-jump to `sub_599580`.
+
+The old text-prompt + digit state machine (`menu_state`, `prompts_table`,
+`max_for_mode`, `prompt_*`) was removed; those scratch fields remain as
+vestigial reserved space so existing offsets don't shift.
+
+## Bot menu GUI (`build_bot_menu`)
+
+`build_bot_menu` mirrors the in-game Esc quit dialog (`sub_5BF240` ->
+`sub_46B050`; the "lose your changes?" confirm dialog `sub_4721B0` is the
+closest template). A dialog is a plain `CWindow` (base vtable `0x5EAAC4`) whose
+command handler (vtable slot 21) and destructor (slot 0) are overridden — the
+same way the confirm dialog derives from the base. The parent is the DESKTOP
+ROOT widget = `*(dword_6C02CC + 0x34)` (`sub_4CDF30(uimgr)`), the screen-host
+that every pushed screen and dialog attaches to. It is NOT `*dword_713F14`:
+that is the `CGame` world manager, not a `CWindow`, so parenting a dialog to it
+faults inside `sub_40C6E0` (an early live crash — see the addresses.py note).
+
+At open time the builder `rep movsd`-clones the base vtable into the
+`menu_vtable` scratch field and patches slot 0 -> `menu_dtor`, slot 21 ->
+`menu_cmd`, allocates a 0x140-byte dialog via `sub_417710`, runs the base ctor
+`sub_403D00(dlg, parent, 0)`, then adds a title label plus buttons stacked
+vertically with anchor 12 (centered X, below the previous sibling):
+
+- DM / SK: one **Add Bot** button.
+- CTF: **Add Blue Bot** + **Add Red Bot**.
+- all modes: a **Close** button.
+
+Button pointers are cached in `menu_btn0/1/2` scratch. `menu_cmd` (slot 21)
+maps an activated widget: the spawn buttons set `chosen_team` and call
+`do_spawn_with_team` (leaving the menu open so several bots can be added),
+Close dismisses via vtable slot 5. `menu_dtor` (slot 0) resets the `menu_open`
+guard on every teardown path, then runs the base teardown + pooled free
+(`sub_54D130(this, 0x140)`) exactly like the confirm dialog's `sub_472300`.
+The `menu_open` guard makes a second B while the dialog is up a no-op.
 
 The MP gate is:
 

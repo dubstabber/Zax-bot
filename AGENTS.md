@@ -38,8 +38,9 @@ The detailed notes live in `docs/`:
     parses (teleporters+routes, CTF flag anchors, doors/openers/switches).
   - `sk_data.py` - build-time Data.dat parse of SK minerals + team-bound bins.
   - `item_data.py` - build-time parse of filler items (health/energy/shield).
-  - `hook/` - dispatcher, mode detection, spawn, snapshot; `entry.py` is the
-    build orchestrator (emit order is load-bearing).
+  - `hook/` - dispatcher, mode detection, spawn, snapshot, `bot_menu.py` (the
+    B-key graphical bot menu built from the engine widget tree); `entry.py` is
+    the build orchestrator (emit order is load-bearing).
   - `detours/` - one module per detour. The three big ones are packages
     split per stage/domain, each preserving the original emit order:
     - `world_scan/` - per-match world-data loaders + periodic scans
@@ -99,8 +100,21 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   layer, from `0x7000` at the portal routing layer, from `0x8000` when
   the dropped-flag ROUTED pursuit landed with ~456 code bytes left, then from
   `0x9000` at the SK layer with ~3.0 KB left).
-- B opens the bot menu via `sub_59B260`; R writes a runtime snapshot.
-- Digit selection calls `do_spawn_with_team`.
+- B opens a GRAPHICAL bot menu (`build_bot_menu` in `zaxbot/hook/bot_menu.py`),
+  built from the engine's own widget tree exactly like the in-game Esc quit
+  dialog (base `CWindow` vtable `0x5EAAC4` cloned into scratch with slot 0 =
+  `menu_dtor` and slot 21 = `menu_cmd` overridden; parent = the DESKTOP ROOT
+  `*(dword_6C02CC + 0x34)` = `sub_4CDF30(uimgr)`, NOT `*dword_713F14` — that is
+  the `CGame` world manager, not a `CWindow`, and using it as a widget parent
+  crashes `sub_40C6E0`). It shows a title + vertical button stack (anchor 12):
+  DM/SK a single **Add Bot**, CTF **Add Blue Bot** + **Add Red Bot**, plus a
+  **Close** button. The dialog's command handler (`menu_cmd`) maps a button to
+  `chosen_team` + `do_spawn_with_team` (menu stays open, so several bots can be
+  added), or closes via vtable slot 5; `menu_dtor` resets the `menu_open` guard
+  on every teardown. The old on-screen text prompt + digit-key selection state
+  machine was removed (its `menu_state`/`prompts_table`/`max_for_mode`/
+  `prompt_*` scratch fields are now vestigial reserved space). See
+  `docs/02-keyboard-and-message-pump.md`. R writes a runtime snapshot.
 - Spawn injects a synthetic DirectPlay "player added" queue entry at
   `dpmgr + 0x44D`, calls `sub_480800(ecx=dpmgr, edi=host_char)`, reads the
   participant from `[queue_slot + 7]`, clears the queue entry, then calls

@@ -505,6 +505,17 @@ def write_static_scratch_data(
                             for i, j in overlay_edges)
         layout.write(section, scratch_off, 'overlay_edges', packed_e)
 
+    # --- Bot-menu GUI label strings ---------------------------------------
+    # Fixed, mode-agnostic button/title text the B-key dialog builder points
+    # its label/button children at (the widget text setters copy them). No cfg
+    # knob — these are UI constants.
+    if layout.has_field('menu_str_title'):
+        layout.write(section, scratch_off, 'menu_str_title',  b'Add Bots\x00')
+        layout.write(section, scratch_off, 'menu_str_addbot', b'Add Bot\x00')
+        layout.write(section, scratch_off, 'menu_str_blue',   b'Add Blue Bot\x00')
+        layout.write(section, scratch_off, 'menu_str_red',    b'Add Red Bot\x00')
+        layout.write(section, scratch_off, 'menu_str_close',  b'Close\x00')
+
     # The dump header magic is written once; runtime code rewrites tag/src/len.
     layout.write(section, scratch_off, 'thdr', struct.pack('<I', dump_magic))
 

@@ -13,7 +13,7 @@ from .. import config as cfg
 from ..asm import Asm
 from ..layout import build_layout_from_config
 from ..static_data import write_static_from_config
-from . import aim_lead, apply_colors, detect_mode, dispatcher, snapshot, spawn, waypoint_diag, waypoint_edit, weapon_speed
+from . import aim_lead, apply_colors, bot_menu, detect_mode, dispatcher, snapshot, spawn, waypoint_diag, waypoint_edit, weapon_speed
 from .helpers import emit_logc_body, emit_wbuf_body
 from ..detours import (
     bot_fire_aim,
@@ -88,6 +88,11 @@ def build_hook(section_va_abs):
 
     # --- Hook payload bodies (order is load-bearing) -----------------------
     dispatcher.emit(a, layout)
+    # bot_menu defines build_bot_menu (called from the dispatcher's B handler)
+    # plus the dialog's menu_cmd / menu_dtor vtable bodies. Emitted right after
+    # the dispatcher so the `call build_bot_menu` forward reference stays near;
+    # its `call do_spawn_with_team` resolves forward to spawn.emit below.
+    bot_menu.emit(a, layout)
     detect_mode.emit(a, layout)
     spawn.emit(a, layout)
     # apply_bot_colors is a callable subroutine used from spawn (post-spawn
