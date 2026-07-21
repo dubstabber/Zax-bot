@@ -30,7 +30,9 @@ def extend_wedge(c):
                          'nav: consecutive wedge-recovery actions without an arrival; hard reset at WP_WEDGE_RESET_CYCLES'),
             ScratchField('bot_enemy_near', wedge_off + 0x54, MAX_BOT_SLOTS * 4,
                          'fight: 1 = pick_target saw an enemy within FIGHT_STALL_RADIUS_SQ this frame'),
-            ScratchField('tag_wedge', wedge_off + 0x94, 0x10,
+            ScratchField('flag_give_block_count', wedge_off + 0x94, 0x04,
+                         'ctf: cumulative duplicate-flag gives suppressed by detour_5B4DA0 (diag; in the wedge R-chunk)'),
+            ScratchField('tag_wedge', wedge_off + 0x98, 0x10,
                          'diag: wedge/fight state dump chunk tag'),
         ])
 

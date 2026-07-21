@@ -297,8 +297,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # a milling bot is accruing toward a hard reset and whether the movement
     # watchdog currently sees its stall as a fight.
     if layout.has_field('tag_wedge') and layout.has_field('wpfn_excl'):
-        wedge_dump_len = (layout.field('bot_enemy_near').offset
-                          + layout.field('bot_enemy_near').size
+        wedge_end = (layout.field('flag_give_block_count')
+                     if layout.has_field('flag_give_block_count')
+                     else layout.field('bot_enemy_near'))
+        wedge_dump_len = (wedge_end.offset + wedge_end.size
                           - layout.field('wpfn_excl').offset)
         emit_chunk(layout.va('tag_wedge'),
                    b'\xB8' + le32(layout.va('wpfn_excl')),

@@ -33,6 +33,8 @@ def build_follow_ctx(layout: ScratchLayout) -> SimpleNamespace:
     route_block_door_va = None
     door_blocked_va = None
     door_count_va = None
+    door_gate_table_va = None
+    door_wedge_radius_sq_va = None
     bot_wedge_cycles_va = None
     wpfn_excl_va = None
     edge_door_va = None
@@ -168,6 +170,11 @@ def build_follow_ctx(layout: ScratchLayout) -> SimpleNamespace:
         route_block_door_va = layout.va('route_block_door')
         door_blocked_va     = layout.va('door_blocked')
         door_count_va       = layout.va('door_count')
+        # Door-side ARRIVAL gate (follow_arrive): door centers + the wedge
+        # radius double as "is this node at a door / which side is the bot
+        # on". Same layout block as door_blocked, so no extra gating.
+        door_gate_table_va      = layout.va('door_table')
+        door_wedge_radius_sq_va = layout.va('door_wedge_radius_sq')
 
     # Wedge-cluster HARD RESET state (see the s542360_wp_hard_reset block and
     # cfg.WP_WEDGE_RESET_CYCLES). fight_stall additionally lets the routed

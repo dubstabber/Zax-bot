@@ -8,17 +8,24 @@ from ...layout import ScratchLayout
 
 
 def emit(a: Asm, layout: ScratchLayout, c) -> None:
+    bot_pos_va = c.bot_pos_va
     bot_slot_tmp_va = c.bot_slot_tmp_va
     current_wp_va = c.current_wp_va
     prev_wp_va = c.prev_wp_va
     wp_try_va = c.wp_try_va
     wp_best_dsq_va = c.wp_best_dsq_va
     failed_edge_va = c.failed_edge_va
+    overlay_vertex_count_va = c.overlay_vertex_count_va
+    overlay_vertices_va = c.overlay_vertices_va
     routing = c.routing
     route_suspend_va = c.route_suspend_va
     route_block_hits_va = c.route_block_hits_va
     door_gate = c.door_gate
     route_block_door_va = c.route_block_door_va
+    door_gate_table_va = c.door_gate_table_va
+    door_wedge_radius_sq_va = c.door_wedge_radius_sq_va
+    door_blocked_va = c.door_blocked_va
+    door_count_va = c.door_count_va
     wedge_reset = c.wedge_reset
     bot_wedge_cycles_va = c.bot_wedge_cycles_va
     portal_move = c.portal_move
@@ -40,9 +47,92 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
 
     a.label('s542360_wp_arrived')
     if wedge_reset:
-        # Any genuine node arrival = real progress; the wedge counter resets.
+        # A NORMAL-radius node arrival = real progress; the wedge counter
+        # resets. STUCK-radius arrivals enter at s542360_wp_arrived_gate
+        # below and deliberately SKIP this reset: the 128px stuck ball pokes
+        # through walls (live 2026-07-20, Battle on the Ice: a blue carrier
+        # north of the closed south team door "arrived" at inside node 78
+        # from 123px away, and every such fake arrival zeroed the counter,
+        # so the wedge HARD RESET that would have rescued it to the north-
+        # side node never fired).
         a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
         a.raw(b'\xC7\x04\x8D' + le32(bot_wedge_cycles_va) + le32(0))
+    if door_gate and layout.has_field('bot_door_patience'):
+        # Real progress also refills the door press-patience budget: the
+        # node-gate latch path now exercises patience on every routed
+        # timeout at a door-adjacent target, so a stale count from an
+        # earlier (successful) press must not starve the next door.
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_door_patience')) + le32(0))
+    a.label('s542360_wp_arrived_gate')
+    if door_gate:
+        # --- Door-side ARRIVAL gate (live 2026-07-20, Battle on the Ice) ---
+        # Node 47 sits 30px behind the south team door, so the 64px arrival
+        # ball (128px stuck) claims "arrived" while the bot is still OUTSIDE
+        # the closed door. The next hop then targets an inside node and the
+        # straight line from the bot's REAL position crosses the wall west
+        # of the doorway — the reported carrier wall-grind. Refuse any
+        # arrival at a node within the door-wedge radius of a currently-
+        # BLOCKED door when the bot is on the far side of that door
+        # (dot(bot - door, node - door) < 0): fall into the no-progress
+        # path instead, so the bot keeps steering at the node — i.e. INTO
+        # the door, which is exactly what fires its walk-up opener — and
+        # the watchdog/door-press-patience machinery stays armed. Once the
+        # door reads open (per-frame refresh) the gate is inert and the
+        # arrival goes through.
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8B\x04\x8D' + le32(current_wp_va))      # eax = arrived node
+        a.raw(b'\x3B\x05' + le32(overlay_vertex_count_va))
+        a.jae('s542360_wp_ag_ok')                         # bad idx (-1 = huge)
+        a.raw(b'\x8D\x34\xC5' + le32(overlay_vertices_va))  # esi = &verts[node]
+        a.raw(b'\x31\xD2')                                # edx = 0 (door idx)
+        a.label('s542360_wp_ag_loop')
+        a.raw(b'\x3B\x15' + le32(door_count_va))          # all doors checked?
+        a.jae('s542360_wp_ag_ok')
+        a.raw(b'\x83\x3C\x95' + le32(door_blocked_va) + b'\x00')
+        a.jz('s542360_wp_ag_next')                        # open door -> skip
+        a.raw(b'\x8D\x3C\xD5' + le32(door_gate_table_va))  # edi = &door_table[d]
+        # t = node - door; d2 = t.x^2 + t.y^2 (node near this door?)
+        a.raw(b'\xD9\x06')                                # fld node.x
+        a.raw(b'\xD8\x27')                                # fsub door.x   -> t1
+        a.raw(b'\xD9\x46\x04')                            # fld node.y
+        a.raw(b'\xD8\x67\x04')                            # fsub door.y   -> t2, t1
+        a.raw(b'\xD9\xC1')                                # fld st1       -> t1, t2, t1
+        a.raw(b'\xD8\xC8')                                # fmul st0,st0  -> t1^2, t2, t1
+        a.raw(b'\xD9\xC1')                                # fld st1       -> t2, t1^2, t2, t1
+        a.raw(b'\xD8\xC8')                                # fmul st0,st0  -> t2^2, ...
+        a.raw(b'\xDE\xC1')                                # faddp         -> d2, t2, t1
+        a.raw(b'\xD9\x05' + le32(door_wedge_radius_sq_va))  # fld R -> R, d2, t2, t1
+        a.raw(b'\xDF\xF1')                                # fcomip R:d2; pop R
+        a.jb('s542360_wp_ag_pop3')                        # R < d2 -> node not at door
+        a.raw(b'\xDD\xD8')                                # fstp (drop d2) -> t2, t1
+        # dot = t1*(bot.x - door.x) + t2*(bot.y - door.y)
+        a.raw(b'\xD9\x05' + le32(bot_pos_va))             # fld bot.x -> s1, t2, t1
+        a.raw(b'\xD8\x27')                                # fsub door.x
+        a.raw(b'\xDE\xCA')                                # fmulp st2,st0 -> t2, s1*t1
+        a.raw(b'\xD9\x05' + le32(bot_pos_va + 4))         # fld bot.y -> s2, t2, s1t1
+        a.raw(b'\xD8\x67\x04')                            # fsub door.y
+        a.raw(b'\xDE\xC9')                                # fmulp st1,st0 -> s2*t2, s1t1
+        a.raw(b'\xDE\xC1')                                # faddp         -> dot
+        a.raw(b'\xD9\xE4')                                # ftst (dot vs +0.0)
+        a.raw(b'\xDF\xE0')                                # fnstsw ax — EAX is dead here
+                                                          # (node ptr lives in ESI;
+                                                          # AGENTS constraint #6)
+        a.raw(b'\x9E')                                    # sahf (C0->CF)
+        a.raw(b'\xDD\xD8')                                # fstp (pop dot; EFLAGS kept)
+        a.jb('s542360_wp_ag_refuse')                      # dot < 0 -> across the door
+        a.jmp('s542360_wp_ag_next')
+        a.label('s542360_wp_ag_pop3')
+        a.raw(b'\xDD\xD8')                                # drop d2
+        a.raw(b'\xDD\xD8')                                # drop t2
+        a.raw(b'\xDD\xD8')                                # drop t1
+        a.label('s542360_wp_ag_next')
+        a.raw(b'\x42')                                    # ++door idx
+        a.jmp('s542360_wp_ag_loop')
+        a.label('s542360_wp_ag_refuse')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot (expected below)
+        a.jmp('s542360_wp_no_progress_popped')
+        a.label('s542360_wp_ag_ok')
     # Reached the node: advance to a CONNECTED neighbour (random; prefers !=
     # prev). When not latched (prev == -1) pass cur as prev so the advance
     # latches and any neighbour is acceptable.

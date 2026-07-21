@@ -196,14 +196,63 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     genuinely reachable around-route entry (node 48, team-1 open field into
     the base is finite via the east side) was never tried). Every recovery
     action (alternate taken, retreat, fresh-nearest reacquire) increments the
-    per-bot counter; ANY node arrival resets it. At `WP_WEDGE_RESET_CYCLES`
-    (or when the keep-sweeping same-nearest state exceeds 4 timeout windows)
-    the follower cold-acquires the nearest node EXCLUDING the wedge cluster —
-    failed cur, prev, and the failed-edge marker's two nodes — via
-    `wp_find_nearest_ex` (FLT_MAX-seeded scan skipping `wpfn_excl[0..3]`).
-    The failed-edge marker is KEPT through the reset as wedge memory so
-    consecutive resets widen the exclusion set. On the live geometry the
-    first reset excludes {47,77,78} and picks 48 (pinned in tests).
+    per-bot counter; a NORMAL-radius node arrival resets it. STUCK-radius
+    arrivals (the 128 px `WP_STUCK_REACHED_RADIUS_SQ` ball) deliberately do
+    NOT reset it since 2026-07-20: they jump to `s542360_wp_arrived_gate`
+    (the label just past the reset, still through the door-side gate) —
+    live Ice snapshots caught a blue CARRIER north of the wall "arriving" at
+    in-base node 78 from 123 px through the wall every few seconds, zeroing
+    the counter, so the hard reset below never fired and the bot ground the
+    wall until the suspension turned it into a roamer. At
+    `WP_WEDGE_RESET_CYCLES` (or when the keep-sweeping same-nearest state
+    exceeds 4 timeout windows) the follower cold-acquires the nearest node
+    EXCLUDING the wedge cluster — failed cur, prev, and the failed-edge
+    marker's two nodes — via `wp_find_nearest_ex` (FLT_MAX-seeded scan
+    skipping `wpfn_excl[0..3]`). The failed-edge marker is KEPT through the
+    reset as wedge memory so consecutive resets widen the exclusion set. On
+    the live geometry the first reset excludes {47,77,78} and picks 48
+    (pinned in tests).
+  - **Door-side ARRIVAL GATE** (`s542360_wp_arrived_gate` in
+    `follow_arrive`, gated by the door tables; reuses
+    `DOOR_WEDGE_MATCH_RADIUS_SQ`): EVERY node arrival — normal, stuck,
+    prev-swap, cdr re-plan — is refused when the arrived node lies within
+    the wedge radius of a currently-BLOCKED door AND the bot is across that
+    door (`dot(bot − door, node − door) < 0`); the refusal falls into the
+    no-progress path (ecx=slot → `s542360_wp_no_progress_popped`) so the
+    bot keeps steering at the node — i.e. INTO the door, which is what
+    fires its walk-up opener — with the watchdog/door-press-patience
+    machinery armed. Root cause fixed (live 2026-07-20, "blue carrier
+    grinds the wall at the south team gate"): node 47 sits 30 px behind
+    Ice's door 1, so the 64/128 px arrival ball claimed arrival while the
+    carrier was still OUTSIDE the closed door; the next hop then targeted
+    an in-base node (snap: prev=47 cur=78) whose straight line from the
+    bot's REAL position crossed the wall west of the doorway — permanent
+    grind, then suspension roam. The gate is inert the frame the door
+    reads open (per-frame SOLID refresh), so legit arrivals through an
+    open door are untouched; nodes beyond the wedge radius (78 at 155 px)
+    stay ungated — their cross-wall stuck-arrivals are the hard reset's
+    job (which now escalates, see above). Predicate + live geometry pinned
+    in `test_door_side_arrival_gate_on_battle_on_the_ice`.
+    **Companion — node-gate PRESS-PATIENCE latch** (`door_capture_node_gate`
+    in `world_scan/doors.py`, called from the routed-timeout path): the
+    press-patience branch used to engage only when `door_capture_wedge`
+    found a blocked door within the wedge radius of the BOT — but the
+    first live pass of the arrival gate (2026-07-20 follow-up snaps)
+    caught the carrier timing out while grinding the wall 136 px WEST of
+    the doorway (target 47 latched, try=28): no bot-near latch, so the
+    recovery alternated onto cross-wall node 78 and armed the suspension
+    (the residual "sometimes stuck"). Now, when the bot-radius capture
+    finds nothing, the timeout latches by the ARRIVAL-GATE predicate
+    instead (target node within the wedge radius of a blocked door + bot
+    across it) and presses with fresh watchdog cycles — the wall-slide
+    walks the bot along the wall into the doorway/trigger (live: the
+    slide moved it 80 px toward the door in one window; productive
+    sliding resets `wp_try`, so patience is only consumed while truly
+    pinned). Patience also refills on every NORMAL-radius arrival (the
+    node-gate path exercises it far more than the old bot-at-door case,
+    so a stale count must not starve the next door). Wrong-team bots
+    exhaust `WP_DOOR_PRESS_PATIENCE` and fall back to today's
+    suspension/alternate recovery. Pinned in the same test.
   - **Fight-stall suspension skip** (`bot_enemy_near[slot]`,
     `cfg.FIGHT_STALL_RADIUS_SQ`): the fire detour's `pick_target` stamps a
     per-bot flag when the chosen target is within 240 px; while set, a routed
@@ -612,6 +661,23 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   base area. The scan still excludes player characters from `flag_entity[]`
   (live CE once caught a carrier standing on its base being cached and
   double-ticked). The cache carries NO presence meaning.
+- **CTF flags cannot be duplicated into two inventories** (`cfg.CTF_FLAG_
+  GIVE_GUARD_ENABLED`, `detours/flag_give_guard.py`, site `0x5B4DA0`).
+  Live 2026-07-20 (8v8): two same-team bots each carried the red flag. Root
+  cause is a vanilla same-frame race the bots make common: the "Picked up a
+  Flag" canned script's enemy-touch branch runs `CDeleteAction($trigger)` +
+  `CGiveDefaultInventoryItemAction($Instigator)`, and when TWO characters
+  overlap the flag's `CPassThroughTriggerAI` in the same frame each toucher
+  executes the whole script (the delete is deferred/idempotent) — each gets
+  a flag item. Goal routing and the dropped-flag pursuit deliberately send
+  several bots at the same flag, so bots arrive frame-synchronized where
+  humans rarely do. The guard detours the action's per-target give: when
+  the given def is the Red/Blue Flag (compare `action+0x10` against the
+  `sub_523DF0`-resolved keys — same id space) AND any live character already
+  carries that def (`sub_426860` count sweep over `mgr+0x290`, cap 32), the
+  give returns without granting; the rest of the script chain is idempotent
+  so the second toucher simply gets nothing. Blocked events count into
+  `flag_give_block_count` (R-chunk `wedge`).
 - CTF capture score is guarded at the score action only, as a last-resort
   backstop. `detour_5A9960` wraps `CGiveTeamAPointAction::execute` and
   suppresses the gametype score callback while the scoring team's own flag is
@@ -789,10 +855,11 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     mislabelled a bot standing just past the doorway as not-crossed and
     walked it back INTO the closed door (2026-07-20 snapshots, part of the
     self-closing-door shuttle). Degenerate dot <= 0 (bot exactly on the door
-    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~2.2 KB
-    below `SCRATCH_OFF` (hook_entry_size 39389 of 40960 after the SK layer,
-    the goody pursuit, the self-closing-door fixes and the wedge hard
-    reset; the
+    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~0.9 KB
+    below `SCRATCH_OFF` (hook_entry_size 40049 of 40960 after the SK layer,
+    the goody pursuit, the self-closing-door fixes, the wedge hard
+    reset, the door-side arrival gate + node-gate patience latch and the
+    duplicate-flag give guard; the
     boundary sits at 0xA000 with the section
     at 0x26000, scratch ~2.0 KB free). When it runs low again, bump
     `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build asserts on overflow). The `rstate`
@@ -1074,6 +1141,16 @@ Current patched sites:
 - `0x5A9960` - CTF score action guard; last-resort backstop that blocks capture
   awards while the scoring team's own flag is away/carried. (The old
   `0x5B3100` flag-use guard was removed — it broke flag drops; see above.)
+- `0x5B4DA0` - CGiveDefaultInventoryItemAction per-target give; duplicate-flag
+  guard (gated by `cfg.CTF_FLAG_GIVE_GUARD_ENABLED`): suppresses a Red/Blue
+  Flag give when any live character already carries that flag def. Two
+  characters overlapping the flag's pass-through trigger in the SAME frame
+  each execute the "Picked up a Flag" canned script (the world flag's
+  CDeleteAction is deferred/idempotent), which live-produced two same-team
+  red-flag carriers 2026-07-20 — pack-routed bots make that race common.
+  Non-flag gives replay the prologue untouched; blocked gives count into
+  `flag_give_block_count` (dumped in the R-chunk `wedge`, cumulative per
+  process run).
 - `0x5A6E60` - CDropAllOreAndCrystalsAction per-target apply; SK death-pile
   self-registration into the `sk_pile` ring (gated by `cfg.SK_ENABLED`;
   fast-skips outside armed SK matches).
@@ -1121,6 +1198,7 @@ Older emitted labels or disabled detours are not active unless they appear in
 | `stats + 0x14` | team id |
 | `sub_5B3100` | `CUseInventoryItemAction::execute`; consumes the carried enemy flag in the capture chain AND the dying carrier's flag in the drop-on-death canned script — the two are indistinguishable here, so this site must NOT carry a home-flag guard (the old detour was removed for breaking drops). |
 | `sub_5A9960` | `CGiveTeamAPointAction::execute`; map-script score action. Original body only calls active gametype vtable[+0x68](team, 1); detoured as a last-resort backstop to enforce own-flag-home before awarding CTF capture points. |
+| `sub_5B4DA0` | `CGiveDefaultInventoryItemAction` per-target give (vtable `0x604A4C` slot 28, single xref — patching the function IS patching the class; `__thiscall`, ECX=action, `[esp+4]`=resolved `$Instigator`, ret 4; base execute = `sub_5B3B80`). `action+0x10` holds the item-def KEY (reader `sub_5B4650` fills it from `sub_482DE0` = `item+8`) — the SAME id space `sub_523DF0(registry, name, -1)` resolves and `sub_426860(ECX=char, EDX=key)` counts, so the dup-flag guard compares/sweeps with existing helpers. The only path a CTF flag enters an inventory ("Picked up a Flag" enemy-touch branch). |
 | `sub_4C29F0` / `sub_4C2D60` | CActivateAction / CDeactivateAction PER-ENTITY apply (vtable slot 27; entity at `[esp+0x10]`, `ret 0x10`; sets/clears `entity+0x1C & 0x800000` via entity vtbl `+0xE8`/`+0xEC`). Detoured for event-driven `flag_present[]`: the map scripts express "own flag home" as the base checker's activation. Executes (slot 23) funnel through the by-name multi-target resolver `sub_41AED0`. |
 | `VT_CACTIVATE_ACTION_VA = 0x5F6374` / `VT_CDEACTIVATE_ACTION_VA = 0x5F63E4` | the two action vtables (each apply is reachable only through its own vtable). |
 | `"Red Checker"` / `"Blue Checker"` | per-map base touch trigger (CTouchingOvalTriggerAI) authored exactly on the flag spawn anchor; Enter Action = canned `Returned a Flag` (the capture chain). Deactivated while that team's flag is away. Names verified on all 7 CTF-capable maps. |

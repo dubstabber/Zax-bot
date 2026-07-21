@@ -387,6 +387,22 @@ S4C2D60_PROLOGUE = b'\x8B\x4C\x24\x10\x85\xC9'  # mov ecx,[esp+0x10]; test ecx,e
 VT_CACTIVATE_ACTION_VA   = 0x5F6374  # CActivateAction vtable
 VT_CDEACTIVATE_ACTION_VA = 0x5F63E4  # CDeactivateAction vtable
 
+# --- CGiveDefaultInventoryItemAction per-target give (flag dup guard) ------
+# sub_5B4DA0 = vtable slot 28 (+0x70) of CGiveDefaultInventoryItemAction
+# (vtable 0x604A4C; single data xref, so patching the function IS patching
+# the class). __thiscall: ECX = action, [esp+4] = target entity (the resolved
+# $Instigator from the base execute sub_5B3B80), ret 4. The action stores its
+# "Inventory Item Definition" as the item-def KEY at action+0x10 (the reader
+# sub_5B4650 fills it via sub_482DE0 = item+8) — the SAME key space
+# sub_523DF0(registry, name, -1) resolves and sub_426860(ECX=char, EDX=key)
+# counts, so the guard needs no new resolution machinery. The give itself
+# resolves the def record (table dword_6C0C38, stride 0x80) and calls
+# def->vtbl[+0x84](def, 0, target).
+S5B4DA0_VA       = 0x5B4DA0
+S5B4DA0_RESUME   = 0x5B4DA5
+S5B4DA0_PROLOGUE = b'\xA1\x38\x0C\x6C\x00'  # mov eax, [dword_6C0C38] (def-record table)
+VT_CGIVEDEFAULT_ACTION_VA = 0x604A4C  # CGiveDefaultInventoryItemAction vtable
+
 # --- Salvage King (SK) engine anchors --------------------------------------
 # Carried-mineral count getter (used by the SK gametype's own stats sync
 # sub_5616B0): __usercall — ECX = character, EDX = item-def registry KEY

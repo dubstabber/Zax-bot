@@ -775,6 +775,104 @@ class PortalDataTests(unittest.TestCase):
         self.assertNotEqual(open1[48], -1)
         self.assertEqual(open1[47], -1)
 
+    def test_door_side_arrival_gate_on_battle_on_the_ice(self):
+        # Offline mirror of the follow_arrive door-side ARRIVAL gate (live
+        # 2026-07-20, the "blue carrier grinds the wall at the south team
+        # gate" report). Node 47 sits 30px behind door 1, so the 64px arrival
+        # ball (128px stuck) fires while the bot is still NORTH of the closed
+        # door; the next hop then targets an in-base node (snap: prev=47
+        # cur=78) whose straight line from the bot's REAL position crosses
+        # the wall west of the doorway. The gate refuses an arrival at a node
+        # within DOOR_WEDGE_MATCH_RADIUS of a BLOCKED door when
+        # dot(bot - door, node - door) < 0 (bot across the door), so the bot
+        # keeps pressing INTO the door — which fires its team-0 walk-up
+        # opener — instead of latching cross-wall nodes.
+        import struct as _struct
+        from pathlib import Path
+        from zaxbot.door_data import resolve_door_topology
+
+        topo = {t.map_name.split('/')[-1]: t for t in resolve_door_topology()}
+        m = topo['Battle on the Ice.zax']
+        p = (Path(__file__).resolve().parents[1] / 'waypoints'
+             / 'Levels_Multiplayer_CTF_Battle on the Ice.zax.zwpt')
+        d = p.read_bytes()
+        _magic, _ver, vc, _ec = _struct.unpack('<4sIII', d[:16])
+        verts = [_struct.unpack('<ff', d[16 + i*8:24 + i*8]) for i in range(vc)]
+
+        def refuses(node, bot, blocked):
+            # Byte-for-byte mirror of the emitted gate predicate.
+            nx, ny = verts[node]
+            for di, (dx, dy) in enumerate(m.doors):
+                if not blocked[di]:
+                    continue
+                t1, t2 = nx - dx, ny - dy
+                if t1*t1 + t2*t2 > cfg.DOOR_WEDGE_MATCH_RADIUS_SQ:
+                    continue
+                if t1*(bot[0]-dx) + t2*(bot[1]-dy) < 0:
+                    return True
+            return False
+
+        # Door 1 = the south team door; node 47 is its door-adjacent node
+        # (30px inside), node 48 the outside approach node (143px — beyond
+        # the wedge radius, never gated).
+        d1 = m.doors[1]
+        d47 = (verts[47][0]-d1[0])**2 + (verts[47][1]-d1[1])**2
+        d48 = (verts[48][0]-d1[0])**2 + (verts[48][1]-d1[1])**2
+        self.assertLess(d47, cfg.DOOR_WEDGE_MATCH_RADIUS_SQ)
+        self.assertGreater(d48, cfg.DOOR_WEDGE_MATCH_RADIUS_SQ)
+
+        closed = [True, True]
+        outside = (1553.7, 2745.1)     # live snap-2 grind position (north)
+        at_door_n = (1670.0, 2790.0)   # pressing the door from the north
+        inside = (1670.0, 2860.0)      # just south of the door line
+        # A bot NORTH of the closed door must not "arrive" at node 47.
+        self.assertTrue(refuses(47, outside, closed))
+        self.assertTrue(refuses(47, at_door_n, closed))
+        # Legit arrivals stay untouched: from inside, at the outside node,
+        # and everywhere once the door reads open.
+        self.assertFalse(refuses(47, inside, closed))
+        self.assertFalse(refuses(48, at_door_n, closed))
+        self.assertFalse(refuses(48, outside, closed))
+        self.assertFalse(refuses(47, at_door_n, [True, False]))
+        # Node 78 (155px from the door) is beyond the gate radius — its
+        # cross-wall stuck-arrival is the wedge hard reset's job, which now
+        # escalates because stuck-radius arrivals no longer reset
+        # bot_wedge_cycles (they enter past the reset at
+        # s542360_wp_arrived_gate).
+        self.assertFalse(refuses(78, outside, closed))
+
+        # --- door_capture_node_gate (live 2026-07-20 follow-up snaps) -----
+        # The routed-timeout press patience used to require a blocked door
+        # within the wedge radius of the BOT (door_capture_wedge); the new
+        # session caught the carrier timing out while grinding the wall
+        # 136px from the door center — no bot-near latch, so the recovery
+        # alternated onto cross-wall node 78 and armed the suspension
+        # (snap 2: cur=78 wedge=1 susp=233). The node-gate fallback latches
+        # by the SAME arrival-gate predicate (target node door-adjacent,
+        # bot across), so patience presses instead.
+        def node_gate(node, bot, blocked):
+            nx, ny = verts[node]
+            for di, (dx, dy) in enumerate(m.doors):
+                if not blocked[di]:
+                    continue
+                t1, t2 = nx - dx, ny - dy
+                if t1*t1 + t2*t2 > cfg.DOOR_WEDGE_MATCH_RADIUS_SQ:
+                    continue
+                if t1*(bot[0]-dx) + t2*(bot[1]-dy) < 0:
+                    return di
+            return -1
+
+        snap1_grind = (1548.8, 2748.5)   # live: cur=47, try=28, 136px from door
+        bot_d2 = (snap1_grind[0]-d1[0])**2 + (snap1_grind[1]-d1[1])**2
+        # The bot-radius capture genuinely misses this position ...
+        self.assertGreater(bot_d2, cfg.DOOR_WEDGE_MATCH_RADIUS_SQ)
+        # ... while the node gate latches door 1 via the target node.
+        self.assertEqual(node_gate(47, snap1_grind, closed), 1)
+        # Door open, or a target on the bot's side -> no latch (normal
+        # recovery proceeds).
+        self.assertEqual(node_gate(47, snap1_grind, [True, False]), -1)
+        self.assertEqual(node_gate(48, snap1_grind, closed), -1)
+
     def test_door_opener_topology_is_extracted(self):
         # Openers drive DIRECTIONAL closed-door passability: bot-usable
         # walk-in triggers only (touching/pass-through, authored active;
@@ -1509,8 +1607,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '1b16041f3d72fd86a0c75286eda6d886755668d49f507960b2f7282b46aad0ed'
-    HOOK_ENTRY_SIZE = 39389
+    SECTION_SHA256 = '901e93ad149d0d09f583bb8c31d8c8edd01840b9d6e2e358cf22917a91edea95'
+    HOOK_ENTRY_SIZE = 40049
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

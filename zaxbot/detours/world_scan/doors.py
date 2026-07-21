@@ -48,6 +48,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC3')
         a.label('door_capture_wedge')
         a.raw(b'\xC3')
+        a.label('door_capture_node_gate')
+        a.raw(b'\xC3')
         a.label('door_refresh_state')
         a.raw(b'\xC3')
         a.label('build_edge_doors')
@@ -218,6 +220,91 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.label('dcw_out')
         a.raw(b'\x61')                                              # popad
         a.raw(b'\xC3')
+
+        # -----------------------------------------------------------------
+        # door_capture_node_gate: fallback wedge-door latch by TARGET NODE.
+        # door_capture_wedge only matches doors within the wedge radius of
+        # the BOT, but the live 2026-07-20 follow-up snapshots (blue carrier,
+        # Battle on the Ice south gate) caught the routed timeout firing
+        # while the bot ground the wall 136px WEST of the doorway — no
+        # bot-near door, so press patience never engaged and the recovery
+        # alternated onto another cross-wall node + armed the suspension.
+        # This helper latches a blocked door by the ARRIVAL-GATE predicate
+        # instead: the bot's CURRENT TARGET node lies within the wedge
+        # radius of a blocked door AND the bot is across it
+        # (dot(bot - door, node - door) < 0). The watchdog calls it only
+        # when door_capture_wedge found nothing; a latch means "my target
+        # is right behind that closed door", so the press-patience branch
+        # keeps the bot steering at the node — sliding along the wall into
+        # the doorway/trigger — instead of suspending. pushad/popad, no
+        # args/ret; inputs via scratch (bot_pos / bot_slot_tmp /
+        # bot_current_wp).
+        # -----------------------------------------------------------------
+        if not (layout.has_field('overlay_vertices')
+                and layout.has_field('overlay_vertex_count')):
+            a.label('door_capture_node_gate')
+            a.raw(b'\xC3')
+        else:
+            dcng_verts_va  = layout.va('overlay_vertices')
+            dcng_vcount_va = layout.va('overlay_vertex_count')
+            dcng_curwp_va  = layout.va('bot_current_wp')
+            a.label('door_capture_node_gate')
+            a.raw(b'\x60')                                          # pushad
+            a.raw(b'\x8B\x0D' + le32(bot_slot_tmp2_va))             # ecx = slot
+            a.raw(b'\x8B\x04\x8D' + le32(dcng_curwp_va))            # eax = target node
+            a.raw(b'\x3B\x05' + le32(dcng_vcount_va))               # valid idx? (-1 = huge)
+            a.jae('dcng_out')
+            a.raw(b'\x8D\x34\xC5' + le32(dcng_verts_va))            # esi = &verts[node]
+            a.raw(b'\x31\xD2')                                      # edx = door idx
+            a.label('dcng_loop')
+            a.raw(b'\x3B\x15' + le32(door_count_va))                # all doors checked?
+            a.jae('dcng_out')
+            a.raw(b'\x83\x3C\x95' + le32(door_blocked_va) + b'\x00')
+            a.jz('dcng_next')                                       # open door -> skip
+            a.raw(b'\x8D\x3C\xD5' + le32(door_table_va))            # edi = &door_table[d]
+            # t = node - door; d2 = t.x^2 + t.y^2 (node at this door?)
+            a.raw(b'\xD9\x06')                                      # fld node.x
+            a.raw(b'\xD8\x27')                                      # fsub door.x   -> t1
+            a.raw(b'\xD9\x46\x04')                                  # fld node.y
+            a.raw(b'\xD8\x67\x04')                                  # fsub door.y   -> t2, t1
+            a.raw(b'\xD9\xC1')                                      # fld st1
+            a.raw(b'\xD8\xC8')                                      # fmul st0,st0  -> t1^2, t2, t1
+            a.raw(b'\xD9\xC1')                                      # fld st1
+            a.raw(b'\xD8\xC8')                                      # fmul st0,st0  -> t2^2, ...
+            a.raw(b'\xDE\xC1')                                      # faddp         -> d2, t2, t1
+            a.raw(b'\xD9\x05' + le32(door_wedge_radius_va))         # fld R
+            a.raw(b'\xDF\xF1')                                      # fcomip R:d2; pop R
+            a.jb('dcng_pop3')                                       # R < d2 -> not at door
+            a.raw(b'\xDD\xD8')                                      # fstp (drop d2) -> t2, t1
+            # dot = t1*(bot.x - door.x) + t2*(bot.y - door.y)
+            a.raw(b'\xD9\x05' + le32(bot_pos_va))                   # fld bot.x
+            a.raw(b'\xD8\x27')                                      # fsub door.x
+            a.raw(b'\xDE\xCA')                                      # fmulp st2,st0 -> t2, s1*t1
+            a.raw(b'\xD9\x05' + le32(bot_pos_va + 4))               # fld bot.y
+            a.raw(b'\xD8\x67\x04')                                  # fsub door.y
+            a.raw(b'\xDE\xC9')                                      # fmulp st1,st0 -> s2*t2, s1t1
+            a.raw(b'\xDE\xC1')                                      # faddp         -> dot
+            a.raw(b'\xD9\xE4')                                      # ftst
+            a.raw(b'\xDF\xE0')                                      # fnstsw ax — EAX dead here
+                                                                    # (node ptr in ESI;
+                                                                    # AGENTS constraint #6)
+            a.raw(b'\x9E')                                          # sahf
+            a.raw(b'\xDD\xD8')                                      # fstp (pop dot; EFLAGS kept)
+            a.jb('dcng_found')                                      # dot < 0 -> across the door
+            a.jmp('dcng_next')
+            a.label('dcng_pop3')
+            a.raw(b'\xDD\xD8')                                      # drop d2
+            a.raw(b'\xDD\xD8')                                      # drop t2
+            a.raw(b'\xDD\xD8')                                      # drop t1
+            a.label('dcng_next')
+            a.raw(b'\x42')                                          # ++door idx
+            a.jmp('dcng_loop')
+            a.label('dcng_found')
+            a.raw(b'\x8B\x0D' + le32(bot_slot_tmp2_va))             # ecx = slot
+            a.raw(b'\x89\x14\x8D' + le32(route_block_door_va))      # latch = door idx
+            a.label('dcng_out')
+            a.raw(b'\x61')                                          # popad
+            a.raw(b'\xC3')
 
         # -----------------------------------------------------------------
         # door_refresh_state: PER-FRAME (page flip) re-read of the cached

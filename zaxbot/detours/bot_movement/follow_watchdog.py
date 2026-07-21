@@ -52,7 +52,11 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     a.raw(b'\xDF\xF1')                                    # fcomip radius, dsq; pop radius
     a.jb('s542360_wp_maybe_prev_arrived')                  # not near cur; maybe already back at prev
     a.raw(b'\xDD\xD8')                                    # fstp st(0)  (near enough: pop dsq)
-    a.jmp('s542360_wp_arrived')
+    # STUCK-radius arrival: enter past the wedge-counter reset (the 128px
+    # ball pokes through walls, so these arrivals must not count as real
+    # progress for the hard-reset escalation) but still through the
+    # door-side arrival gate.
+    a.jmp('s542360_wp_arrived_gate')
 
     # If the bot just failed an edge and is physically wedged near the previous
     # node, count the previous node as reached immediately. Latest dump:
@@ -104,7 +108,8 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     a.raw(b'\x8B\x14\x8D' + le32(current_wp_va))          # edx = old current / failed node
     a.raw(b'\x89\x04\x8D' + le32(current_wp_va))          # current_wp = old prev
     a.raw(b'\x89\x14\x8D' + le32(prev_wp_va))             # prev_wp = old current
-    a.jmp('s542360_wp_arrived')
+    # Same stuck-radius caveat as above: skip the wedge-counter reset.
+    a.jmp('s542360_wp_arrived_gate')
 
     a.label('s542360_wp_prev_not_close')
     a.raw(b'\xDD\xD8')                                    # fstp st(0)  (drop prev_dsq)
@@ -166,7 +171,8 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
             a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))    # ecx = slot
             a.raw(b'\x8B\x04\x8D' + le32(route_block_door_va))  # eax = latched door
             a.raw(b'\x83\xF8\xFF')
-            a.jz('s542360_wp_door_impatient')             # no door wedge -> suspend
+            a.jz('s542360_wp_door_node_try')              # no bot-near door -> node gate
+            a.label('s542360_wp_door_have')
             a.raw(b'\x3B\x05' + le32(door_count_va))      # stale idx?
             a.jae('s542360_wp_door_impatient')
             a.raw(b'\x83\x3C\x85' + le32(door_blocked_va) + b'\x00')
@@ -177,6 +183,21 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
             a.ja('s542360_wp_door_impatient')             # budget exhausted -> suspend
             a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))   # fresh watchdog
             a.jmp('s542360_wp_steer')                     # keep pressing the door
+            # No blocked door near the BOT — but the timeout may still be a
+            # door wedge: live 2026-07-20 follow-up caught the carrier
+            # grinding the wall 136px west of the doorway (beyond the
+            # bot-radius capture) while its TARGET node 47 sat 30px behind
+            # the closed door. Latch by the arrival-gate predicate instead
+            # (target node door-adjacent + bot across it) so press patience
+            # engages — the slide walks the bot along the wall into the
+            # doorway/trigger — instead of alternating onto another
+            # cross-wall node and arming the suspension.
+            a.label('s542360_wp_door_node_try')
+            a.call_lbl('door_capture_node_gate')          # latch by target node
+            a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))    # ecx = slot
+            a.raw(b'\x8B\x04\x8D' + le32(route_block_door_va))  # eax = latched door
+            a.raw(b'\x83\xF8\xFF')
+            a.jnz('s542360_wp_door_have')                 # latched -> press patience
             a.label('s542360_wp_door_impatient')
             a.raw(b'\xC7\x04\x8D' + le32(bot_door_patience_va) + le32(0))
         a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot

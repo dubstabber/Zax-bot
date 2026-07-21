@@ -150,6 +150,20 @@ def build_enabled_patches():
             )
         )
 
+    if cfg.CTF_FLAG_GIVE_GUARD_ENABLED:
+        # Duplicate-carrier guard: suppress a CGiveDefaultInventoryItemAction
+        # flag give when any live character already carries that flag def.
+        # Two characters overlapping the flag's pass-through trigger in the
+        # same frame each execute the "Picked up a Flag" script (the world
+        # flag's CDeleteAction is deferred), which live-produced two same-team
+        # red-flag carriers; pack-routed bots make the same-frame race common.
+        patches.append(
+            RelocationPatch(
+                'sub_5B4DA0 CTF duplicate-flag give guard', 'jmp',
+                ax.S5B4DA0_VA, ax.S5B4DA0_PROLOGUE, 'detour_5B4DA0_va', 5,
+            )
+        )
+
     patches.extend([
         # Inline NULL-guard for sub_4FC8A0 (the positional-sound dispatch
         # wrapper). The function does `mov ecx, [ecx+0x48]; call sub_4EA880`

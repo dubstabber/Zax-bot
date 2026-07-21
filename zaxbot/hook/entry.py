@@ -25,6 +25,7 @@ from ..detours import (
     dp_poll,
     entity_scan,
     flag_events,
+    flag_give_guard,
     flag_route,
     name_block,
     overlay,
@@ -62,6 +63,7 @@ _DETOUR_LABEL_KEYS = {
     'detour_4C29F0':           'detour_4C29F0_va',
     'detour_4C2D60':           'detour_4C2D60_va',
     'detour_5A6E60':           'detour_5A6E60_va',
+    'detour_5B4DA0':           'detour_5B4DA0_va',
 }
 
 
@@ -132,6 +134,7 @@ def build_hook(section_va_abs):
     flag_events.emit(a, layout)
     flag_route.emit(a, layout)
     ctf_score_guard.emit(a, layout)
+    flag_give_guard.emit(a, layout)
 
     code = a.link()
     assert len(code) <= cfg.SCRATCH_OFF, (

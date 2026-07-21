@@ -40,3 +40,19 @@ CTF_FLAG_HOME_FORCE_TICK_RADIUS_SQ = 64.0 * 64.0
 # keep flag_present[] in lockstep with the map script's checker state.
 CTF_FLAG_EVENTS_ENABLED = True
 
+# --- Duplicate-carrier guard (live 2026-07-20: two same-team bots each
+# holding the red flag). The map script's "Picked up a Flag" canned object
+# grants the flag through CGiveDefaultInventoryItemAction and deletes the
+# world flag entity via a (deferred) CDeleteAction — nothing prevents TWO
+# characters overlapping the flag's CPassThroughTriggerAI in the same frame
+# from each executing the script and each receiving a flag item. Humans
+# rarely arrive frame-synchronized; pack-routed bots do (goal routing and
+# the drop pursuit deliberately send several bots at the same flag). The
+# guard detours the action's per-target give (sub_5B4DA0, reachable only
+# through the CGiveDefaultInventoryItemAction vtable): when the item being
+# given is a Red/Blue Flag def AND any live character already carries that
+# def, the give is suppressed — the rest of the script chain (delete,
+# sound, checker deactivate) is idempotent, so the second toucher simply
+# doesn't get a duplicate. Non-flag gives pass through untouched.
+CTF_FLAG_GIVE_GUARD_ENABLED = True
+
