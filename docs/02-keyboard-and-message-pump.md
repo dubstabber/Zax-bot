@@ -56,17 +56,38 @@ faults inside `sub_40C6E0` (an early live crash — see the addresses.py note).
 At open time the builder `rep movsd`-clones the base vtable into the
 `menu_vtable` scratch field and patches slot 0 -> `menu_dtor`, slot 21 ->
 `menu_cmd`, allocates a 0x140-byte dialog via `sub_417710`, runs the base ctor
-`sub_403D00(dlg, parent, 0)`, then adds a title label plus buttons stacked
-vertically with anchor 12 (centered X, below the previous sibling):
+`sub_403D00(dlg, parent, 0)`, then:
 
-- DM / SK: one **Add Bot** button.
-- CTF: **Add Blue Bot** + **Add Red Bot**.
-- all modes: a **Close** button.
+- calls the engine's **native close-box builder `sub_4038A0`** — it creates a
+  13x13 button whose text is glyph `0x18` (the font's X symbol), stores it at
+  `dialog+0x100` and anchors it into the top-right title-bar corner; the base
+  set-rect handler (`sub_403640`) re-glues whatever sits at `+0x100` to the
+  top-right on every later move/resize. As the first child it is also the
+  stack anchor the first button lands under (no blank spacer label anymore).
+- stores that close box at `dialog+0x120`: the base **key handler**
+  (vtable slot 16 = `sub_403E40`, kept from the clone) maps key 27 (**Esc**)
+  to "activate the widget at `+0x120`", so Esc presses the X — exactly how
+  the engine's confirm dialog cancels — and the handled key never reaches the
+  game's own Esc menu.
+- adds the buttons stacked vertically with anchor 12 (centered X, below the
+  previous sibling): DM / SK one **Add Bot**, CTF **Add Blue Bot** +
+  **Add Red Bot**, all modes a **Close** button.
+- runs a **final alignment pass**: anchor 12 centers a child against the
+  dialog's client width *at add time* (`sub_40DB20` case 12), but the ctor
+  pre-sizes the window to the title and the add-child growth hook
+  (`sub_40E590`) only ever grows it to fit child x2 — so a button wider than
+  the title got a negative x1 and stayed clipped off the left edge. The pass
+  measures the widest button, grows the window via vtable slot 59 when the
+  client area is too narrow (+2x the `+0x78` pad byte), then re-centers every
+  button against the final client width with `sub_40D680` — the same
+  post-add reposition the engine's own dialogs use (`sub_4721B0`).
 
 Button pointers are cached in `menu_btn0/1/2` scratch. `menu_cmd` (slot 21)
 maps an activated widget: the spawn buttons set `chosen_team` and call
-`do_spawn_with_team` (leaving the menu open so several bots can be added),
-Close dismisses via vtable slot 5. `menu_dtor` (slot 0) resets the `menu_open`
+`do_spawn_with_team` (leaving the menu open so several bots can be added);
+the Close button *and* the native close box (`this+0x100` — the compare the
+base slot-21 handler `sub_4035F0` used to do before we overrode the slot)
+dismiss via vtable slot 5. `menu_dtor` (slot 0) resets the `menu_open`
 guard on every teardown path, then runs the base teardown + pooled free
 (`sub_54D130(this, 0x140)`) exactly like the confirm dialog's `sub_472300`.
 The `menu_open` guard makes a second B while the dialog is up a no-op.

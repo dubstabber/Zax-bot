@@ -511,7 +511,6 @@ def write_static_scratch_data(
     # knob — these are UI constants.
     if layout.has_field('menu_str_title'):
         layout.write(section, scratch_off, 'menu_str_title',  b'Add Bots\x00')
-        layout.write(section, scratch_off, 'menu_str_blank',  b' \x00')
         layout.write(section, scratch_off, 'menu_str_addbot', b'Add Bot\x00')
         layout.write(section, scratch_off, 'menu_str_blue',   b'Add Blue Bot\x00')
         layout.write(section, scratch_off, 'menu_str_red',    b'Add Red Bot\x00')

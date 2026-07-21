@@ -8,16 +8,23 @@ closest template). Three emitted bodies:
 - ``build_bot_menu`` — called from the dispatcher's B handler (inside its
   pushad). Guards on ``menu_open``, clones the base CWindow vtable into
   ``menu_vtable`` (overriding slot 0 = dtor and slot 21 = command handler),
-  allocates + constructs the dialog, adds a title label and the mode-dependent
-  buttons (DM/SK: one "Add Bot"; CTF: "Add Blue Bot" + "Add Red Bot"), plus a
-  "Close" button, then shows it modally on the world manager (the same parent
-  the Esc menu uses, ``*MANAGER_GLOBAL_VA``).
+  allocates + constructs the dialog, asks the engine for its NATIVE top-right
+  X close box (``sub_4038A0`` -> ``dialog+0x100``; also stored at ``+0x120``
+  so the base key handler presses it on Esc), adds the mode-dependent buttons
+  (DM/SK: one "Add Bot"; CTF: "Add Blue Bot" + "Add Red Bot") plus a "Close"
+  button, re-aligns the stack against the dialog's FINAL width (anchor-12
+  centers against the width at ADD time, and the add-child hook only ever
+  grows the window — the raw stack leaves the widest button clipped off the
+  left edge), then shows it modally on the desktop root.
 
 - ``menu_cmd`` — the dialog's vtable slot-21 notify handler. On a button
   activation (code == 0) it maps the widget to an action: spawn buttons set
   ``chosen_team`` and call ``do_spawn_with_team`` (keeping the menu open so the
-  host can add several bots); the Close button dismisses the dialog via vtable
-  slot 5. Mirrors the confirm dialog's ``sub_472330``.
+  host can add several bots); the Close button and the native X close box
+  dismiss the dialog via vtable slot 5 (the same compare the BASE handler
+  ``sub_4035F0`` does for ``this+0x100`` — overriding slot 21 replaces it, so
+  the X press must be re-routed here). Mirrors the confirm dialog's
+  ``sub_472330``.
 
 - ``menu_dtor`` — the dialog's vtable slot-0 (deleting) destructor. Resets
   ``menu_open`` (so ANY close path frees the guard), then runs the base
@@ -68,6 +75,37 @@ def _emit_menu_button(a: Asm, text_va: int, dest_va: int, tag: str) -> None:
     a.label(skip)
 
 
+def _emit_btn_max_width(a: Asm, src_va: int, tag: str) -> None:
+    """ESI = max(ESI, width of the button pointed to by [src_va]); NULL-safe."""
+    skip = f'bm_maxw_{tag}_skip'
+    a.raw(b'\x8B\x3D' + le32(src_va))        # mov edi, [src]
+    a.raw(b'\x85\xFF'); a.jz(skip)           # test edi, edi
+    a.raw(b'\x8B\x47' + bytes([ax.WIN_RECT_X2_OFF]))  # mov eax, [edi+0x0C]
+    a.raw(b'\x2B\x47' + bytes([ax.WIN_RECT_X1_OFF]))  # sub eax, [edi+0x04]  (width)
+    a.raw(b'\x39\xC6')                       # cmp esi, eax
+    a.jge(skip)                              # esi already >= width
+    a.raw(b'\x89\xC6')                       # mov esi, eax
+    a.label(skip)
+
+
+def _emit_btn_center(a: Asm, src_va: int, tag: str) -> None:
+    """Re-center the button at [src_va]: x = (clientW - width)/2 via the
+    engine's own move-x helper (the sub_4721B0 pattern). ESI must hold the
+    dialog's CURRENT client width; EBX the dialog. NULL-safe."""
+    skip = f'bm_ctr_{tag}_skip'
+    a.raw(b'\x8B\x3D' + le32(src_va))        # mov edi, [src]
+    a.raw(b'\x85\xFF'); a.jz(skip)           # test edi, edi
+    a.raw(b'\x8B\x47' + bytes([ax.WIN_RECT_X2_OFF]))  # mov eax, [edi+0x0C]
+    a.raw(b'\x2B\x47' + bytes([ax.WIN_RECT_X1_OFF]))  # sub eax, [edi+0x04]  (width)
+    a.raw(b'\x89\xF1')                       # mov ecx, esi    (clientW)
+    a.raw(b'\x29\xC1')                       # sub ecx, eax
+    a.raw(b'\xD1\xF9')                       # sar ecx, 1      ((clientW - w)/2)
+    a.raw(b'\x51')                           # push ecx        (x)
+    a.raw(b'\x89\xF9')                       # mov ecx, edi    (this = button)
+    a.call_va(ax.WIDGET_SET_XPOS_VA)         # ret 4
+    a.label(skip)
+
+
 def emit(a: Asm, layout: ScratchLayout) -> None:
     menu_open_va   = layout.va('menu_open')
     menu_btn0_va   = layout.va('menu_btn0')
@@ -78,7 +116,6 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     menu_mode_va   = layout.va('menu_mode')
     chosen_team_va = layout.va('chosen_team')
     str_title_va   = layout.va('menu_str_title')
-    str_blank_va   = layout.va('menu_str_blank')
     str_addbot_va  = layout.va('menu_str_addbot')
     str_blue_va    = layout.va('menu_str_blue')
     str_red_va     = layout.va('menu_str_red')
@@ -130,19 +167,21 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.call_va(ax.WIN_BASE_CTOR_VA)                         # ret 8
     a.raw(b'\xC7\x03' + le32(menu_vtable_va))              # mov [ebx], menu_vtable
 
-    # Title label (anchor 1). On alloc failure just skip it.
-    a.raw(b'\xB9' + le32(0x128))                           # mov ecx, 0x128  (label size)
-    a.call_va(ax.WIDGET_ALLOC_VA)
-    a.raw(b'\x85\xC0'); a.jz('bm_title_skip')
-    a.raw(b'\x89\xC7')                                     # mov edi, eax    (label)
-    # Blank spacer: the window header already shows the title; this first child
-    # exists only as the stack anchor for the anchor-12 buttons below it.
-    a.raw(b'\x68' + le32(str_blank_va))                   # push text       (a3)
-    a.raw(b'\x53')                                         # push ebx        (a2 parent)
-    a.raw(b'\x89\xF9')                                     # mov ecx, edi
-    a.call_va(ax.LABEL_CTOR_VA)                            # ret 8
-    _emit_add_child(a, ax.WIDGET_ANCHOR_TITLE)
-    a.label('bm_title_skip')
+    # Native close box (X, top-right): the engine's own sub_4038A0 builds a
+    # 13x13 button whose text is glyph 0x18 (the font's X symbol), stores it
+    # at dialog+0x100 and anchors it into the title-bar corner; the base
+    # set-rect handler re-glues it there on every later resize (including the
+    # alignment pass below). As the FIRST child it doubles as the stack
+    # anchor the first anchor-12 button lands under (replaces the old blank
+    # spacer label, so the buttons start right below the title bar).
+    a.raw(b'\x89\xD9')                                     # mov ecx, ebx
+    a.call_va(ax.WIN_ENSURE_CLOSEBOX_VA)
+    # Esc closes: the base key handler (vtable slot 16, kept from the clone)
+    # activates the widget at +0x120 on key 27. Point it at the close box so
+    # Esc presses the X (and the handled key never reaches the game's own
+    # Esc menu). A NULL close box stores 0 = the ctor default (Esc inert).
+    a.raw(b'\x8B\x83' + le32(ax.WIN_CLOSE_BOX_OFF))        # mov eax, [ebx+0x100]
+    a.raw(b'\x89\x83' + le32(ax.WIN_CANCEL_WIDGET_OFF))    # mov [ebx+0x120], eax
 
     # Spawn buttons by mode: CTF gets Blue+Red, DM/SK get a single Add Bot.
     a.raw(b'\x83\x3D' + le32(menu_mode_va) + b'\x01')      # cmp [menu_mode], 1 (CTF)
@@ -154,6 +193,47 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     _emit_menu_button(a, str_red_va,  menu_btn1_va, 'red')
     a.label('bm_close_btn')
     _emit_menu_button(a, str_close_va, menu_btn2_va, 'close')
+
+    # --- Final alignment pass ---------------------------------------------
+    # Anchor-12 centered each button against the dialog's client width AT ADD
+    # time, but the ctor pre-sizes the window to the TITLE and the add-child
+    # hook (sub_40E590) only ever grows it to fit child x2 — so a button wider
+    # than the title got a negative x1 and stayed clipped off the left edge
+    # (live screenshot: "Add Blue Bot" cut to "dd Blue Bot"). Mirror the
+    # engine's own dialogs (sub_4721B0 + sub_40D680): first make sure the
+    # client area fits the widest button plus the anchor padding, then
+    # re-center every button against the FINAL client width. The resize also
+    # re-anchors the native close box into the new top-right corner.
+    a.raw(b'\x31\xF6')                                     # xor esi, esi   (max width)
+    _emit_btn_max_width(a, menu_btn0_va, 'b0')
+    _emit_btn_max_width(a, menu_btn1_va, 'b1')
+    _emit_btn_max_width(a, menu_btn2_va, 'b2')
+    a.raw(b'\x85\xF6'); a.jz('bm_align_done')              # no buttons at all
+    a.raw(b'\x0F\xBE\x43' + bytes([ax.WIN_PAD_X_BYTE_OFF]))  # movsx eax, byte [ebx+0x78]
+    a.raw(b'\x8D\x34\x46')                                 # lea esi, [esi+eax*2]  (+2*pad)
+    a.raw(b'\x8B\x43' + bytes([ax.WIN_CLIENT_X2_OFF]))     # mov eax, [ebx+0x1C]
+    a.raw(b'\x2B\x43' + bytes([ax.WIN_CLIENT_X1_OFF]))     # sub eax, [ebx+0x14]  (clientW)
+    a.raw(b'\x39\xF0')                                     # cmp eax, esi
+    a.jge('bm_centers')                                    # already wide enough
+    # Grow the window: new width = winW + (needed - clientW); height unchanged.
+    a.raw(b'\x8B\x4B' + bytes([ax.WIN_RECT_X2_OFF]))       # mov ecx, [ebx+0x0C]
+    a.raw(b'\x2B\x4B' + bytes([ax.WIN_RECT_X1_OFF]))       # sub ecx, [ebx+0x04]  (winW)
+    a.raw(b'\x29\xC1')                                     # sub ecx, eax    (- clientW)
+    a.raw(b'\x01\xF1')                                     # add ecx, esi    (+ needed)
+    a.raw(b'\x8B\x53' + bytes([ax.WIN_RECT_Y2_OFF]))       # mov edx, [ebx+0x10]
+    a.raw(b'\x2B\x53' + bytes([ax.WIN_RECT_Y1_OFF]))       # sub edx, [ebx+0x08]  (winH)
+    a.raw(b'\x52')                                         # push edx        (h)
+    a.raw(b'\x51')                                         # push ecx        (w)
+    a.raw(b'\x8B\x03')                                     # mov eax, [ebx]  (vtable)
+    a.raw(b'\x89\xD9')                                     # mov ecx, ebx
+    a.raw(b'\xFF\x90' + le32(ax.WIN_RESIZE_VTBL_OFF))      # call [eax+0xEC] (resize; ret 8)
+    a.label('bm_centers')
+    a.raw(b'\x8B\x73' + bytes([ax.WIN_CLIENT_X2_OFF]))     # mov esi, [ebx+0x1C]
+    a.raw(b'\x2B\x73' + bytes([ax.WIN_CLIENT_X1_OFF]))     # sub esi, [ebx+0x14]  (final clientW)
+    _emit_btn_center(a, menu_btn0_va, 'b0')
+    _emit_btn_center(a, menu_btn1_va, 'b1')
+    _emit_btn_center(a, menu_btn2_va, 'b2')
+    a.label('bm_align_done')
 
     # Keyboard default = first spawn button (Enter adds a bot). Guarded so a
     # failed alloc never hands sub_40CA40 a NULL.
@@ -190,6 +270,11 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x8B\x44\x24\x08')                             # mov eax, [esp+8]  (code)
     a.raw(b'\x85\xC0'); a.jnz('mc_retcode')               # code != 0 -> return code
     a.raw(b'\x8B\x44\x24\x04')                             # mov eax, [esp+4]  (widget)
+    # Native X close box (dialog+0x100) — the compare the BASE slot-21 handler
+    # does; overriding the slot replaced it, so re-route the X press (and the
+    # Esc-activated press, which arrives the same way) to the close path.
+    a.raw(b'\x3B\x81' + le32(ax.WIN_CLOSE_BOX_OFF))        # cmp eax, [ecx+0x100]
+    a.jz('mc_close')
     a.raw(b'\x3B\x05' + le32(menu_btn2_va))               # cmp eax, [menu_btn2]
     a.jz('mc_close')
     a.raw(b'\x3B\x05' + le32(menu_btn0_va))               # cmp eax, [menu_btn0]

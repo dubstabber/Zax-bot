@@ -702,6 +702,38 @@ DIALOG_OBJ_SIZE        = 0x140      # dialog object allocation size (same as the
 WIDGET_ANCHOR_TITLE    = 1          # add-child anchor: title area (top)
 WIDGET_ANCHOR_BELOW    = 12         # add-child anchor: centered X, below the previous sibling
 WIDGET_SHOW_ANCHOR     = 6          # show-modal anchor: centered on the parent
+# Native close box + Esc wiring + post-add layout fix (all decompiled from the
+# base CWindow, 2026-07-21):
+# - sub_4038A0 builds the engine's own 13x13 close button (text = glyph 0x18,
+#   the font's X symbol), stores it at window+0x100 and add-childs it with
+#   (anchor 3, 0, x=2, y=2, flags=1). The base set-rect handler (sub_403640)
+#   re-anchors whatever sits at +0x100 to the TOP-RIGHT corner on every
+#   move/resize, so the box stays glued after any window growth. The BASE
+#   command handler (sub_4035F0) closes via vtbl+0x14 when that widget
+#   notifies — an overriding handler (menu_cmd) must do the same compare.
+# - The base key handler (vtable slot 16 = sub_403E40) maps key 27 (Esc) to
+#   "activate the widget at +0x120" and key 13 (Enter) to +0xEC/+0x11C, so
+#   storing the close box at +0x120 gives Esc-close for free (exactly how the
+#   confirm dialog's No button cancels).
+# - Anchor-12 (WIDGET_ANCHOR_BELOW) centers a child against the parent's
+#   CLIENT width AT ADD TIME ((clientW-childW)/2, parent-relative, from
+#   sub_40DB20 case 12), and the add-child growth hook (sub_40E590) only ever
+#   GROWS the window to fit child x2 — a child whose computed x1 went negative
+#   stays clipped off the left edge. Engine dialogs fix positions after adding
+#   (sub_4721B0 uses sub_40D680); the bot menu re-centers every button against
+#   the FINAL client width the same way.
+WIN_ENSURE_CLOSEBOX_VA = 0x4038A0   # __thiscall(ecx=window): create native top-right X close box at +0x100
+WIDGET_SET_XPOS_VA     = 0x40D680   # __thiscall(ecx=widget, x): move to x, keep y/size; ret 4
+WIN_RESIZE_VTBL_OFF    = 0xEC       # vtbl slot 59: resize(this, w, h) keeping origin (sub_40D510); ret 8
+WIN_CLOSE_BOX_OFF      = 0x100      # window+0x100: native close-box button ptr (auto re-anchored top-right)
+WIN_CANCEL_WIDGET_OFF  = 0x120      # window+0x120: widget the base key handler activates on Esc (case 27)
+WIN_RECT_X1_OFF        = 0x04       # widget rect dwords: x1/y1/x2/y2 at +0x04/+0x08/+0x0C/+0x10
+WIN_RECT_Y1_OFF        = 0x08       #   (parent-relative for children; sub_402D80 pre-sizes to the title)
+WIN_RECT_X2_OFF        = 0x0C
+WIN_RECT_Y2_OFF        = 0x10
+WIN_CLIENT_X1_OFF      = 0x14       # client rect dwords: x1/y1/x2/y2 at +0x14/+0x18/+0x1C/+0x20
+WIN_CLIENT_X2_OFF      = 0x1C
+WIN_PAD_X_BYTE_OFF     = 0x78       # signed byte: default x padding used by anchors 1-4 (sub_40DB20)
 
 # --- KERNEL32 IAT slots ----------------------------------------------------
 IMP_CREATEFILEA      = 0x5EA0D4
