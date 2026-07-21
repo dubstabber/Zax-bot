@@ -133,6 +133,15 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 - Bot display names are set on host through `sub_4E1930(*(part+0x1C), name)`.
   PC2 does not reliably see the chosen name because the synthetic DirectPlay
   player-data store is not populated.
+- A spawned bot is announced EXACTLY like a real player joining: the spawn
+  success path mirrors the host-side join handler `sub_5AC230` — CString-slot
+  init (`sub_4DEC90`), `sub_4E09B0(&slot, fmt, name)` sprintf with the LIVE
+  `"%s joined the game"` global CString (`0x71407C`, registered by static
+  initializer `sub_5AC1C0` into the localization-replaceable string list, so
+  translated builds keep their wording), `sub_59B260(text, -1)` broadcast,
+  then release (`sub_4DEFD0`). Falls back to the generic scratch msg when no
+  participant was bound. Constants in the CString block of `addresses.py`;
+  slot = `join_msg_cstr` at the layout tail.
 - Each bot name owns a deterministic `(color1, color2)` pair from
   `BOT_COLORS` in `zaxbot/config/spawn.py`. Coloring is split across two phases:
   - **Pre-spawn** (before `sub_59DF90`): the patch writes the chosen

@@ -45,3 +45,7 @@ def extend_menu(c):
     add('menu_str_blue',   0x14, 'gui: "Add Blue Bot" button label (CTF)')
     add('menu_str_red',    0x14, 'gui: "Add Red Bot" button label (CTF)')
     add('menu_str_close',  0x14, 'gui: "Close" button label')
+    # Spawn join-announce CString slot (lives here only because this block is
+    # the append-only layout tail). Balanced init/free around each spawn's
+    # "%s joined the game" format+broadcast; single-threaded host-side use.
+    add('join_msg_cstr', 0x04, 'spawn: CString slot for the "%s joined the game" announcement')

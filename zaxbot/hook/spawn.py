@@ -71,6 +71,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     used_names_va       = layout.va('used_names')
     msg_va              = layout.va('msg')
     msg_full_va         = layout.va('msg_full')
+    join_msg_cstr_va    = layout.va('join_msg_cstr')
 
     def logc(ch): emit_logc_call(a, logbyte_va, ch)
 
@@ -416,8 +417,37 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xA3' + le32(host_part_va))                       # mov [host_part], eax
     a.label('spawn_skip_host_part')
 
-    # Confirm with on-screen message.
+    # Announce EXACTLY like a real player joining: mirror the host-side join
+    # handler's (sub_5AC230) recipe — format the LIVE "%s joined the game"
+    # global CString (JOIN_FMT_CSTRING_VA; localization-replaceable, so a
+    # translated build shows its translated line) with the bot's picked
+    # nickname, broadcast via sub_59B260(text, -1), release the temp CString.
+    # Falls back to the generic scratch msg if no participant was bound
+    # (picked_name_idx would be stale from an earlier spawn).
     a.raw(b'\xC7\x05' + le32(active_bot_slot_va) + le32(0xFFFFFFFF))
+    a.raw(b'\x83\x3D' + le32(botp_va) + b'\x00')              # cmp [botp], 0
+    a.jz('spawn_msg_generic')
+    a.raw(b'\xB9' + le32(join_msg_cstr_va))                   # ecx = &slot
+    a.call_va(ax.CSTRING_INIT_VA)                             # slot = empty string
+    a.raw(b'\xA1' + le32(picked_name_idx_va))                 # eax = picked idx
+    a.raw(b'\xC1\xE0\x04')                                    # shl eax, 4  (NAME_SLOT_ASCII=16)
+    a.raw(b'\x05' + le32(bot_names_ascii_va))                 # add eax, ascii name table
+    a.raw(b'\x50')                                            # push eax (vararg: name)
+    a.raw(b'\xB9' + le32(ax.JOIN_FMT_CSTRING_VA))             # ecx = &fmt global CString
+    a.call_va(ax.CSTRING_CSTR_VA)                             # eax = live fmt c_str
+    a.raw(b'\x50')                                            # push eax (Format)
+    a.raw(b'\x68' + le32(join_msg_cstr_va))                   # push &slot (dest)
+    a.call_va(ax.CSTRING_SPRINTF_VA)                          # CString sprintf (cdecl)
+    a.raw(b'\x83\xC4\x0C')                                    # add esp, 0xC
+    a.raw(b'\x6A\xFF')                                        # push -1 (type)
+    a.raw(b'\xB9' + le32(join_msg_cstr_va))                   # ecx = &slot
+    a.call_va(ax.CSTRING_CSTR_VA)                             # eax = formatted c_str
+    a.raw(b'\x50')                                            # push eax (text)
+    a.call_va(ax.SHOWMSG_VA)                                  # broadcast (stdcall)
+    a.raw(b'\xB9' + le32(join_msg_cstr_va))                   # ecx = &slot
+    a.call_va(ax.CSTRING_FREE_VA)                             # release, slot = 0
+    a.raw(b'\xC3')                                            # ret
+    a.label('spawn_msg_generic')
     a.raw(b'\x6A\xFF'); a.raw(b'\x68' + le32(msg_va)); a.call_va(ax.SHOWMSG_VA)
     a.raw(b'\xC3')                                            # ret
 

@@ -479,6 +479,28 @@ CWAYPOINTS_POLY_VTABLE_VA   = 0x602B2C
 MAP_NAME_CSTRING_VA         = 0x713C14
 MAP_NAME_ASCII_OFFSET       = 8
 
+# --- CString helpers + the "%s joined the game" announcement ---------------
+# The host-side join handler (sub_5AC230, runs after a real client answers the
+# CD-key challenge) announces a new player with this exact recipe:
+#   sub_4DEC90(&slot)                     ; init a CString SLOT (one dword ->
+#                                         ; shared empty buffer, refcounted)
+#   fmt  = sub_4E13A0(&unk_71407C)        ; c_str of the LIVE format global
+#   sub_4E09B0(&slot, fmt, name_cstr)     ; CString sprintf (CDECL, caller
+#                                         ; cleans: add esp, 0xC for 3 args)
+#   sub_59B260(sub_4E13A0(&slot), -1)     ; broadcast on-screen
+#   sub_4DEFD0(&slot)                     ; release (NULL-safe, slot = 0)
+# `unk_71407C` is a global CString registered by the static initializer
+# sub_5AC1C0 with the English "%s joined the game" (string at 0x626000) into
+# the localization-replaceable string list (sub_501030 registrar), so reading
+# it LIVE at runtime — not hardcoding the English text — keeps a translated
+# build's wording. The bot spawn path mirrors this recipe verbatim so a bot
+# joining prints exactly what a real player joining prints.
+CSTRING_INIT_VA             = 0x4DEC90  # __thiscall(ecx=&slot): slot = empty string
+CSTRING_FREE_VA             = 0x4DEFD0  # __thiscall(ecx=&slot): release, slot = 0
+CSTRING_CSTR_VA             = 0x4E13A0  # __thiscall(ecx=&slot) -> char* (buf+8 / "")
+CSTRING_SPRINTF_VA          = 0x4E09B0  # cdecl(&dest_slot, char* fmt, ...) sprintf
+JOIN_FMT_CSTRING_VA         = 0x71407C  # global CString: "%s joined the game" (live/localized)
+
 # --- Overlay rendering -----------------------------------------------------
 # `*(RENDERER_OWNER_VA + 4)` is the CGraphics* renderer (vtable off_5FF360,
 # set up by sub_567990 inside the CGame ctor at sub_4CD780:0x4cd946). Its
