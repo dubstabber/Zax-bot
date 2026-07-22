@@ -497,6 +497,10 @@ ignore this knob (they skip `apply_lead` unconditionally).
 - Combat strafe weave: fighting bots add an alternating perpendicular
   component to their movement (per-bot enemy vector stamped by the fire
   scan), dodging across the line of fire instead of bobbing along it.
+- Need-gated pickups: the goody item scan skips filler categories the bot
+  doesn't need — full health ignores health items, and the engine's own
+  pickup-useful predicates gate energy/shield blobs (a bot with no shield
+  carried, or a full one, ignores shield pickups entirely).
 
 ## Still open
 

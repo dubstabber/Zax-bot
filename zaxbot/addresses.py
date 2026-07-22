@@ -259,7 +259,30 @@ CDAMAGE_RADIUS_AI_ACCESSOR_VA = 0x4764A0  # () -> dword_6BD74C (lazy init)
 # hazard avoidance: when cur_damage increases between frames the bot took
 # damage from SOMETHING (lava, fire, weapon, etc.) and we force an immediate
 # wander retarget. Source: sub_48C380 (CEntityDestructable schema init).
+# Companions (IDA 2026-07-22): sub_48D030(char) = CURRENT health
+# (max - cur_damage, clamped >= 0), sub_48D150(char) = MAX health (model
+# proto + 0x20) — so "full health" is simply cur_damage bits == 0 (the
+# float is never negative).
 CHAR_CUR_DAMAGE_OFF = 0x7C
+
+# --- Filler-pickup "would benefit" predicates (need-gated goody pursuit) ---
+# The engine's own per-class pickup-useful checks, vtable slot 32 on the
+# pickup item classes (all __stdcall(char), ret 4, AL = 1 iff the pickup
+# would help; NULL-guarded + is-a-character-guarded; callee-saved regs
+# preserved — verified in disasm). Both walk the char's inventory BY CLASS
+# via sub_4267E0 + sub_425860(inv, class_desc):
+#   SUB_BATTERY_NEED_VA — CBatteryChargeInventoryItem (vtbl 0x604538[32]):
+#     1 iff a carried CBatteryInventoryItem exists AND its live charge
+#     (item+0x18 float) < capacity (*(float*)(sub_4DD480(item)+0x4C)).
+#     No battery carried -> 0 (the pickup would do nothing).
+#   SUB_SHIELD_NEED_VA — CShieldChargeInventoryItem (vtbl 0x5FFE18[32]):
+#     same shape over CShieldInventoryItem — NO SHIELD CARRIED -> 0 (a
+#     shield blob can't help a bot without a shield), full shield -> 0.
+# (CHealthItem's slot-32 equivalent, sub_5AF3A0, is __thiscall and needs an
+# item instance for its "storable" flag; the health need test reduces to
+# cur_damage != 0, so the patch reads char+0x7C directly instead.)
+SUB_BATTERY_NEED_VA = 0x5B06E0
+SUB_SHIELD_NEED_VA  = 0x56F710
 
 # --- Plasma "Plasma Ground" lava system (CPlasmaTileMap) -------------------
 # Lava on molten maps is a CPlasmaTileMap: a 64px tile grid with two embedded

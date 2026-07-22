@@ -115,6 +115,21 @@ SK_PILE_TTL_FRAMES = 2700
 # same kind simply takes it.
 ITEM_PURSUIT_ENABLED = True
 ITEM_PURSUE_RADIUS_SQ = 250.0 * 250.0
+# NEED GATE (user-reported greed, 2026-07-22: "if the bot has full health it
+# should ignore health items", same for shield/energy, and "no shield at all
+# -> ignore shield blobs entirely"): before every goody item scan the
+# follower refreshes goody_need_mask (bit0 health / bit1 energy / bit2
+# shield) from the bot's LIVE state, and the scan skips categories whose
+# bit is clear — so un-needed fillers are never latched, and a latched
+# category whose need disappears mid-route (topped up by another pickup)
+# resolves to no target and unlatches cleanly. The tests are the ENGINE'S
+# OWN pickup-useful predicates, not re-derived rules: health =
+# cur_damage(char+0x7C) != 0; energy = SUB_BATTERY_NEED_VA (carried battery
+# charge < capacity; no battery -> no need); shield = SUB_SHIELD_NEED_VA
+# (carried shield charge < capacity; NO SHIELD CARRIED -> NO NEED — the
+# exact "don't target shield blobs without a shield" rule). Off -> the old
+# opportunistic-always behaviour.
+ITEM_NEED_GATE_ENABLED = True
 # After grabbing (or failing) an item divert, no new goody latch for this
 # many thinks (~5 s) — also spaces out revisits to a consumed anchor.
 ITEM_GRAB_COOLDOWN_FRAMES = 300

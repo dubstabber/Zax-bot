@@ -1053,10 +1053,10 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     mislabelled a bot standing just past the doorway as not-crossed and
     walked it back INTO the closed door (2026-07-20 snapshots, part of the
     self-closing-door shuttle). Degenerate dot <= 0 (bot exactly on the door
-    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~1.4 KB
-    below `SCRATCH_OFF` (hook_entry_size 43589 of 45056 after the bot-menu,
-    CTF role/standoff, enemy-carrier chase, route-lane and combat-strafe
-    layers; the boundary sits at 0xB000 with the section
+    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~1.3 KB
+    below `SCRATCH_OFF` (hook_entry_size 43705 of 45056 after the bot-menu,
+    CTF role/standoff, enemy-carrier chase, route-lane, combat-strafe and
+    pickup need-gate layers; the boundary sits at 0xB000 with the section
     at 0x28000). When it runs low again, bump
     `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
@@ -1255,7 +1255,24 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     (1 = pile, 2+cat = filler). ENTRY is opportunistic (piles within
     `SK_PILE_PURSUE_RADIUS_SQ` in SK, fillers within
     `ITEM_PURSUE_RADIUS_SQ` in any mode, shared per-bot cooldown; a CTF
-    drop pursuit outranks). Each think the live target is RE-RESOLVED as
+    drop pursuit outranks) but NEED-GATED for fillers
+    (`cfg.ITEM_NEED_GATE_ENABLED`, built 2026-07-22 from the user's greed
+    report): `goody_update_need` refreshes `goody_need_mask` (bit0
+    health / bit1 energy / bit2 shield) once per goody think from the
+    bot's LIVE state, and the item scan skips clear-bit categories.
+    The tests are the ENGINE'S OWN pickup-useful predicates, not
+    re-derived rules — health: `cur_damage(char+0x7C) != 0` (float never
+    negative, bits==0 iff full; `sub_48D030/48D150` = cur/max health
+    confirm the reduction); energy: `SUB_BATTERY_NEED_VA` (0x5B06E0,
+    CBatteryChargeInventoryItem vtbl slot 32 — carried battery charge
+    item+0x18 < capacity def+0x4C, NO battery -> no need); shield:
+    `SUB_SHIELD_NEED_VA` (0x56F710, same shape over
+    CShieldInventoryItem — NO SHIELD CARRIED -> NO NEED, the exact
+    "don't target shield blobs without a shield" rule, full -> no need).
+    Both are `__stdcall(char) ret 4`, NULL+is-a-guarded, callee-saved
+    preserved. A latched category whose need vanishes mid-route (topped
+    up on the way) resolves to no target and unlatches cleanly. Each
+    think the live target is RE-RESOLVED as
     the nearest pile / nearest item of the latched category, so a category
     descent that reaches a closer same-kind item takes it. ROUTED phase:
     `sk_next_hop`'s kind row-select descends the matching field at each
@@ -1405,6 +1422,9 @@ Older emitted labels or disabled detours are not active unless they appear in
 | `CTouchingPolygonTriggerAI vtbl = 0x5EDC20` / `CTouchingOvalTriggerAI = 0x5EDB58` | touch-trigger volumes (Enter Action @+0x20, Exit @+0x24, Repeat @+0x28; "Triggered By" filter bytes @+0x10..+0x14). Portals can be a trigger's Enter Action OR a script/event-driven `CTeleportAction` referenced by name — hence runtime execute-hooking instead of per-map structure walking. |
 | `sub_4FB0A0` | `__thiscall(char/entity, &out_pos)` world-position getter, `ret 4` |
 | `sub_426860` | `__usercall(ECX=char, EDX=item-def KEY) -> EAX carried count` — the engine's own carried-mineral getter (walks `char->vtbl[+0x90]()` inventory, matches `sub_482DE0(item) == key`, returns `item->vtbl[+0xA4]()`); preserves ebx/esi/edi/ebp |
+| `sub_48D030` / `sub_48D150` | `__thiscall(char) -> double` current / max health (cur = max − cur_damage@+0x7C clamped ≥ 0; max = model proto + 0x20) — so "full health" reduces to `[char+0x7C]` bits == 0 |
+| `sub_5B06E0` / `sub_56F710` | pickup-USEFUL predicates (`__stdcall(char) ret 4`, AL=1): energy (carried CBatteryInventoryItem charge item+0x18 < capacity def+0x4C) / shield (same over CShieldInventoryItem; none carried ⇒ 0). Vtbl slot 32 of the charge-pickup classes (0x604538 / 0x5FFE18); NULL+is-a-guarded, callee-saved preserved. Consumed by `goody_update_need` |
+| `sub_425860` | `__thiscall(inventory, class_desc) -> item*` — find carried inventory item BY CLASS descriptor (the by-class sibling of the by-def-key `sub_426860`) |
 | `sub_591FC0(dword_6C0C08, "Ore Deposits"/"Crystals", -1)` | the item-def KEY resolve the SK stats sync (`sub_5616B0`) makes and caches in `dword_713160`/`dword_71315C`; `load_sk` mirrors it per match into `sk_def_ore`/`sk_def_crystal` (engine strings at `0x60B7D4`/`0x60B7C8`) |
 | `sub_561AB0` | `CSalvageKingScoreMineralsAction` per-target apply: consumes the toucher's WHOLE mineral load, `stats+0xF6 += OrePointsValue(+0xC8)*ore + CrystalPointsValue(+0xCC)*crystals`, checks the score limit. NO ownership check here — ownership is the map-script `CIsOnSameTeamAction` gate (toucher entity team `+0x24` == bin part `Team Number` == `NN-1`) |
 | `sub_5A6E60` | `CDropAllOreAndCrystalsAction` per-target apply (`this`=ECX, victim at `[esp+8]`, `ret 0x10`; prologue `83 EC 10 53 55 56`): spawns the UNNAMED death pile (clone of the `Ore_Crystals01` model template, placed within 500 px via `sub_4EB7B0`) holding the victim's whole load; bails when nothing carried. Detoured for pile self-registration |
@@ -1481,9 +1501,10 @@ Older emitted labels or disabled detours are not active unless they appear in
   by the graph-routed GOODY pursuit layer (see its bullet in "Current
   state"), which also gave every mode an opportunistic graph-safe filler
   divert (health/energy/shield); per-run deposit thresholds randomize in
-  [30, 100]. Candidate refinements: prefer crystals (3× points) when zones
-  tie; NEED-gated filler pursuit (read bot health/energy/shield instead of
-  opportunistic-always); SK-aware fire/aim target priority (attack carriers
+  [30, 100]. NEED-gated filler pursuit is DONE (2026-07-22; see the goody
+  Behavior bullet — engine-native pickup-useful predicates gate the item
+  scan per category). Candidate refinements: prefer crystals (3× points)
+  when zones tie; SK-aware fire/aim target priority (attack carriers
   near their bin).
 - Portal routing — DONE for build-time-resolvable destinations (see the
   portal-routing bullet in "Current state"): pads are directed BFS edges, CTF

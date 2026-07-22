@@ -526,6 +526,14 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
         a.raw(b'\x89\x04\x8D' + le32(bot_pile_cd_va))
         a.jmp('s542360_gd_done')
         a.label('s542360_gd_cd0')
+        if (cfg.ITEM_NEED_GATE_ENABLED
+                and layout.has_field('goody_need_mask')):
+            # Refresh the pickup-need mask (health/energy/shield bits from
+            # the bot's live state — the engine's own pickup-useful
+            # predicates) before this think's entry/resolve scans consult
+            # it. The helper clobbers ecx; reload slot.
+            a.call_lbl('goody_update_need')
+            a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))    # ecx = slot (reload)
         a.raw(b'\x8B\x04\x8D' + le32(bot_pile_target_va)) # eax = kind (0 = none)
         a.raw(b'\x85\xC0'); a.jnz('s542360_gd_have')
         if drop_move:
