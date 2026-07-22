@@ -364,6 +364,12 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
             a.jnz('s542360_wp_no_sww')                   # cooling down -> no roll
             a.raw(b'\x83\x3C\x9D' + le32(bot_switch_target_va) + b'\x00')
             a.jnz('s542360_wp_no_sww')                   # already latched
+            if (cfg.CTF_CARRIER_ESCAPE_ENABLED
+                    and layout.has_field('bot_carry')):
+                # Carrier ESCAPE priority: no opportunistic switch presses
+                # while carrying (a needed door still comes via routing).
+                a.raw(b'\x83\x3C\x9D' + le32(layout.va('bot_carry')) + b'\x00')
+                a.jnz('s542360_wp_no_sww')               # carrying -> no roll
             a.raw(b'\x51')                               # push cur (ecx)
             a.raw(b'\x52')                               # push prev (edx)
             a.call_lbl('switch_wander_check')            # eax = switch idx+1 or 0 (in: ecx=cur)

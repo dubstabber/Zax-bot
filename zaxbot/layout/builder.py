@@ -7,9 +7,9 @@ are pre-seeded to ``None``.
 
 from types import SimpleNamespace
 
-from . import (chase, core, door, entity_scan, fight, flag, lane, lava, menu,
-               movement, need, pickup, portal, role, sk, switch, waypoints,
-               wedge)
+from . import (carry, chase, core, door, entity_scan, fight, flag, lane, lava,
+               menu, movement, need, pickup, portal, role, sk, switch,
+               waypoints, wedge)
 from .model import ScratchLayout
 
 
@@ -122,6 +122,7 @@ def build_scratch_layout(
     fight.extend_fight(c)
     lane.extend_lane(c)
     need.extend_need(c)
+    carry.extend_carry(c)
 
     c.fields.extend(c.overlay_fields)
     return ScratchLayout(base_va, scratch_size, c.fields)

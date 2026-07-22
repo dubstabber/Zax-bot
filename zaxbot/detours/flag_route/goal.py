@@ -50,6 +50,11 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     a.raw(b'\x83\x3C\x8D' + le32(route_suspend_va) + b'\x00')   # suspended?
     a.jz('cpg_not_suspended')
     a.raw(b'\xC7\x05' + le32(route_carry_va) + le32(0))         # keep global fresh
+    if layout.has_field('bot_carry'):
+        # Keep the per-bot mirror fresh on this early-out too (a suspended
+        # carrier still reads as non-carrying here — the suspension roam
+        # deliberately parks ALL routing behaviour, escape gating included).
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_carry')) + le32(0))
     a.jmp('cpg_done')
     a.label('cpg_not_suspended')
     # carrying? -> route_carry (live-verified inventory-group test)
@@ -68,6 +73,13 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     a.label('cpg_carry_done')
     # team -> ebx (no engine calls after here)
     a.raw(b'\x8B\x0D' + le32(bot_slot_va))                     # ecx = slot
+    if layout.has_field('bot_carry'):
+        # Per-bot carry mirror for consumers that run BEFORE this bot's cpg
+        # in the think (strafe weave, goody entry — the carrier ESCAPE
+        # gates). The route_carry GLOBAL is only fresh for the last bot
+        # that ran cpg; the mirror is at worst one think stale per bot.
+        a.raw(b'\xA1' + le32(route_carry_va))                  # eax = carry (0/1)
+        a.raw(b'\x89\x04\x8D' + le32(layout.va('bot_carry')))  # bot_carry[slot] = eax
     a.raw(b'\x8B\x1C\x8D' + le32(bot_team_va))                 # ebx = bot_team[slot]
     a.raw(b'\x8B\x0D' + le32(flag_count_va))                   # ecx = flag_count
     a.raw(b'\x83\xF9' + bytes([RMAX]))                         # cmp ecx, RMAX

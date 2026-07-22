@@ -63,6 +63,13 @@ def _emit_normalize_and_emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot (reload)
         a.raw(b'\x83\x3C\x8D' + le32(bot_enemy_near_va) + b'\x00')
         a.jz('s542360_strafe_done')                       # no enemy near
+        if (cfg.CTF_CARRIER_ESCAPE_ENABLED
+                and layout.has_field('bot_carry')):
+            # Carrier ESCAPE priority: a flag carrier beelines home at full
+            # effective speed instead of the ~26%-slower dodge weave (it
+            # still shoots — fire targeting is independent of movement).
+            a.raw(b'\x83\x3C\x8D' + le32(layout.va('bot_carry')) + b'\x00')
+            a.jnz('s542360_strafe_done')                  # carrying -> no weave
         a.raw(b'\x8B\x04\x8D' + le32(stuck_count_va))     # sweep engaged?
         a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES]))
         a.jae('s542360_strafe_done')

@@ -596,6 +596,28 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     contiguous tail block (`layout/role.py`; df90 clears it with one
     rep-stosd — contiguity pinned in tests) + the `tag_role` R-chunk dumps
     it whole.
+- Carriers ESCAPE, they don't fight (`cfg.CTF_CARRIER_ESCAPE_ENABLED`;
+  built 2026-07-22, user-requested "the carrier who just stole the flag
+  should be more engaged in returning/escaping than in fighting"):
+  while `bot_carry[slot]` is set — a per-bot mirror of `ctf_pick_goal`'s
+  live carry test, written per think (the `route_carry` GLOBAL is fresh
+  only for whichever bot ran cpg last, and the consumers below run BEFORE
+  this bot's cpg in the think; one-think staleness is fine), cleared on
+  respawn, match change and the suspension early-out — the carrier:
+  skips the combat strafe WEAVE (beeline home at full effective speed
+  instead of the ~26%-slower dodge dance; it still shoots — fire is
+  independent of movement), takes NO goody diverts (a damaged carrier
+  must not detour to health packs mid-escape; an existing latch is
+  dropped once via gd_clear the think the flag is grabbed — the
+  latched-check before the jump is load-bearing, an unconditional clear
+  would reset the node watchdog every think and starve the wall-slide),
+  and makes NO roam switch wander-bumps (roll skipped, an in-progress
+  press handed over). Deliberately KEPT for carriers: the dropped-flag
+  pursuit (returning its own dropped flag unlocks the capture), the
+  wall-slide/wedge/door/pad machinery (they ARE the escape), the
+  fight-stall suspension skip, and the standoff tether (escape-to-base
+  applies whether the home flag is present or not). DM/SK untouched
+  (mirror stays 0 outside CTF).
 - ATTACKER ROUTE-LANE SPLIT (`cfg.CTF_LANE_SPLIT_ENABLED`; built
   2026-07-22, live pass pending — the "not all attackers down the same
   corridor" layer): the deterministic BFS descent sent every attacker down
@@ -1053,11 +1075,11 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     mislabelled a bot standing just past the doorway as not-crossed and
     walked it back INTO the closed door (2026-07-20 snapshots, part of the
     self-closing-door shuttle). Degenerate dot <= 0 (bot exactly on the door
-    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~1.3 KB
-    below `SCRATCH_OFF` (hook_entry_size 43705 of 45056 after the bot-menu,
-    CTF role/standoff, enemy-carrier chase, route-lane, combat-strafe and
-    pickup need-gate layers; the boundary sits at 0xB000 with the section
-    at 0x28000). When it runs low again, bump
+    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~1.2 KB
+    below `SCRATCH_OFF` (hook_entry_size 43828 of 45056 after the bot-menu,
+    CTF role/standoff, enemy-carrier chase, route-lane, combat-strafe,
+    pickup need-gate and carrier-escape layers; the boundary sits at 0xB000
+    with the section at 0x28000). When it runs low again, bump
     `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
     `flag_routing_active`) was added for diagnosing route commitment.

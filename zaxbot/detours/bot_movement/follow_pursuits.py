@@ -526,6 +526,20 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
         a.raw(b'\x89\x04\x8D' + le32(bot_pile_cd_va))
         a.jmp('s542360_gd_done')
         a.label('s542360_gd_cd0')
+        if (cfg.CTF_CARRIER_ESCAPE_ENABLED
+                and layout.has_field('bot_carry')):
+            # Carrier ESCAPE priority: no goody diverts while carrying — a
+            # damaged carrier must not detour to health packs mid-escape.
+            # An existing latch (flag grabbed mid-divert) is dropped ONCE
+            # via gd_clear (which also resets the node watchdog); when
+            # nothing is latched the whole block is skipped so the resets
+            # cannot run every think and starve the wall-slide.
+            a.raw(b'\x83\x3C\x8D' + le32(layout.va('bot_carry')) + b'\x00')
+            a.jz('s542360_gd_nocarry')
+            a.raw(b'\x83\x3C\x8D' + le32(bot_pile_target_va) + b'\x00')
+            a.jz('s542360_gd_done')                       # nothing latched -> skip
+            a.jmp('s542360_gd_clear')                     # latched -> unlatch once
+            a.label('s542360_gd_nocarry')
         if (cfg.ITEM_NEED_GATE_ENABLED
                 and layout.has_field('goody_need_mask')):
             # Refresh the pickup-need mask (health/energy/shield bits from
@@ -730,6 +744,12 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
         if chase_move:
             # An enemy-carrier chase also outranks the bump.
             a.raw(b'\x83\x3C\x8D' + le32(bot_chase_flag_va) + b'\x00')
+            a.jnz('s542360_sww_clear')
+        if (cfg.CTF_CARRIER_ESCAPE_ENABLED
+                and layout.has_field('bot_carry')):
+            # Carrier ESCAPE priority: hand over an in-progress press the
+            # think the flag is grabbed (no cooldown — the bump never ran).
+            a.raw(b'\x83\x3C\x8D' + le32(layout.va('bot_carry')) + b'\x00')
             a.jnz('s542360_sww_clear')
         a.raw(b'\x48')                                    # eax = switch idx
         a.raw(b'\x3B\x05' + le32(switch_count_sw_va))     # stale idx (map change)?

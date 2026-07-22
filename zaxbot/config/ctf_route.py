@@ -119,6 +119,25 @@ CTF_DEFEND_RADIUS_PCT = 30
 # Lower clamp for tiny/degenerate maps, in the same quanta (16 = ~256 px).
 # Must stay <= 127 (imm8 compare in the builder).
 CTF_DEFEND_RADIUS_MIN = 16
+# --- Carrier ESCAPE priority ----------------------------------------------
+# A bot carrying a flag prioritizes RUNNING (to its base — the goal/standoff
+# machinery already points it there whether its own flag is home or not)
+# over every combat/opportunistic movement behaviour (user-requested
+# 2026-07-22: "the carrier who just stole the flag should be more engaged
+# in returning/escaping than in fighting"). While bot_carry[slot] is set
+# (per-bot mirror of ctf_pick_goal's live carry test):
+#   * NO combat strafe weave — beeline at full effective speed instead of
+#     the ~26%-slower dodge dance (it still shoots; fire is independent).
+#   * NO goody diverts (health/energy/shield/pile latches) — a damaged
+#     carrier stops detouring to health packs mid-escape; an existing
+#     latch is dropped the think the flag is grabbed.
+#   * NO roam switch wander-bumps (an existing press is handed over).
+# The dropped-flag pursuit stays ON for carriers (touching its own dropped
+# flag returns it — that unlocks the capture), as do the wall-slide,
+# wedge, door and pad machinery (they ARE the escape). The mirror is
+# written per think by ctf_pick_goal, cleared on respawn and match change;
+# in DM/SK it stays 0, so nothing changes outside CTF.
+CTF_CARRIER_ESCAPE_ENABLED = True
 # --- Attacker route-lane split --------------------------------------------
 # With several attackers per team, the deterministic BFS descent sent them
 # all down the IDENTICAL shortest path — a single-file conga line

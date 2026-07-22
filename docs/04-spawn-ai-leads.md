@@ -501,6 +501,10 @@ ignore this knob (they skip `apply_lead` unconditionally).
   doesn't need — full health ignores health items, and the engine's own
   pickup-useful predicates gate energy/shield blobs (a bot with no shield
   carried, or a full one, ignores shield pickups entirely).
+- Carrier escape priority: a flag carrier beelines to its base (whether
+  its own flag is home or not) — no strafe weave, no goody diverts, no
+  switch bumps while carrying; it still shoots and still returns its own
+  dropped flag.
 
 ## Still open
 

@@ -109,6 +109,8 @@ def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
     if layout.has_field('bot_chase_flag'):
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_chase_flag')) + le32(0))  # drop carrier chase
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_chase_cd')) + le32(0))    # fresh chase cooldown
+    if layout.has_field('bot_carry'):
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_carry')) + le32(0))  # a respawn carries nothing
     if layout.has_field('bot_sk_return'):
         # Fresh SK phase state: a respawned bot carries nothing (the death
         # drop consumed the load), so it starts in COLLECT with clean

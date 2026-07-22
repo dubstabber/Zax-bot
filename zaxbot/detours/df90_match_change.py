@@ -116,6 +116,13 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xA3' + le32(layout.va('chase_node') + 4))
         a.raw(b'\xA3' + le32(layout.va('chase_root')))
         a.raw(b'\xA3' + le32(layout.va('chase_root') + 4))
+    # Per-bot carry mirror (carrier escape gates) — stale carriers from the
+    # last match must not suppress strafe/goody behaviour in the next one.
+    if layout.has_field('bot_carry'):
+        a.raw(b'\xBF' + le32(layout.va('bot_carry')))  # mov edi, bot_carry
+        a.raw(b'\xB9' + le32(cfg.MAX_BOT_SLOTS))       # ecx = 16
+        a.raw(b'\x31\xC0')                             # xor eax, eax
+        a.raw(b'\xF3\xAB')                             # rep stosd
     # Once we've pre-grown mgr+0x290 to 16 entries (match 1 onwards), the
     # buffer outlives the match: slots populated by match N can still hold
     # freed char pointers at the start of match N+1. Per-frame fire/aim
