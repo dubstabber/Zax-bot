@@ -21,17 +21,18 @@ For `.text`, `file_off = VA - 0x401000 + 0x1000`.
 The patcher appends a new section instead of overwriting free space in existing
 sections.
 
-Current values from `zaxbot/config.py`:
+Current values from `zaxbot/config/base.py` (the section has grown several
+times; AGENTS.md tracks the growth history and the remaining code headroom):
 
 | item | value |
 |---|---:|
 | name | `.zaxbot` |
 | RVA / VA | `0x31A000` / `0x71A000` |
 | raw file offset | `0x231000` |
-| size | `0x18000` bytes |
+| size | `0x28000` bytes |
 | characteristics | `0xE0000020` (`CODE | EXEC | READ | WRITE`) |
 | code start | `0x71A000` |
-| scratch start | `0x723000` (`SCRATCH_OFF = 0x9000`) |
+| scratch start | `0x725000` (`SCRATCH_OFF = 0xB000`) |
 
 The IDB is for the original image, so `.zaxbot` bytes must be inspected from
 `Zax.exe` at raw offset `0x231000`.
@@ -44,7 +45,8 @@ The IDB is for the original image, so `.zaxbot` bytes must be inspected from
 - `zaxbot/build.py` and `zaxbot/pe.py` - append section and apply redirects.
 - `zaxbot/hook/entry.py` - emits the `.zaxbot` section.
 - `zaxbot/patch_manifest.py` - enabled original-image redirects.
-- `zaxbot/layout.py` - named scratch fields.
+- `zaxbot/layout/` - named scratch fields (per-feature block modules behind
+  `builder.py`; `zaxbot/config/` holds the per-feature knob modules).
 
 The patcher copies `Zax.exe.bak` to `Zax.exe` first, builds the full patched
 image, writes it back, and prints the hook/scratch/detour VAs.

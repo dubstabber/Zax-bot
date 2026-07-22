@@ -84,16 +84,18 @@ loop), making bots first-class activation sources. CE-verified live: the
 engine's rect array immediately tracked the roaming bot.
 
 Current team behavior:
-- DM and SK are both free-for-all (SK gives every player their own collector
-  base with a per-player color). Each bot gets `slot + 0x10` (16..31) as a
+- DM and SK are both free-for-all. A DM bot gets `slot + 0x10` (16..31) as a
   unique team value — high enough to avoid colliding with real players
   (host=0, PC2=1, observed in snapshots) so `sub_51D400` doesn't mis-label
   bot kills as "TEAMMATE", and still unique per bot so the engine's
-  spawn-picker doesn't cluster them.
-- CTF is the only team mode. The dispatcher's digit '1'/'2' map to team `0`
-  (Blue) / `1` (Red) — stored 0-indexed after subtracting `'1'`. Mode is
-  resolved via `sub_59FF90(ecx=mgr)`, whose return's `[+0]` vtable matches
-  `VT_DM_VA`/`VT_CTF_VA`/`VT_SK_VA`.
+  spawn-picker doesn't cluster them. An SK bot instead gets `botidx` —
+  unique AND inside `[0, MaxPlayers)`, the valid range for per-player
+  collector ownership (an out-of-range id made every bot share one
+  collector; see the mode bullet in AGENTS.md).
+- CTF is the only team mode. The B-key bot menu's "Add Blue Bot" / "Add Red
+  Bot" buttons set `chosen_team` to `0` (Blue) / `1` (Red) verbatim (the
+  old digit-key prompt is gone). Mode is resolved via `sub_59FF90(ecx=mgr)`,
+  whose return's `[+0]` vtable matches `VT_DM_VA`/`VT_CTF_VA`/`VT_SK_VA`.
 
 ## Per-character appearance (colors)
 

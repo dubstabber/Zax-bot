@@ -4,8 +4,10 @@ Goal: let the **host** of a multiplayer match add bot participants to
 *Zax: The Alien Hunter* by runtime-patching the original `Zax.exe`.
 
 Current control path:
-- **B** opens the bot menu in a hosted MP match.
-- A digit selects the spawn/team option for the current mode.
+- **B** opens the graphical bot menu in a hosted MP match (engine-native
+  widget dialog): DM/SK show **Add Bot**, CTF shows **Add Blue Bot** /
+  **Add Red Bot**, plus **Close** (Esc / the X box also close). The menu
+  stays open so several bots can be added.
 - **R** appends a diagnostic runtime snapshot to `zax_dump.bin`; it does not spawn.
 - **O** toggles the visual waypoint graph in a live MP match.
 
@@ -66,13 +68,18 @@ character. The bot is a real participant: it appears on the scoreboard, has a
 visible character, takes damage, can be killed, registers kills, and is broadcast
 to a second PC.
 
-Current limitations:
+Behavior summary (AGENTS.md "Current state" is the authoritative,
+detailed map — this is the short version):
 - `detect_mode` calls the engine's `sub_59FF90` getter and reads `[result+0]`
-  to resolve DM, CTF, and Salvage King. CTF (the only team mode) supports
-  picking the bot's team via digit `'1'`/`'2'`; DM and SK both spawn one
-  free-for-all bot per `'1'` press. CTF bots now route to the enemy base,
-  grab the flag, return to their own base, and capture even when the host is
-  far away. SK objective behavior is still absent.
+  to resolve DM, CTF, and Salvage King. CTF teams are picked with the menu's
+  Add Blue/Red buttons; DM and SK spawn free-for-all bots. CTF bots route to
+  the enemy base, grab the flag, return, and capture even when the host is
+  far away — with alternating attacker/defender roles, per-team route lanes,
+  an enemy-carrier chase, a carrier escape priority (no weave/diverts while
+  carrying) and a near-base standoff when their own flag is away. SK bots
+  execute the mode goal (collect minerals, deposit at their own bin, steal
+  death piles). All modes share the dodge weave in fights and need-gated
+  health/energy/shield pickup diverts.
 - Bots navigate with `detour_542360`: if a saved `waypoints/<map>.zwpt` graph
   is loaded they steer **straight at the current node**, advance along real
   edges to a **random connected neighbour** (so they roam the whole graph), and
@@ -105,10 +112,13 @@ Current limitations:
   If an attacker sees the enemy flag absent, it randomly chooses a stable
   temporary policy for that missing-flag episode: random waypoint roaming to
   search, or continuing to route toward the missing flag's base to wait nearby.
-  If a carrier's own home flag is absent, it always searches instead of routing
-  into the empty home base. The policy clears once that flag is present again or
-  the bot switches goals. Routing to a live dropped flag position is still
-  future work.
+  A carrier whose own home flag is absent standoff-tethers near its base
+  (route home beyond the map-scaled defend radius, roam inside it) instead of
+  routing into the empty home base. The policy clears once that flag is
+  present again or the bot switches goals. DROPPED flags are a real pursuit
+  target: the periodic scan name-matches the dropped world copy, binds it to
+  a graph node, and latched bots graph-route to it (straight steer only
+  close-in) — see the dropped-flag bullet in AGENTS.md.
 - The page-flip hook keeps far bots simulated and also force-ticks the cached
   exact-anchor base entities while a carrier is at home and `flag_present[home]`
   is true; this was required because the engine camera-gates the base
@@ -181,10 +191,13 @@ Current limitations:
   whenever any door flips state, so a bot pinned at one closed path actively
   reroutes the moment an alternative opens, and falls back to the full field
   (walk at the door) when the goal is unreachable otherwise. Switch-seeking
-  (using CollideTriggerAI wall switches) remains future work.
-- Bots can fire/aim at the host within range and line of sight via `detour_5436F0`.
-  `zaxbot/config.py` can force newly spawned bots to equip a selected debug
-  inventory item name so projectile lead tuning can be tested without bot movement.
+  (CollideTriggerAI wall switches) ships too: sealed or shortcut-blocked
+  routed bots seek the best reachable door-opening switch and bump it, and
+  goal-less roamers occasionally press adjacent blocked switches.
+- Bots can fire/aim at targets within range and line of sight via
+  `detour_5436F0`, with per-weapon projectile-speed lead prediction.
+  `zaxbot/config/spawn.py` can force newly spawned bots to equip a selected
+  debug inventory item name so lead tuning can be tested in isolation.
 - Host-side bot names are set after spawn; PC2 still does not reliably see the
   chosen name because the synthetic DirectPlay player-data store is not populated.
 
