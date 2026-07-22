@@ -305,6 +305,26 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         emit_chunk(layout.va('tag_wedge'),
                    b'\xB8' + le32(layout.va('wpfn_excl')),
                    wedge_dump_len, 'snap_skip_wedge')
+    # CTF role state: per-bot attacker/defender roles, the per-team spawn
+    # counters and the per-base defend radii — one R press pins which bots
+    # are defenders and how large the map-derived patrol zone came out.
+    # The three fields are contiguous by layout construction (role.py).
+    if layout.has_field('tag_role') and layout.has_field('bot_role'):
+        role_dump_len = (layout.field('defend_radius').end
+                         - layout.field('bot_role').offset)
+        emit_chunk(layout.va('tag_role'),
+                   b'\xB8' + le32(layout.va('bot_role')),
+                   role_dump_len, 'snap_skip_role')
+    # Enemy-carrier chase state: shared per-flag sighting intel (pos, bound
+    # node, TTL, row root) + per-bot latches/cooldowns + the scan/dsq temps
+    # — one R press pins who is chasing what and why. Contiguous by layout
+    # construction (chase.py); the BFS rows after the tag are excluded.
+    if layout.has_field('tag_chase') and layout.has_field('chase_pos'):
+        chase_dump_len = (layout.field('chase_dsq_tmp').end
+                         - layout.field('chase_pos').offset)
+        emit_chunk(layout.va('tag_chase'),
+                   b'\xB8' + le32(layout.va('chase_pos')),
+                   chase_dump_len, 'snap_skip_chase')
     # Goody pursuit state: item field gate/count, the per-think resolved
     # target (tx/ty/node/idx), scan inputs, radius knobs, pile dirty flag +
     # node binds — one R press pins what a latched bot is chasing and why.

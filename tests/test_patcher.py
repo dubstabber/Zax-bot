@@ -1206,6 +1206,234 @@ class SwitchWanderTests(unittest.TestCase):
         self.assertFalse(layout.has_field('switch_wander_chance'))
 
 
+class CtfRoleTests(unittest.TestCase):
+    """CTF attacker/defender role scratch invariants + the map-size-derived
+    defender patrol radius on the shipped graphs.
+
+    The `role` snapshot chunk dumps bot_role .. defend_radius as ONE
+    contiguous range and detour_df90 clears the same range with ONE rep
+    stosd — both rely on the physical ordering in layout/role.py.
+    """
+
+    def _layout(self, flag_route_max=None):
+        return build_scratch_layout(
+            zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA + zax_patch.SCRATCH_OFF,
+            zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF,
+            zax_patch.NUM_BOT_NAMES,
+            zax_patch.NAME_SLOT_SIZE,
+            zax_patch.NAME_SLOT_ASCII,
+            cfg.WEAPON_SPEEDS_MAX,
+            overlay_vertex_max=cfg.OVERLAY_VERTEX_MAX,
+            overlay_edge_max=cfg.OVERLAY_EDGE_MAX,
+            flag_table_max=cfg.FLAG_TABLE_MAX,
+            flag_static_map_max=cfg.FLAG_STATIC_MAP_MAX,
+            flag_static_point_max=cfg.FLAG_STATIC_POINT_MAX,
+            flag_map_name_slot=cfg.FLAG_MAP_NAME_SLOT,
+            flag_route_max=(cfg.FLAG_ROUTE_MAX if flag_route_max is None
+                            else flag_route_max),
+        )
+
+    def test_role_scratch_block_layout_invariants(self):
+        layout = self._layout()
+        role = layout.field('bot_role')
+        count = layout.field('role_spawn_count')
+        radius = layout.field('defend_radius')
+        self.assertEqual(role.size, cfg.MAX_BOT_SLOTS * 4)
+        self.assertEqual(count.offset, role.end)
+        self.assertEqual(count.size, 8)                # one counter per team
+        self.assertEqual(radius.offset, count.end)
+        self.assertEqual(radius.size, cfg.FLAG_ROUTE_MAX * 4)
+        self.assertEqual(layout.field('tag_role').offset, radius.end)
+
+    def test_role_block_absent_without_flag_routing(self):
+        layout = self._layout(flag_route_max=0)
+        self.assertFalse(layout.has_field('bot_role'))
+        self.assertFalse(layout.has_field('defend_radius'))
+
+    def test_spawn_alternation_is_per_team(self):
+        # Python mirror of the emitted spawn-side rule (role = count[team]++
+        # & 1): each team alternates independently, so the example sequence
+        # from the feature request holds — six blue spawns give A/D/A/D/A/D,
+        # and one blue + one red are BOTH attackers.
+        def spawn_seq(teams):
+            count = [0, 0]
+            roles = []
+            for t in teams:
+                roles.append(count[t] & 1)
+                count[t] += 1
+            return roles
+        self.assertEqual(spawn_seq([0] * 6), [0, 1, 0, 1, 0, 1])
+        self.assertEqual(spawn_seq([0, 1]), [0, 0])
+        self.assertEqual(spawn_seq([0, 0, 1, 1, 0]), [0, 1, 0, 1, 0])
+
+    def test_defend_radius_scales_with_map_and_excludes_enemy_base(self):
+        # Offline mirror of build_flag_routes' defender-radius pass on every
+        # shipped CTF graph: radius = max(MIN, max_finite_dist * PCT / 100)
+        # over the FULL weighted field (portal pass included — Hydro's
+        # arenas only connect via pads). Pins the two properties the tether
+        # relies on: the zone is a strict subset of the map (a defender
+        # still has somewhere to roam AND somewhere to be pulled back from),
+        # and the ENEMY base node always lies OUTSIDE the radius (a
+        # defender can never count the enemy base as patrol ground).
+        import heapq
+        import math
+        from zaxbot.flag_data import resolve_flag_data
+        from zaxbot.portal_data import resolve_portal_routes
+
+        flag_maps = dict(resolve_flag_data())
+        if not flag_maps:
+            self.skipTest('Data.dat not present')
+        portal_maps = dict(resolve_portal_routes())
+        checked = 0
+        for name, anchors in flag_maps.items():
+            path = (Path(__file__).resolve().parents[1] / 'waypoints'
+                    / (name.replace('/', '_') + '.zwpt'))
+            if not path.exists():
+                continue
+            d = path.read_bytes()
+            magic, _ver, vc, ec = struct.unpack('<4sIII', d[:16])
+            self.assertEqual(magic, b'ZWPT')
+            verts = [struct.unpack('<ff', d[16 + i*8:24 + i*8])
+                     for i in range(vc)]
+            eoff = 16 + vc*8
+            edges = [struct.unpack('<I', d[eoff + e*4:eoff + e*4 + 4])[0]
+                     for e in range(ec)]
+            edges = [(w & 0xFFFF, w >> 16) for w in edges]
+
+            def nearest(x, y):
+                return min(range(vc),
+                           key=lambda k: (verts[k][0]-x)**2 + (verts[k][1]-y)**2)
+
+            portal_edges = [(nearest(*src), nearest(*dest))
+                            for src, dest in portal_maps.get(name, [])
+                            if dest is not None]
+
+            def field(goal):
+                dist = [-1] * vc
+                dist[goal] = 0
+                pq = [(0, goal)]
+                while pq:
+                    du, u = heapq.heappop(pq)
+                    if du > dist[u]:
+                        continue
+                    for (i, j) in edges:
+                        v = j if i == u else (i if j == u else None)
+                        if v is None:
+                            continue
+                        w = max(1, round(math.dist(verts[i], verts[j])
+                                         / cfg.WP_EDGE_LEN_QUANTUM))
+                        if dist[v] == -1 or du + w < dist[v]:
+                            dist[v] = du + w
+                            heapq.heappush(pq, (du + w, v))
+                    for (sn, dn) in portal_edges:
+                        if dn == u and (dist[sn] == -1 or du + 1 < dist[sn]):
+                            dist[sn] = du + 1
+                            heapq.heappush(pq, (du + 1, sn))
+                return dist
+
+            bases = {t: nearest(x, y) for (x, y, t) in anchors}
+            for team, base_node in bases.items():
+                dist = field(base_node)
+                finite = [dv for dv in dist if dv != -1]
+                span = max(finite)
+                radius = max(cfg.CTF_DEFEND_RADIUS_MIN,
+                             span * cfg.CTF_DEFEND_RADIUS_PCT // 100)
+                self.assertLess(radius, span,
+                                f'{name} team {team}: patrol zone swallows the map')
+                self.assertGreater(
+                    sum(1 for dv in finite if dv <= radius), 1,
+                    f'{name} team {team}: nothing to roam inside the radius')
+                enemy_node = bases[1 - team]
+                enemy_dist = dist[enemy_node]
+                if enemy_dist != -1:
+                    self.assertGreater(
+                        enemy_dist, radius,
+                        f'{name} team {team}: enemy base inside defend radius')
+                checked += 1
+        # All 6 CTF maps (Hydroplant Bouncefest is CTF-capable but ships in
+        # the DeathMatch dir under a DM name; it counts if flag_data lists it
+        # and a graph exists), two bases each.
+        self.assertGreaterEqual(checked, 12)
+
+
+class CtfChaseTests(unittest.TestCase):
+    """CTF enemy-carrier chase scratch invariants.
+
+    The `chase` snapshot chunk dumps chase_pos .. chase_dsq_tmp as ONE
+    contiguous range and detour_df90 clears the same range with ONE rep
+    stosd (then re-poisons chase_node/chase_root to -1: zero is a VALID
+    node index and a stale root matching a fresh bind would let
+    chase_next_hop descend last match's row) — both rely on the physical
+    ordering in layout/chase.py. The per-flag BFS rows sit after the tag
+    with the same stride chase_next_hop's imul uses.
+    """
+
+    def _layout(self, flag_route_max=None):
+        return build_scratch_layout(
+            zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA + zax_patch.SCRATCH_OFF,
+            zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF,
+            zax_patch.NUM_BOT_NAMES,
+            zax_patch.NAME_SLOT_SIZE,
+            zax_patch.NAME_SLOT_ASCII,
+            cfg.WEAPON_SPEEDS_MAX,
+            overlay_vertex_max=cfg.OVERLAY_VERTEX_MAX,
+            overlay_edge_max=cfg.OVERLAY_EDGE_MAX,
+            flag_table_max=cfg.FLAG_TABLE_MAX,
+            flag_static_map_max=cfg.FLAG_STATIC_MAP_MAX,
+            flag_static_point_max=cfg.FLAG_STATIC_POINT_MAX,
+            flag_map_name_slot=cfg.FLAG_MAP_NAME_SLOT,
+            flag_route_max=(cfg.FLAG_ROUTE_MAX if flag_route_max is None
+                            else flag_route_max),
+        )
+
+    def test_chase_scratch_block_layout_invariants(self):
+        layout = self._layout()
+        pos = layout.field('chase_pos')
+        node = layout.field('chase_node')
+        ttl = layout.field('chase_ttl')
+        root = layout.field('chase_root')
+        flag = layout.field('bot_chase_flag')
+        cd = layout.field('bot_chase_cd')
+        scan_tmp = layout.field('chase_scan_tmp')
+        dsq_tmp = layout.field('chase_dsq_tmp')
+        rows = layout.field('chase_dist')
+        self.assertEqual(pos.size, cfg.FLAG_ROUTE_MAX * 8)
+        self.assertEqual(node.offset, pos.end)
+        self.assertEqual(ttl.offset, node.end)
+        self.assertEqual(root.offset, ttl.end)
+        self.assertEqual(flag.offset, root.end)
+        self.assertEqual(flag.size, cfg.MAX_BOT_SLOTS * 4)
+        self.assertEqual(cd.offset, flag.end)
+        self.assertEqual(scan_tmp.offset, cd.end)
+        self.assertEqual(dsq_tmp.offset, scan_tmp.end)
+        self.assertEqual(layout.field('tag_chase').offset, dsq_tmp.end)
+        # Row stride is VMAX*4 (chase_next_hop indexes with imul idx, VMAX*4).
+        self.assertEqual(rows.size,
+                         cfg.FLAG_ROUTE_MAX * cfg.OVERLAY_VERTEX_MAX * 4)
+
+    def test_chase_block_absent_without_flag_routing(self):
+        layout = self._layout(flag_route_max=0)
+        self.assertFalse(layout.has_field('chase_pos'))
+        self.assertFalse(layout.has_field('chase_dist'))
+
+    def test_home_flag_slot_resolution_mirror(self):
+        # Python mirror of the pick_target chase-init loop: the sighting is
+        # stamped into the slot of the SEEING bot's OWN team flag (a carrier
+        # passing the team filter necessarily holds that flag), resolved by
+        # scanning flag_team — file order is NOT a reliable Red/Blue order,
+        # so both orders must resolve correctly.
+        def home_slot(flag_team, our_team):
+            for i, t in enumerate(flag_team[:2]):
+                if t == our_team:
+                    return i
+            return None
+        self.assertEqual(home_slot([0, 1], 0), 0)   # Blue bot, Blue-first map
+        self.assertEqual(home_slot([0, 1], 1), 1)
+        self.assertEqual(home_slot([1, 0], 0), 1)   # Red-first authored map
+        self.assertEqual(home_slot([1, 0], 1), 0)
+        self.assertIsNone(home_slot([], 0))         # no flags -> scan disabled
+
+
 class SalvageKingTests(unittest.TestCase):
     """Salvage King static census + scratch invariants + routing simulation.
 
@@ -1607,8 +1835,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '7bd6f553e7e5c9036e976f2c929875930ec7145086fb5aaf67c75d5d8176a53c'
-    HOOK_ENTRY_SIZE = 41035
+    SECTION_SHA256 = 'b49d6248e21d2cdb618eb4989df26209d0e3c430cdabda74d60c0e5d232a302b'
+    HOOK_ENTRY_SIZE = 43125
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

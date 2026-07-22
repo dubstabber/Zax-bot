@@ -33,6 +33,8 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     route_portal_hop_va = c.route_portal_hop_va
     drop_move = c.drop_move
     bot_drop_target_va = c.bot_drop_target_va
+    chase_move = c.chase_move
+    bot_chase_flag_va = c.bot_chase_flag_va
     switch_wander = c.switch_wander
     bot_switch_target_va = c.bot_switch_target_va
     bot_switch_cd_va = c.bot_switch_cd_va
@@ -157,23 +159,40 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     if cfg.CTF_FLAG_ROUTING_ENABLED:
         a.raw(b'\x51')                                   # push cur (ecx)
         a.raw(b'\x52')                                   # push prev (edx)
-        if drop_move:
-            # Dropped-flag route override: while this bot's pursuit latch is
-            # set and its routing is NOT suspended (the suspension roam
-            # exists to unstick deterministic routing — don't override it),
-            # descend the per-drop BFS row instead of the goal field. Falls
-            # back to ctf_next_hop when the row can't apply (helper returns
-            # -1: drop gone, row stale/unbuilt, node unreachable).
-            a.raw(b'\xA1' + le32(bot_slot_tmp_va))       # eax = slot
-            a.raw(b'\x83\x3C\x85' + le32(bot_drop_target_va) + b'\x00')
-            a.jz('s542360_wp_use_cnh')
-            a.raw(b'\x83\x3C\x85' + le32(route_suspend_va) + b'\x00')
-            a.jnz('s542360_wp_use_cnh')
-            a.call_lbl('drop_next_hop')                  # eax = drop hop or -1 (in: ecx=cur)
-            a.raw(b'\x83\xF8\xFF')
-            a.jnz('s542360_wp_hop_done')                 # got a drop hop
-            a.raw(b'\x8B\x4C\x24\x04')                   # ecx = cur (helper clobbered it)
-            a.label('s542360_wp_use_cnh')
+        if drop_move or chase_move:
+            if drop_move:
+                # Dropped-flag route override: while this bot's pursuit latch
+                # is set and its routing is NOT suspended (the suspension roam
+                # exists to unstick deterministic routing — don't override
+                # it), descend the per-drop BFS row instead of the goal
+                # field. Falls back to the chase/SK/ctf dispatch below when
+                # the row can't apply (helper returns -1: drop gone, row
+                # stale/unbuilt, node unreachable).
+                a.raw(b'\xA1' + le32(bot_slot_tmp_va))   # eax = slot
+                a.raw(b'\x83\x3C\x85' + le32(bot_drop_target_va) + b'\x00')
+                a.jz('s542360_wp_use_cnh')
+                a.raw(b'\x83\x3C\x85' + le32(route_suspend_va) + b'\x00')
+                a.jnz('s542360_wp_use_cnh')
+                a.call_lbl('drop_next_hop')              # eax = drop hop or -1 (in: ecx=cur)
+                a.raw(b'\x83\xF8\xFF')
+                a.jnz('s542360_wp_hop_done')             # got a drop hop
+                a.raw(b'\x8B\x4C\x24\x04')               # ecx = cur (helper clobbered it)
+                a.label('s542360_wp_use_cnh')
+            if chase_move:
+                # Enemy-carrier chase route override (below the drop latch —
+                # the chase block already unlatches itself when a drop
+                # pursuit engages): descend the per-flag carrier row.
+                # Respects the routing suspension like the drop descent.
+                a.raw(b'\xA1' + le32(bot_slot_tmp_va))   # eax = slot
+                a.raw(b'\x83\x3C\x85' + le32(bot_chase_flag_va) + b'\x00')
+                a.jz('s542360_wp_no_chs_hop')
+                a.raw(b'\x83\x3C\x85' + le32(route_suspend_va) + b'\x00')
+                a.jnz('s542360_wp_no_chs_hop')
+                a.call_lbl('chase_next_hop')             # eax = chase hop or -1 (in: ecx=cur)
+                a.raw(b'\x83\xF8\xFF')
+                a.jnz('s542360_wp_hop_done')             # got a chase hop
+                a.raw(b'\x8B\x4C\x24\x04')               # ecx = cur (helper clobbered it)
+                a.label('s542360_wp_no_chs_hop')
             if sk_move:
                 # SK matches: descend the mineral/own-bin field instead of
                 # the (inert-in-SK) CTF goal field. Also fires OUTSIDE SK
@@ -292,6 +311,30 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
             if routing:
                 a.raw(b'\x83\x3C\x9D' + le32(route_suspend_va) + b'\x00')
                 a.jnz('s542360_wp_no_wander')            # suspended -> local roam only
+            if cfg.CTF_DEFENDER_ENABLED and layout.has_field('bot_role'):
+                # A DEFENDER's near-base roam must never ride a teleporter:
+                # the pad exit is usually far outside its patrol radius, so
+                # the roll would just bounce it out and back (Hydro pads
+                # cross arenas). Its tether re-routes it home anyway; skip
+                # the coin entirely.
+                a.raw(b'\x83\x3C\x9D' + le32(layout.va('bot_role')) + b'\x00')
+                a.jnz('s542360_wp_no_wander')            # defender -> no pad roll
+            if (cfg.CTF_DEFENDER_ENABLED and cfg.CTF_CARRIER_STANDOFF_ENABLED
+                    and layout.has_field('defend_radius')
+                    and layout.has_field('flag_routing_active')
+                    and layout.has_field('route_carry')):
+                # STANDOFF/carrier pad skip: a CARRIER on this fallback path
+                # is either tether-roaming at its base (standoff) or
+                # suspension-adjacent — a pad ride dumps it across the map
+                # with the flag. route_carry is fresh for THIS bot only when
+                # routing is armed (ctf_next_hop ran ctf_pick_goal this
+                # arrival), so gate on flag_routing_active first — a stale
+                # value must never eat the DM/SK pad roll.
+                a.raw(b'\x83\x3D' + le32(layout.va('flag_routing_active')) + b'\x00')
+                a.jz('s542360_wp_wander_nc')
+                a.raw(b'\x83\x3D' + le32(layout.va('route_carry')) + b'\x00')
+                a.jnz('s542360_wp_no_wander')            # carrier -> no pad roll
+                a.label('s542360_wp_wander_nc')
             if layout.has_field('bot_portal_cd'):
                 a.raw(b'\x83\x3C\x9D' + le32(layout.va('bot_portal_cd')) + b'\x00')
                 a.jnz('s542360_wp_no_wander')            # just teleported -> no re-entry

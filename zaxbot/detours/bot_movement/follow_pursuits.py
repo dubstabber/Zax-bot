@@ -1,6 +1,9 @@
 """Latch-driven pursuit approaches at ``s542360_wp_have_cur``: portal pad
-final approach, dropped-flag pursuit (ROUTED/DIRECT), goody pursuit
-(piles + filler items) and the roam switch wander-bump press."""
+final approach, dropped-flag pursuit (ROUTED/DIRECT), enemy-carrier chase
+(ROUTED/DIRECT), goody pursuit (piles + filler items) and the roam switch
+wander-bump press."""
+
+import struct
 
 from ... import config as cfg
 from ...asm import Asm, le32
@@ -72,6 +75,15 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     goody_direct_va = c.goody_direct_va
     goody_abandon_va = c.goody_abandon_va
     sk_pile_dirty_mv_va = c.sk_pile_dirty_mv_va
+    chase_move = c.chase_move
+    bot_chase_flag_va = c.bot_chase_flag_va
+    bot_chase_cd_va = c.bot_chase_cd_va
+    chase_pos_mv_va = c.chase_pos_mv_va
+    chase_node_mv_va = c.chase_node_mv_va
+    chase_ttl_mv_va = c.chase_ttl_mv_va
+    chase_dsq_tmp_va = c.chase_dsq_tmp_va
+    chase_flag_present_va = c.chase_flag_present_va
+    chase_flag_count_va = c.chase_flag_count_va
 
     a.label('s542360_wp_have_cur')
     if portal_move:
@@ -364,6 +376,122 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
         a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # node logic starts clean
         a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
         a.label('s542360_drp_done')
+    if chase_move:
+        # --- Enemy-carrier chase (validation + ROUTED/DIRECT phase split) --
+        # Latched by the perception scan's LOS sighting (bot_chase_flag =
+        # home flag idx+1); the shared intel chase_pos/node/ttl is serviced
+        # per frame by chase_route_refresh. Runs after the pad and drop
+        # latches (a flag on the ground outranks the carrier holding one);
+        # outranks the goody/switch behaviours. ROUTED phase falls through —
+        # the node machinery moves the bot and chase_next_hop overrides the
+        # arrival next-hop; DIRECT phase (inside the direct radius or
+        # physically at the carrier's bound node) steers straight at the
+        # carrier. The target MOVES, so the direct-phase stall signal is
+        # the PHYSICAL stuck detector — dsq improvement is meaningless
+        # against a fleeing carrier (dsq grows while the chaser runs at
+        # full speed). Killing the carrier drops the flag; the drop
+        # pursuit takes over at the next think.
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        # Re-latch cooldown ticks once per think; while it runs, no chase
+        # (armed by a pinned timeout so a wall-separated sighting cannot
+        # grind; the fire-side stamp also respects it).
+        a.raw(b'\x8B\x04\x8D' + le32(bot_chase_cd_va))    # eax = cd[slot]
+        a.raw(b'\x85\xC0'); a.jz('s542360_chs_cd0')
+        a.raw(b'\x48')                                    # dec eax
+        a.raw(b'\x89\x04\x8D' + le32(bot_chase_cd_va))
+        a.jmp('s542360_chs_done')
+        a.label('s542360_chs_cd0')
+        a.raw(b'\x8B\x04\x8D' + le32(bot_chase_flag_va))  # eax = latch (idx+1 / 0)
+        a.raw(b'\x85\xC0'); a.jz('s542360_chs_done')
+        if drop_move:
+            # A dropped-flag pursuit outranks the chase — the flag on the
+            # ground IS the prize. Hand over cleanly (no cooldown).
+            a.raw(b'\x83\x3C\x8D' + le32(bot_drop_target_va) + b'\x00')
+            a.jnz('s542360_chs_clear')
+        a.raw(b'\x48')                                    # eax = flag idx
+        # Validate every think: stale idx (map change), expired sighting
+        # memory, or the flag back home (event-instant; no carrier exists).
+        a.raw(b'\x83\xF8\x02'); a.jae('s542360_chs_clear')
+        a.raw(b'\x3B\x05' + le32(chase_flag_count_va))
+        a.jae('s542360_chs_clear')
+        a.raw(b'\x83\x3C\x85' + le32(chase_ttl_mv_va) + b'\x00')
+        a.jz('s542360_chs_clear')
+        a.raw(b'\x83\x3C\x85' + le32(chase_flag_present_va) + b'\x00')
+        a.jnz('s542360_chs_clear')
+        # Own-carry gate: grabbing any flag ends the chase (deliver first).
+        # idx survives the engine calls on the stack; pop does not touch
+        # EFLAGS but the test runs after it anyway.
+        a.raw(b'\x50')                                    # push idx
+        a.raw(b'\x8B\x0D' + le32(layout.va('bot_char_tmp')))
+        a.call_lbl('chr_carrying')                        # eax = 1 iff carrying
+        a.raw(b'\x5A')                                    # pop edx (= flag idx)
+        a.raw(b'\x85\xC0'); a.jnz('s542360_chs_clear')
+        # desired = carrier last-seen pos - bot (staged for the direct emit)
+        a.raw(b'\xD9\x04\xD5' + le32(chase_pos_mv_va))    # fld pos.x [edx*8]
+        a.raw(b'\xD8\x25' + le32(bot_pos_va))             # fsub bot.x
+        a.raw(b'\xD9\x1D' + le32(dx_accum_va))            # fstp dx_accum
+        a.raw(b'\xD9\x04\xD5' + le32(chase_pos_mv_va + 4))  # fld pos.y
+        a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))         # fsub bot.y
+        a.raw(b'\xD9\x1D' + le32(dy_accum_va))            # fstp dy_accum
+        a.raw(b'\xD9\x05' + le32(dx_accum_va))            # fld dx
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xD9\x05' + le32(dy_accum_va))            # fld dy
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xDE\xC1')                                # faddp -> ST0 = dsq
+        a.raw(b'\xD9\x1D' + le32(chase_dsq_tmp_va))       # fstp dsq spill (FPU empty)
+        # Radius gates as unsigned float-bit compares (both non-negative).
+        a.raw(b'\xA1' + le32(chase_dsq_tmp_va))           # eax = dsq bits
+        a.raw(b'\x3D' + struct.pack('<f', float(cfg.CTF_CHASE_ABANDON_RADIUS_SQ)))
+        a.ja('s542360_chs_clear')                         # carrier outran us
+        a.raw(b'\x3D' + struct.pack('<f', float(cfg.CTF_CHASE_DIRECT_RADIUS_SQ)))
+        a.jbe('s542360_chs_direct')                       # close -> straight steer
+        # Not inside the direct radius: DIRECT anyway iff the bot targets
+        # the carrier's bound node AND has physically arrived near it (the
+        # same load-bearing stuck-arrival gate as the drop pursuit — cur
+        # alone fires the moment the routed hop ASSIGNS the node).
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8B\x34\x8D' + le32(current_wp_va))      # esi = current_wp[slot]
+        a.raw(b'\x3B\x34\x95' + le32(chase_node_mv_va))   # cur == carrier node?
+        a.jnz('s542360_chs_routed')
+        a.raw(b'\x8D\x34\xF5' + le32(overlay_vertices_va))  # lea esi, [esi*8 + verts]
+        a.raw(b'\xD9\x06')                                # fld node.x
+        a.raw(b'\xD8\x25' + le32(bot_pos_va))             # fsub bot.x
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xD9\x46\x04')                            # fld node.y
+        a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))         # fsub bot.y
+        a.raw(b'\xD8\xC8')                                # fmul st,st
+        a.raw(b'\xDE\xC1')                                # faddp -> ST0 = node_dsq
+        a.raw(b'\xD9\x05' + le32(wp_stuck_reached_radius_sq_va))  # fld arrival thr
+        a.raw(b'\xDF\xF1')                                # fcomip thr:node_dsq (pop thr)
+        a.raw(b'\xDD\xD8')                                # fstp st0 (pop node_dsq; EFLAGS kept)
+        a.jae('s542360_chs_direct')                       # thr >= node_dsq -> arrived
+        a.label('s542360_chs_routed')
+        # ROUTED: fall through — the node machinery steers node-to-node and
+        # chase_next_hop descends the carrier row at each arrival.
+        a.jmp('s542360_chs_done')
+        a.label('s542360_chs_direct')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x8B\x04\x8D' + le32(stuck_count_va))     # eax = stuck_count[slot]
+        a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES]))
+        a.jae('s542360_chs_pinned')                       # physically pinned
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))  # moving -> no sweep
+        a.jmp('s542360_emit')
+        a.label('s542360_chs_pinned')
+        a.raw(b'\xFF\x04\x8D' + le32(wp_try_va))          # ++wp_try (drives the sweep)
+        a.raw(b'\x8B\x04\x8D' + le32(wp_try_va))          # eax = wp_try
+        a.raw(b'\x3B\x05' + le32(wp_progress_timeout_va))
+        a.jb('s542360_emit')                              # keep pressing; slide sweeps
+        # Pinned a full watchdog window (wall micro-feature / body-block):
+        # give up this chase and arm the re-latch cooldown. Fire targeting
+        # is independent — the bot keeps shooting the carrier if visible.
+        a.raw(b'\xC7\x04\x8D' + le32(bot_chase_cd_va)
+              + le32(cfg.CTF_CHASE_COOLDOWN_FRAMES))
+        a.label('s542360_chs_clear')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot (reload)
+        a.raw(b'\xC7\x04\x8D' + le32(bot_chase_flag_va) + le32(0))
+        a.raw(b'\xC7\x04\x8D' + le32(wp_best_dsq_va) + le32(0x7F7FFFFF))  # node logic starts clean
+        a.raw(b'\xC7\x04\x8D' + le32(wp_try_va) + le32(0))
+        a.label('s542360_chs_done')
     if goody_move:
         # --- Goody pursuit: piles + filler items, TWO-PHASE graph-routed ----
         # (upgrade of the straight-steer pile divert, which ground walls when
@@ -403,6 +531,10 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
         if drop_move:
             # A live CTF dropped-flag pursuit outranks any goody entry.
             a.raw(b'\x83\x3C\x8D' + le32(bot_drop_target_va) + b'\x00')
+            a.jnz('s542360_gd_done')
+        if chase_move:
+            # So does an enemy-carrier chase (combat beats snacks).
+            a.raw(b'\x83\x3C\x8D' + le32(bot_chase_flag_va) + b'\x00')
             a.jnz('s542360_gd_done')
         # ENTRY. Piles first (SK matches only), then fillers (any mode).
         a.raw(b'\x83\x3D' + le32(sk_active_mv_va) + b'\x00')
@@ -586,6 +718,10 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
             # A dropped-flag pursuit latched meanwhile outranks the bump —
             # hand over cleanly (no cooldown: the bump never ran).
             a.raw(b'\x83\x3C\x8D' + le32(bot_drop_target_va) + b'\x00')
+            a.jnz('s542360_sww_clear')
+        if chase_move:
+            # An enemy-carrier chase also outranks the bump.
+            a.raw(b'\x83\x3C\x8D' + le32(bot_chase_flag_va) + b'\x00')
             a.jnz('s542360_sww_clear')
         a.raw(b'\x48')                                    # eax = switch idx
         a.raw(b'\x3B\x05' + le32(switch_count_sw_va))     # stale idx (map change)?

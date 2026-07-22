@@ -67,6 +67,12 @@ DUMP_TAGS = (
     # Wedge-escape + fight-stall state (wpfn_excl, per-bot wedge counter,
     # per-bot enemy-near stamp).
     ('tag_wedge', 'wedge'),
+    # CTF role state (per-bot attacker/defender, per-team spawn counters,
+    # per-base defend radii).
+    ('tag_role', 'role'),
+    # CTF enemy-carrier chase state (shared per-flag sighting intel, row
+    # roots, per-bot latches/cooldowns).
+    ('tag_chase', 'chase'),
 )
 
 

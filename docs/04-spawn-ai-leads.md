@@ -466,9 +466,27 @@ ignore this knob (they skip `apply_lead` unconditionally).
 - CTF static-base routing: not carrying -> enemy base, carrying -> own base.
 - CTF missing-base behavior: attackers search by random waypoint roaming or
   wait near the missing enemy flag's base, chosen randomly per missing-flag
-  episode; carriers whose own home flag is missing always search.
+  episode; carriers whose own home flag is missing STANDOFF near their base
+  (the defender tether applied to the carrier: route home beyond the
+  map-scaled radius, roam inside it — ready to capture the instant the home
+  flag returns; a dropped home flag still pulls them out to return it).
+- CTF attacker/defender roles: per-team spawn order alternates roles (1st
+  bot attacks, 2nd defends, ...); a defender patrols its own base inside a
+  map-scaled radius (`defend_radius` = a percentage of the base's max BFS
+  span, min-clamped) — no goal inside the zone (random near-base roam),
+  goal = home base outside it (routing pulls it back). Carrying always uses
+  the normal carrier machinery. See the role bullet in AGENTS.md.
 - Far-camera CTF capture support by force-ticking skipped bots and nearby
   cached home flag/base entities.
+- CTF enemy-carrier chase: an LOS sighting of an enemy carrying the bot's
+  team flag (detected inside the existing `pick_target` scan — a
+  team-filter-passing candidate with a flag can only hold OUR flag) latches
+  a graph-routed two-phase pursuit: BFS row to the carrier's bound node
+  (rebuilt on node change at the page flip, pad hops included), straight
+  steer only within the direct radius. The direct-phase stall signal is the
+  physical stuck detector, not dsq (the target moves). Killing the carrier
+  drops the flag; the drop pursuit outranks the chase and returns it.
+  Defenders chase too — the intercept play the roadmap wanted.
 
 ## Still open
 
@@ -479,9 +497,10 @@ ignore this knob (they skip `apply_lead` unconditionally).
   pass was the live two-waypoint shuttle at Hydro pad-entry nodes), but the
   drop row uses full-field semantics (closed doors are walked at, not routed
   around), and a drop inside a prop's collision pocket can be untouchable
-  from outside (bounded by the retry cooldown). Future bot commands can
-  choose roles on top of the current attacker search/wait split and carrier
-  search fallback.
+  from outside (bounded by the retry cooldown). Roles now exist
+  (attacker/defender alternation per team) and defenders DO intercept enemy
+  carriers now (the chase layer — any bot that sees one chases it);
+  remaining refinement idea: user-selectable role ratios in the bot menu.
 - SK objective AI: SK bots don't gather at their own collector yet.
 - Remote display name. Host writes the stats CString after spawn, but the
   synthetic DirectPlay player-data store is not populated for PC2.

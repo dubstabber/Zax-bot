@@ -86,6 +86,36 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xB9' + le32(cfg.NUM_BOT_NAMES))      # mov ecx, NUM_BOT_NAMES
     a.raw(b'\x31\xC0')                            # xor eax, eax
     a.raw(b'\xF3\xAA')                            # rep stosb
+    # Reset the CTF role state: per-bot roles, the per-team spawn counters
+    # (so the next match's first bot per team is an attacker again) and the
+    # per-map defend radii (rebuilt by build_flag_routes). The three fields
+    # are laid out contiguously (layout/role.py; pinned in tests) so one
+    # rep-stosd covers the block.
+    if layout.has_field('bot_role'):
+        role_clear_dwords = (layout.field('defend_radius').end
+                             - layout.field('bot_role').offset) // 4
+        a.raw(b'\xBF' + le32(layout.va('bot_role')))  # mov edi, bot_role
+        a.raw(b'\xB9' + le32(role_clear_dwords))      # ecx = role block dwords
+        a.raw(b'\x31\xC0')                            # xor eax, eax
+        a.raw(b'\xF3\xAB')                            # rep stosd
+    # Reset the enemy-carrier chase state (sighting intel, row roots, per-bot
+    # latches/cooldowns). chase_pos .. chase_dsq_tmp are contiguous
+    # (layout/chase.py; pinned in tests) so one rep-stosd covers the block —
+    # then chase_node/chase_root are re-poisoned to -1: a zero from the
+    # blanket clear is a VALID node index, and a stale root matching a
+    # fresh bind would let chase_next_hop descend LAST match's row.
+    if layout.has_field('chase_pos'):
+        chase_clear_dwords = (layout.field('chase_dsq_tmp').end
+                              - layout.field('chase_pos').offset) // 4
+        a.raw(b'\xBF' + le32(layout.va('chase_pos')))  # mov edi, chase_pos
+        a.raw(b'\xB9' + le32(chase_clear_dwords))      # ecx = chase block dwords
+        a.raw(b'\x31\xC0')                             # xor eax, eax
+        a.raw(b'\xF3\xAB')                             # rep stosd
+        a.raw(b'\x48')                                 # eax = -1 (dec from 0)
+        a.raw(b'\xA3' + le32(layout.va('chase_node')))
+        a.raw(b'\xA3' + le32(layout.va('chase_node') + 4))
+        a.raw(b'\xA3' + le32(layout.va('chase_root')))
+        a.raw(b'\xA3' + le32(layout.va('chase_root') + 4))
     # Once we've pre-grown mgr+0x290 to 16 entries (match 1 onwards), the
     # buffer outlives the match: slots populated by match N can still hold
     # freed char pointers at the start of match N+1. Per-frame fire/aim

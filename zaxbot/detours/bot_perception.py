@@ -34,10 +34,13 @@ Returns: ``AL = 1`` if a target was picked, ``0`` otherwise. Clobbers EAX,
 ECX, EDX, ST*.
 """
 
+import struct
+
 from .. import addresses as ax
+from .. import config as cfg
 from ..asm import Asm, le32
 from ..hook.bot_lookup import emit_scan_bot_indices
-from ..hook.math_helpers import emit_dist_sq_2d, emit_fcomp_jae
+from ..hook.math_helpers import emit_dist_sq_2d
 from ..layout import ScratchLayout
 
 
@@ -66,6 +69,27 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     bot_char_tmp_va    = layout.va('bot_char_tmp')
     bot_slot_tmp_va    = layout.va('bot_slot_tmp')
 
+    # Enemy-carrier CHASE sighting (see cfg.CTF_CHASE_ENABLED). The scan
+    # already walks every char with the CTF team filter, so a candidate that
+    # passes it AND carries a flag is an enemy carrying THIS bot's own team
+    # flag — the chase target. Per call the init below resolves the bot's
+    # HOME flag idx into chase_scan_tmp (-1 disables the whole check), and
+    # only while that flag is AWAY (flag_present == 0; no carrier can exist
+    # otherwise), so the per-candidate cost is one load+cmp in the common
+    # case and the carry/LOS engine calls run only mid-steal near the bot.
+    chase = (cfg.CTF_CHASE_ENABLED
+             and layout.has_field('chase_pos')
+             and layout.has_field('flag_routing_active')
+             and layout.has_field('flag_team')
+             and layout.has_field('flag_present')
+             and layout.has_field('flag_count'))
+    if chase:
+        chase_scan_tmp_va = layout.va('chase_scan_tmp')
+        chase_pos_va      = layout.va('chase_pos')
+        chase_ttl_va      = layout.va('chase_ttl')
+        bot_chase_flag_va = layout.va('bot_chase_flag')
+        bot_chase_cd_va   = layout.va('bot_chase_cd')
+
     a.label('pick_target')
 
     # --- Cache the firing bot's world position once per call.
@@ -78,6 +102,34 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xA1' + le32(fire_range_sq_va))
     a.raw(b'\xA3' + le32(best_dist_sq_va))
     a.raw(b'\xC7\x05' + le32(cand_idx_va) + le32(0))
+
+    if chase:
+        # --- Chase-scan init: chase_scan_tmp = this bot's HOME flag idx, or
+        # -1 to disable the per-candidate carrier check for this call. Off
+        # unless CTF routing is armed, the bot's team is known, a home base
+        # exists, and the home flag is AWAY (a carrier can only exist then).
+        a.raw(b'\xC7\x05' + le32(chase_scan_tmp_va) + b'\xFF\xFF\xFF\xFF')
+        a.raw(b'\x83\x3D' + le32(layout.va('flag_routing_active')) + b'\x00')
+        a.jz('pick_chs_init_done')
+        a.raw(b'\x83\x3D' + le32(our_team_tmp_va) + b'\xFF')  # team known?
+        a.jz('pick_chs_init_done')
+        a.raw(b'\x8B\x0D' + le32(layout.va('flag_count')))    # ecx = flag_count
+        a.raw(b'\x83\xF9\x02')                                # clamp to rows 0/1
+        a.jbe('pick_chs_nb_ok')
+        a.raw(b'\xB9\x02\x00\x00\x00')
+        a.label('pick_chs_nb_ok')
+        a.raw(b'\x31\xD2')                                    # edx = 0 (i)
+        a.label('pick_chs_home_loop')
+        a.raw(b'\x39\xCA'); a.jae('pick_chs_init_done')       # no home base
+        a.raw(b'\x8B\x04\x95' + le32(layout.va('flag_team'))) # eax = flag_team[i]
+        a.raw(b'\x3B\x05' + le32(our_team_tmp_va))            # == our team?
+        a.jz('pick_chs_home_found')
+        a.raw(b'\x42'); a.jmp('pick_chs_home_loop')           # ++i
+        a.label('pick_chs_home_found')
+        a.raw(b'\x83\x3C\x95' + le32(layout.va('flag_present')) + b'\x00')
+        a.jnz('pick_chs_init_done')                           # flag home -> no carrier
+        a.raw(b'\x89\x15' + le32(chase_scan_tmp_va))          # chase_scan_tmp = home idx
+        a.label('pick_chs_init_done')
 
     a.label('pick_scan_top')
     a.raw(b'\xA1' + le32(ax.MANAGER_GLOBAL_VA))           # mov eax, [mgr]
@@ -178,7 +230,63 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
                     dx_out_va=bot_dx_va,
                     dy_out_va=bot_dy_va,
                     dist_sq_out_va=curr_dist_sq_va)
-    emit_fcomp_jae(a, best_dist_sq_va, 'pick_next')       # d² >= best -> skip
+    a.raw(b'\xDD\xD8')                                    # fstp st0 (d² is in memory;
+                                                          # FPU must be EMPTY across the
+                                                          # chase engine calls below)
+
+    if chase:
+        # --- Enemy-carrier sighting. The candidate passed the team filter,
+        # so a flag-carrying candidate here is an enemy holding OUR flag.
+        # Gate order cheapest-first: scan enabled -> within chase radius ->
+        # carries a flag -> LOS clear. Then stamp the SHARED per-flag intel
+        # (position + TTL — any teammate's sighting refreshes it) and latch
+        # THIS bot's pursuit unless it is cooling down or itself carrying
+        # (a carrier delivers first; movement also unlatches on pickup).
+        # All loop state lives in memory, so eax/ecx/edx are free here.
+        a.raw(b'\x83\x3D' + le32(chase_scan_tmp_va) + b'\xFF')
+        a.jz('pick_chs_cand_done')                        # chase scan off
+        a.raw(b'\xA1' + le32(curr_dist_sq_va))            # eax = d² bits
+        a.raw(b'\x3D' + struct.pack('<f', float(cfg.CTF_CHASE_RADIUS_SQ)))
+        a.ja('pick_chs_cand_done')                        # beyond sighting radius
+        a.raw(b'\x8B\x0D' + le32(cand_tmp_va))            # ecx = candidate char
+        a.call_lbl('chr_carrying')                        # eax = 1 iff carries a flag
+        a.raw(b'\x85\xC0'); a.jz('pick_chs_cand_done')
+        # LOS bot -> carrier ("sees"): same engine sweep as the aim gate.
+        a.raw(b'\x6A\x00')                                # push 0   (a6)
+        a.raw(b'\x6A\x02')                                # push 2   (a5)
+        a.raw(b'\x6A\x00')                                # push 0   (a4)
+        a.raw(b'\x6A\x00')                                # push 0   (a3)
+        a.raw(b'\xFF\x35' + le32(cand_tmp_va))            # push candidate (a2)
+        a.raw(b'\x8B\x0D' + le32(bot_char_tmp_va))        # ecx = bot char
+        a.call_va(ax.SUB_491380_VA)                       # __thiscall, ret 14h
+        a.raw(b'\x84\xC0'); a.jz('pick_chs_cand_done')    # wall between -> not seen
+        # Stamp shared intel: chase_pos[home] = carrier pos, fresh TTL.
+        a.raw(b'\x8B\x15' + le32(chase_scan_tmp_va))      # edx = home flag idx
+        a.raw(b'\xA1' + le32(cand_pos_va))
+        a.raw(b'\x89\x04\xD5' + le32(chase_pos_va))       # chase_pos[home].x
+        a.raw(b'\xA1' + le32(cand_pos_va + 4))
+        a.raw(b'\x89\x04\xD5' + le32(chase_pos_va + 4))   # chase_pos[home].y
+        a.raw(b'\xC7\x04\x95' + le32(chase_ttl_va)
+              + le32(cfg.CTF_CHASE_TTL_FRAMES))
+        # Latch this bot's pursuit (cooldown + own-carry gated).
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x83\x3C\x8D' + le32(bot_chase_cd_va) + b'\x00')
+        a.jnz('pick_chs_cand_done')                       # cooling down
+        a.raw(b'\x8B\x0D' + le32(bot_char_tmp_va))        # ecx = bot char
+        a.call_lbl('chr_carrying')                        # bot itself carrying?
+        a.raw(b'\x85\xC0'); a.jnz('pick_chs_cand_done')
+        a.raw(b'\x8B\x15' + le32(chase_scan_tmp_va))      # edx = home idx
+        a.raw(b'\x42')                                    # latch value = idx+1
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot
+        a.raw(b'\x89\x14\x8D' + le32(bot_chase_flag_va))  # bot_chase_flag[slot] = idx+1
+        a.label('pick_chs_cand_done')
+
+    # --- Best-gate. Both d² values are non-negative IEEE float bits, so an
+    # unsigned integer compare is exact (same trick as the fight-stall
+    # stamp) — and it keeps the FPU stack empty across the chase block.
+    a.raw(b'\xA1' + le32(curr_dist_sq_va))                # eax = d² bits
+    a.raw(b'\x3B\x05' + le32(best_dist_sq_va))            # cmp d², best
+    a.jae('pick_next')                                    # d² >= best -> skip
 
     # --- LOS gate: sub_491380(this=bot, target=cand, 0, NULL, 2, NULL).
     a.raw(b'\x6A\x00')                                    # push 0   (a6)
@@ -219,3 +327,28 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x83\x3D' + le32(best_target_va) + b'\x00')   # cmp [best_target], 0
     a.raw(b'\x0F\x95\xC0')                                # setne al
     a.raw(b'\xC3')                                        # ret
+
+    # =====================================================================
+    # chr_carrying(ECX = char, may be NULL) -> EAX = 1 iff the character
+    # carries ANY CTF flag (the live-verified inventory-group test, same
+    # chain as ctf_pick_goal's inline carry check: sub_4267E0 -> inventory,
+    # sub_425290(inv, [MULTIPLAYER_FLAG_GID]) != -1). Every deref is
+    # NULL-guarded. Clobbers EAX/ECX/EDX only; loop callers keep their
+    # state in memory. Used by the chase sighting (candidate + self) and
+    # the follower's chase validation.
+    # =====================================================================
+    a.label('chr_carrying')
+    a.raw(b'\x85\xC9'); a.jz('chr_carry_no')              # NULL char
+    a.call_va(ax.SUB_4267E0_VA)                           # eax = inventory (ret 0)
+    a.raw(b'\x85\xC0'); a.jz('chr_carry_no')              # NULL inventory
+    a.raw(b'\x8B\x15' + le32(ax.MULTIPLAYER_FLAG_GID_VA)) # edx = flag group id
+    a.raw(b'\x85\xD2'); a.jz('chr_carry_no')              # gid unresolved
+    a.raw(b'\x52')                                        # push gid
+    a.raw(b'\x89\xC1')                                    # ecx = inventory
+    a.call_va(ax.SUB_425290_VA)                           # eax = slot or -1 (ret 4)
+    a.raw(b'\x83\xF8\xFF'); a.jz('chr_carry_no')          # -1 -> not carrying
+    a.raw(b'\xB8\x01\x00\x00\x00')                        # eax = 1
+    a.raw(b'\xC3')
+    a.label('chr_carry_no')
+    a.raw(b'\x31\xC0')                                    # eax = 0
+    a.raw(b'\xC3')

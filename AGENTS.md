@@ -94,12 +94,15 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   `0x16000` for the portal routing layer, then to `0x18000` for the
   dropped-flag pursuit layer, then to `0x26000` for the SK layer — 1856
   static mineral anchors, team-indexed bin tables, the mineral field + 16
-  per-bin BFS rows, and the 512-slot pickup table).
-- Scratch starts at `0x724000` (`SCRATCH_OFF = 0xA000`; the code/scratch
+  per-bin BFS rows, and the 512-slot pickup table — then to `0x27000` for
+  the graphical bot menu, then to `0x28000` for the enemy-carrier chase
+  layer — sighting intel + per-flag chase BFS rows).
+- Scratch starts at `0x725000` (`SCRATCH_OFF = 0xB000`; the code/scratch
   boundary moved from `0x5A00` at the door layer, from `0x6800` at the switch
   layer, from `0x7000` at the portal routing layer, from `0x8000` when
-  the dropped-flag ROUTED pursuit landed with ~456 code bytes left, then from
-  `0x9000` at the SK layer with ~3.0 KB left).
+  the dropped-flag ROUTED pursuit landed with ~456 code bytes left, from
+  `0x9000` at the SK layer with ~3.0 KB left, then from `0xA000` at the
+  bot-menu layer).
 - B opens a GRAPHICAL bot menu (`build_bot_menu` in `zaxbot/hook/bot_menu.py`),
   built from the engine's own widget tree exactly like the in-game Esc quit
   dialog (base `CWindow` vtable `0x5EAAC4` cloned into scratch with slot 0 =
@@ -483,9 +486,20 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     temporary policy for that missing-flag episode: search by random waypoint
     roaming (`route_goal_flag = -1`), or keep routing toward the missing flag's
     base to wait/patrol nearby. Carrier bots whose OWN home flag is missing
-    always use search mode; do not route/final-approach a carrier into an empty
-    home base. The policy clears when the flag becomes present again or the bot
-    switches goals. Do NOT add BFS/pathfinding for an unknown flag location.
+    STANDOFF-TETHER near their base (`cfg.CTF_CARRIER_STANDOFF_ENABLED`,
+    2026-07-21; shares the defender role's `cpg_tether`/`defend_radius`
+    machinery): goal = HOME while beyond the map-scaled radius, no goal
+    inside it — the carrier hovers at its base ready to capture the instant
+    its flag returns, instead of search-roaming the whole map
+    (user-reported). `route_missing_goal[slot]` is still written, so the
+    dropped-flag pursuit's any-distance latch still routes the carrier to
+    its home flag when that lies DROPPED. The inside-radius flip (goal-node
+    dist 0) preserves the old invariant: a carrier is never
+    routed/final-approached into an empty home base, and the home
+    force-tick stays off via its `flag_present[home]` gate. With the knob
+    off, the old unconditional search mode. The policy clears when the flag
+    becomes present again or the bot switches goals. Do NOT add
+    BFS/pathfinding for an unknown flag location.
   - **Blocked-route suspension** (`bot_route_suspend[slot]`, flag-route block;
     `cfg.WP_ROUTE_SUSPEND_FRAMES`): BFS routing is deterministic, so a bot
     whose shortest path is physically blocked (classic case: a door the
@@ -524,6 +538,51 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     resets the budget, and the roam suspension engages). The marker is also
     cleared when a suspension expires. Hits reset on clean routed hops,
     marker re-set, reacquire, and respawn.
+- CTF bots have ALTERNATING ATTACKER/DEFENDER roles
+  (`cfg.CTF_DEFENDER_ENABLED`; built 2026-07-21, live-confirmed working the
+  same day; the carrier STANDOFF tether landed right after and its live
+  pass is pending):
+  - **Assignment** (spawn side, `hook/spawn.py` after the team write): each
+    team's CTF spawns are counted (`role_spawn_count[2]`, reset on match
+    change by `detour_df90`) and `bot_role[slot] = count & 1` — a team's 1st
+    bot attacks, its 2nd defends, 3rd attacks, ... Teams count independently
+    (one blue + one red bot are both attackers). Non-CTF spawns are always
+    role 0; the role gates ONLY CTF goal selection, so DM/SK are untouched.
+  - **Defender behavior** (`ctf_pick_goal` in `flag_route/goal.py`, entered
+    on the not-carrying path): while the bot's current node lies within
+    `defend_radius[home]` of its OWN base in the full `flag_dist` field it
+    reports NO goal — the follower's random `wp_advance` roams it around the
+    base; beyond the radius the goal flips to the HOME base and the normal
+    routing machinery (door-aware fields, portals, seek) walks it back in.
+    ctf_pick_goal runs per frame, so this is a self-correcting tether: a
+    roam step out of the zone is pulled back at the next arrival, and the
+    patrol naturally covers the base region. The branch BYPASSES the
+    flag_present/missing-policy machinery (a defender guards home
+    regardless of flag state — its own stolen flag is exactly when home
+    matters), and since the goal node's own distance is 0 (always inside),
+    a non-carrier can never final-approach the flag. A CARRYING defender
+    takes the untouched carrier path (route home, capture/return) — so a
+    defender that opportunistically grabs a drop near its base (the 350 px
+    dropped-flag latch has no team/role filter) still delivers/returns it.
+    Defenders skip the roam PORTAL-WANDER roll (`follow_arrive`): a pad exit
+    is usually far outside the patrol zone, so the coin would just bounce
+    them out and back. The switch wander-bump stays enabled (local, useful).
+    The tether itself is the shared `cpg_tether` helper (eax = base idx →
+    eax = base-or-−1 by the radius test) — the carrier STANDOFF (see the
+    routing bullet above) is its second caller, and CARRIERS on the roam
+    fallback also skip the pad roll (gated on `flag_routing_active` so the
+    stale `route_carry` global can never eat the DM/SK pad coin).
+  - **Per-map radius** (`build_flag_routes` at `bfr_next`, per base):
+    `defend_radius[i] = max(CTF_DEFEND_RADIUS_MIN, max_finite(flag_dist[i])
+    * CTF_DEFEND_RADIUS_PCT / 100)` — the map's span AS SEEN FROM THAT BASE
+    (max finite BFS distance, `WP_EDGE_LEN_QUANTUM` units), so bigger maps
+    give proportionally bigger patrol zones. Pinned offline on all shipped
+    CTF graphs: the zone is a strict subset of the map and the ENEMY base
+    node always lies outside it.
+  - Scratch: `bot_role`/`role_spawn_count`/`defend_radius` are one
+    contiguous tail block (`layout/role.py`; df90 clears it with one
+    rep-stosd — contiguity pinned in tests) + the `tag_role` R-chunk dumps
+    it whole.
 - CTF bots PURSUE DROPPED FLAGS (`cfg.CTF_DROPPED_FLAG_ENABLED`; the "don't
   walk past the flag lying on the ground" layer). Two halves:
   - **Detection** (`entity_scan.py`, inside the `scan_portal_active` periodic
@@ -600,6 +659,54 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
       not the hue — distinguishes it from the single-oval base anchors).
     R-snapshot chunk `dpursuit` dumps drop valid/pos/node + per-bot
     latch/cd/patience/best + route roots + knobs.
+- CTF bots CHASE ENEMY FLAG CARRIERS they see (`cfg.CTF_CHASE_ENABLED`;
+  built 2026-07-22, first live pass pending). Three pieces:
+  - **Sighting** (`bot_perception.py`, inside the existing `pick_target`
+    loop — no new patch sites): a candidate that passes the CTF team filter
+    AND carries a flag (`chr_carrying`, the factored inventory-group test)
+    is BY CONSTRUCTION an enemy holding the scanning bot's OWN team flag
+    (nobody can carry their own). Within `CTF_CHASE_RADIUS_SQ` (400 px)
+    with a clear engine LOS sweep, the sighting stamps SHARED per-flag
+    intel — `chase_pos`/`chase_ttl[home]`, keyed by the bot's home flag
+    idx, refreshed by ANY bot's sighting — and latches the SEEING bot's
+    pursuit (`bot_chase_flag[slot] = home+1`), gated on the per-bot
+    cooldown and the bot not itself carrying. The whole check is disabled
+    per call unless CTF routing is armed AND the home flag is AWAY
+    (`chase_scan_tmp = -1`; no carrier can exist while it sits home), so
+    the common-case cost is one load+cmp per candidate. The old FPU
+    best-gate (`fcomp`) became an unsigned float-bits integer compare so
+    the x87 stack is empty across the chase engine calls.
+  - **Two-phase pursuit** (the drop-pursuit-v2 shape — the v1 lesson: a
+    target behind a wall must be routed AROUND, never straight-steered
+    at): the page flip (`chase_route_refresh`) ticks the TTL, binds
+    `chase_pos` to its nearest graph node per frame while intel is live,
+    and rebuilds the per-flag `chase_dist` BFS row ONLY when that node
+    changes (~one bounded `bfs_run` every 1-2 s per carrier; full-field
+    semantics, `chase_root` guards staleness). ROUTED phase: at node
+    arrivals `chase_next_hop` descends the row (below the drop-pursuit
+    latch, above SK/ctf in the dispatch; respects `bot_route_suspend`;
+    emits PAD HOPS exactly like the ctf/drop passes). DIRECT phase
+    (within `CTF_CHASE_DIRECT_RADIUS_SQ` = 160 px, or physically at the
+    carrier's bound node via the stuck-arrival gate): steer straight at
+    the last-seen position — and because the target MOVES, the stall
+    signal is the PHYSICAL stuck detector (`stuck_count`), NOT dsq
+    improvement (a fleeing carrier grows dsq while the chaser runs at
+    full speed; a dsq watchdog would false-trigger the slide sweep). A
+    pinned full watchdog window abandons with
+    `CTF_CHASE_COOLDOWN_FRAMES`; fire targeting is independent, so the
+    bot keeps shooting a visible carrier throughout.
+  - **Priorities + hygiene**: pad approach > drop pursuit > CHASE > goody
+    > switch bump (a flag on the ground outranks the carrier holding
+    one — killing the carrier DROPS the flag and the drop pursuit takes
+    over to return it; the chase block unlatches itself when a drop
+    latches). Latch drops on: TTL expiry, `flag_present[home]` flipping
+    back (event-instant — no carrier exists), the bot grabbing any flag
+    itself, `CTF_CHASE_ABANDON_RADIUS_SQ` (700 px), respawn/death,
+    teleport-jump, match change (`detour_df90` clears the block, then
+    re-poisons `chase_node`/`chase_root` to -1 — a zeroed root is a VALID
+    node idx and could alias a fresh bind onto LAST match's row).
+    Defenders chase too (that IS the intercept play; the tether pulls
+    them back after). R-snapshot chunk `chase` dumps the whole block.
 - Bots are kept SIMULATED when far from the host's camera
   (`cfg.BOT_FORCE_ACTIVE_ENABLED`). The engine deactivates entities far from the
   local camera, and the per-entity component advance `sub_4FADC0` gates ALL
@@ -887,13 +994,11 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     mislabelled a bot standing just past the doorway as not-crossed and
     walked it back INTO the closed door (2026-07-20 snapshots, part of the
     self-closing-door shuttle). Degenerate dot <= 0 (bot exactly on the door
-    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~0.9 KB
-    below `SCRATCH_OFF` (hook_entry_size 40049 of 40960 after the SK layer,
-    the goody pursuit, the self-closing-door fixes, the wedge hard
-    reset, the door-side arrival gate + node-gate patience latch and the
-    duplicate-flag give guard; the
-    boundary sits at 0xA000 with the section
-    at 0x26000, scratch ~2.0 KB free). When it runs low again, bump
+    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~1.9 KB
+    below `SCRATCH_OFF` (hook_entry_size 43125 of 45056 after the bot-menu,
+    CTF role/standoff and enemy-carrier chase layers; the
+    boundary sits at 0xB000 with the section
+    at 0x28000). When it runs low again, bump
     `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
     `flag_routing_active`) was added for diagnosing route commitment.

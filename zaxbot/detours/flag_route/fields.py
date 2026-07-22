@@ -83,6 +83,12 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     a.raw(b'\xB9' + le32(RMAX))                                # ecx = RMAX
     a.raw(b'\xB8\xFF\xFF\xFF\xFF')                             # eax = -1
     a.raw(b'\xF3\xAB')                                         # rep stosd
+    if c.defender:
+        # defend_radius[*] = 0 (recomputed per routed base at bfr_next).
+        a.raw(b'\xBF' + le32(c.defend_radius_va))              # edi = defend_radius
+        a.raw(b'\xB9' + le32(RMAX))                            # ecx = RMAX
+        a.raw(b'\x31\xC0')                                     # eax = 0
+        a.raw(b'\xF3\xAB')                                     # rep stosd
     if seek:
         # Fresh seek state per match: node bindings/field to -1, the whole
         # per-team state block (seek_active..seek_timer, contiguous 16 dwords)
@@ -230,6 +236,42 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
 
         a.label('bfr_bfs_done')
     a.label('bfr_next')
+    if c.defender:
+        # --- Per-base DEFENDER radius from the map's span. The full field
+        # for base i was just built; its max FINITE distance is how far the
+        # map extends from this base (quanta units), so the patrol radius
+        # scales with map size: defend_radius[i] = max(MIN,
+        # max_finite * PCT / 100). A skipped base (no node) leaves an
+        # all-INF row -> max 0 -> the MIN clamp, harmlessly unused (its
+        # routing is inert without a route node).
+        a.raw(b'\xA1' + le32(bfr_i_va))                  # eax = i
+        a.raw(b'\x69\xC0' + le32(ROW))                   # imul eax, eax, ROW
+        a.raw(b'\x05' + le32(flag_dist_va))              # eax = row base
+        a.raw(b'\x31\xD2')                               # edx = 0 (max finite)
+        a.raw(b'\x31\xF6')                               # esi = 0 (n)
+        a.label('bfr_dr_scan')
+        a.raw(b'\x3B\x35' + le32(vcount_va))             # n >= vertex_count?
+        a.jae('bfr_dr_scanned')
+        a.raw(b'\x8B\x0C\xB0')                           # ecx = [eax + esi*4]
+        a.raw(b'\x83\xF9\xFF')                           # unreachable?
+        a.jz('bfr_dr_next')
+        a.raw(b'\x39\xD1')                               # cmp ecx, edx
+        a.jbe('bfr_dr_next')
+        a.raw(b'\x89\xCA')                               # edx = ecx (new max)
+        a.label('bfr_dr_next')
+        a.raw(b'\x46')                                   # ++n
+        a.jmp('bfr_dr_scan')
+        a.label('bfr_dr_scanned')
+        a.raw(b'\x69\xC2' + le32(cfg.CTF_DEFEND_RADIUS_PCT))  # eax = max * PCT
+        a.raw(b'\xB9\x64\x00\x00\x00')                   # ecx = 100
+        a.raw(b'\x31\xD2')                               # edx = 0
+        a.raw(b'\xF7\xF1')                               # div ecx (eax /= 100)
+        a.raw(b'\x83\xF8' + bytes([cfg.CTF_DEFEND_RADIUS_MIN]))
+        a.jae('bfr_dr_min_ok')
+        a.raw(b'\xB8' + le32(cfg.CTF_DEFEND_RADIUS_MIN)) # clamp up to MIN
+        a.label('bfr_dr_min_ok')
+        a.raw(b'\x8B\x0D' + le32(bfr_i_va))              # ecx = i
+        a.raw(b'\x89\x04\x8D' + le32(c.defend_radius_va))  # defend_radius[i] = eax
     a.raw(b'\xFF\x05' + le32(bfr_i_va))                  # i++
     a.jmp('bfr_loop')
 

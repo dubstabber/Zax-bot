@@ -36,9 +36,13 @@ the bot rolls one temporary policy for that missing-goal episode: either search
 (``route_goal_flag = -1``, so node arrivals fall back to random roaming), or
 wait near the enemy base (keep the goal so BFS moves it toward that home
 anchor). A carrier whose OWN flag is missing must not be driven into the empty
-home base, because capture is illegal until that flag returns; carrier+missing
-home always uses search mode. The policy is cleared when the flag becomes
-present again.
+home base, because capture is illegal until that flag returns; instead of the
+old whole-map search roam it STANDOFF-tethers near its base
+(``cfg.CTF_CARRIER_STANDOFF_ENABLED``, sharing the defender role's
+``cpg_tether``/``defend_radius``): goal = home while beyond the map-scaled
+radius, no goal inside it — so it hovers ready to capture, and the
+inside-radius flip still keeps it off the empty base itself. The policy is
+cleared when the flag becomes present again.
 
 ``is_carrying`` is the engine's own per-character inventory-group test
 (live-verified): ``inv = sub_4267E0(char)``; ``slot = sub_425290(inv, FLAG_GID)``
@@ -52,7 +56,7 @@ All routing data is GLOBAL scratch (not per-bot). ``flag_routing_active`` (set b
 from ...asm import Asm
 from ...layout import ScratchLayout
 from ._ctx import build_ctx
-from . import drop, fields, goal, next_hop, seek, sk_routes
+from . import chase, drop, fields, goal, next_hop, seek, sk_routes
 
 
 def emit(a: Asm, layout: ScratchLayout) -> None:
@@ -75,6 +79,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.label('switch_seek_eval'); a.raw(b'\xC3')
         a.label('drop_next_hop'); a.raw(b'\xB8\xFF\xFF\xFF\xFF\xC3')
         a.label('drop_route_refresh'); a.raw(b'\xC3')
+        a.label('chase_next_hop'); a.raw(b'\xB8\xFF\xFF\xFF\xFF\xC3')
+        a.label('chase_route_refresh'); a.raw(b'\xC3')
         a.label('build_sk_routes'); a.raw(b'\xC3')
         a.label('sk_update_phase'); a.raw(b'\xC3')
         a.label('sk_next_hop'); a.raw(b'\xB8\xFF\xFF\xFF\xFF\xC3')
@@ -89,3 +95,4 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     seek.emit(a, layout, c)
     drop.emit(a, layout, c)
     sk_routes.emit(a, layout, c)
+    chase.emit(a, layout, c)

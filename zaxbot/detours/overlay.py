@@ -292,6 +292,14 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
             a.jz('ov_door_rr_done')                           # non-CTF: state only
             a.call_lbl('rebuild_open_routes')
             a.label('ov_door_rr_done')
+    # Enemy-carrier chase servicing (per frame): tick the per-flag sighting
+    # TTL, bind the carrier's last-seen position to its nearest graph node,
+    # and rebuild the per-flag BFS row only when that node CHANGED (one
+    # bounded bfs_run per change — a walking carrier crosses nodes every
+    # second or two). Self-contained pushad/popad; inert stub on builds
+    # without the chase fields.
+    if cfg.CTF_CHASE_ENABLED and layout.has_field('chase_root'):
+        a.call_lbl('chase_route_refresh')
     # Switch-seek servicing: tick active seek timeouts and evaluate at most
     # ONE pending candidate (one bounded BFS) per frame. Self-gated on
     # flag_routing_active inside; inert stub on non-seek builds.

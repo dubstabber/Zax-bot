@@ -96,6 +96,14 @@ def build_follow_ctx(layout: ScratchLayout) -> SimpleNamespace:
     goody_direct_va = None
     goody_abandon_va = None
     sk_pile_dirty_mv_va = None
+    bot_chase_flag_va = None
+    bot_chase_cd_va = None
+    chase_pos_mv_va = None
+    chase_node_mv_va = None
+    chase_ttl_mv_va = None
+    chase_dsq_tmp_va = None
+    chase_flag_present_va = None
+    chase_flag_count_va = None
 
     bot_pos_va        = layout.va('bot_pos')
     bot_slot_tmp_va   = layout.va('bot_slot_tmp')
@@ -276,6 +284,33 @@ def build_follow_ctx(layout: ScratchLayout) -> SimpleNamespace:
         drop_missing_goal_va  = layout.va('route_missing_goal')
         flag_present_mv_va    = layout.va('flag_present')
         flag_count_mv_va      = layout.va('flag_count')
+
+    # Enemy-carrier chase (two-phase, mirror of the drop pursuit's shape).
+    # bot_chase_flag[slot] (flag idx+1) is latched by the perception scan's
+    # LOS sighting of an enemy carrying this bot's team flag; the shared
+    # per-flag intel (chase_pos/chase_node/chase_ttl) is refreshed by any
+    # bot's sighting and serviced (TTL tick, node bind, BFS row rebuild)
+    # by chase_route_refresh at the page flip. ROUTED phase descends the
+    # chase_dist row at node arrivals (chase_next_hop); DIRECT phase
+    # straight-steers only inside the direct radius or at the carrier's
+    # own bound node. The target MOVES, so the direct-phase stall signal
+    # is the physical stuck detector, not dsq improvement.
+    chase_move = (routing
+                  and cfg.CTF_CHASE_ENABLED
+                  and layout.has_field('bot_chase_flag')
+                  and layout.has_field('chase_pos')
+                  and layout.has_field('chase_dsq_tmp')
+                  and layout.has_field('flag_present')
+                  and layout.has_field('flag_count'))
+    if chase_move:
+        bot_chase_flag_va = layout.va('bot_chase_flag')
+        bot_chase_cd_va = layout.va('bot_chase_cd')
+        chase_pos_mv_va = layout.va('chase_pos')
+        chase_node_mv_va = layout.va('chase_node')
+        chase_ttl_mv_va = layout.va('chase_ttl')
+        chase_dsq_tmp_va = layout.va('chase_dsq_tmp')
+        chase_flag_present_va = layout.va('flag_present')
+        chase_flag_count_va = layout.va('flag_count')
 
     # Roam switch wander-bump. bot_switch_target[slot] (switch idx+1) is
     # latched by the switch_wander_check roll at a roam arrival (the fallback

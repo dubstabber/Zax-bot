@@ -39,6 +39,9 @@ def build_ctx(layout: ScratchLayout) -> SimpleNamespace:
     portal_count_va = None
     route_portal_hop_va = None
     portal_active_va = None
+    bot_role_va = None
+    defend_radius_va = None
+    bot_current_wp_va = None
     switch_node_va = None
     switch_table_va = None
     switch_flags_va = None
@@ -103,6 +106,28 @@ def build_ctx(layout: ScratchLayout) -> SimpleNamespace:
         bfs_inq_va      = layout.va('bfs_inq')
         elen_quantum_va = layout.va('elen_quantum')
         assert (VMAX & (VMAX - 1)) == 0, 'SPFA ring mask needs power-of-two VMAX'
+
+    # CTF attacker/defender roles: a DEFENDER (bot_role[slot] != 0) holds
+    # near its own base — ctf_pick_goal reports the HOME base as goal only
+    # while the bot's current node lies beyond defend_radius[home] in the
+    # full flag_dist field (route back), and NO goal inside it (random
+    # near-base roam). build_flag_routes derives defend_radius per base
+    # from the map's span (max finite distance from the base node).
+    defender = (
+        cfg.CTF_DEFENDER_ENABLED
+        and layout.has_field('bot_role')
+        and layout.has_field('defend_radius')
+    )
+    if defender:
+        assert 0 < cfg.CTF_DEFEND_RADIUS_PCT <= 100, 'PCT is a percentage'
+        assert 0 <= cfg.CTF_DEFEND_RADIUS_MIN <= 127, 'MIN clamp is an imm8 compare'
+        bot_role_va = layout.va('bot_role')
+        defend_radius_va = layout.va('defend_radius')
+        bot_current_wp_va = layout.va('bot_current_wp')
+    # Carrier STANDOFF tether: a carrier whose OWN home flag is away holds
+    # near its base via the same cpg_tether/defend_radius machinery instead
+    # of whole-map search roaming. Piggybacks on the defender fields.
+    standoff = defender and cfg.CTF_CARRIER_STANDOFF_ENABLED
 
     # Door-aware rerouting: a SECOND per-base BFS field (flag_dist_open) that
     # SKIPS every graph edge crossing a currently-blocked door, so bots route

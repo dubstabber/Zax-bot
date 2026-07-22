@@ -83,6 +83,94 @@ CTF_DROP_GRAB_COOLDOWN_FRAMES = 150
 # thinks so the bot resumes the graph. It retries automatically afterwards
 # if the flag still lies there.
 CTF_DROP_RETRY_COOLDOWN_FRAMES = 240
+# --- CTF attacker/defender roles ------------------------------------------
+# Spawned CTF bots ALTERNATE roles per team: the 1st bot spawned onto a team
+# is an ATTACKER (classic steal-the-flag behaviour), the 2nd a DEFENDER, the
+# 3rd an attacker again, and so on. Each team counts its own spawns
+# (role_spawn_count[2], reset on match change), so one blue + one red bot are
+# BOTH attackers. Non-CTF spawns are always role 0 (the role only gates CTF
+# goal selection).
+#
+# A DEFENDER holds near its OWN base instead of raiding: while its current
+# node's distance to the home base (the per-match flag_dist BFS field, in
+# WP_EDGE_LEN_QUANTUM units) is within the per-map defend radius it reports
+# NO goal — random near-base waypoint roaming; the moment it drifts beyond
+# the radius, ctf_pick_goal flips its goal to the HOME base and normal
+# routing walks it back inside (self-correcting tether — the bot patrols the
+# base region). A defender that picks something up still behaves correctly:
+# carrying ANY flag uses the untouched carrier machinery (route home,
+# capture/return), and the opportunistic dropped-flag pursuit (350 px) makes
+# it return its own dropped flag near the base. Defenders skip the roam
+# portal-wander roll (a teleporter ride is desertion, not patrolling).
+CTF_DEFENDER_ENABLED = True
+# Defend radius = this percentage of the MAP'S span as seen from the base —
+# max finite flag_dist[base][*] over the graph (computed per base per match
+# by build_flag_routes), so bigger maps give proportionally bigger patrol
+# zones. In BFS distance units (WP_EDGE_LEN_QUANTUM px each).
+CTF_DEFEND_RADIUS_PCT = 30
+# Lower clamp for tiny/degenerate maps, in the same quanta (16 = ~256 px).
+# Must stay <= 127 (imm8 compare in the builder).
+CTF_DEFEND_RADIUS_MIN = 16
+# --- CTF carrier STANDOFF tether ------------------------------------------
+# A bot carrying the enemy flag while its OWN flag is also away cannot
+# capture until the home flag returns (the vanilla checker rule), so
+# whole-map search roaming just walks the carrier away from where the
+# capture will happen. With this on, the carrier-with-missing-home path in
+# ctf_pick_goal applies the SAME per-frame tether as the defender role
+# (shared cpg_tether helper + the map-scaled defend_radius): route toward
+# the HOME base while beyond the radius, random near-base roam inside it —
+# so the carrier hovers around its base, ready to capture the instant its
+# flag returns. The dropped-flag pursuit still outranks this (missing_goal
+# keeps being written): if the home flag is DROPPED, the carrier routes to
+# it from any distance to return it. The tether flips to no-goal inside the
+# radius (goal-node dist 0), so the carrier still never final-approaches
+# the empty home base. Standoff carriers (and defenders) also skip the roam
+# portal-wander roll — a pad ride would dump them across the map.
+# Requires CTF_DEFENDER_ENABLED (shares its radius infrastructure).
+CTF_CARRIER_STANDOFF_ENABLED = True
+# --- CTF enemy-carrier CHASE ----------------------------------------------
+# "If a bot sees an enemy flag carrier nearby, chase it." The perception scan
+# (pick_target) already walks every char with a team filter, so a candidate
+# that passes the filter AND carries a flag is by construction an ENEMY
+# carrying THIS BOT'S OWN team flag (nobody can carry their own flag — the
+# same-team touch returns it). While the bot's home flag is away, each such
+# sighting within CTF_CHASE_RADIUS_SQ with clear LOS stamps shared per-flag
+# intel (chase_pos/chase_ttl, keyed by the home flag idx — any teammate's
+# sighting refreshes it) and latches the SEEING bot's pursuit
+# (bot_chase_flag). Movement is TWO-PHASE like the dropped-flag pursuit v2
+# (the v1 straight-steer lesson: a target behind a wall must be routed
+# AROUND, not ground at): beyond the direct radius the bot descends a
+# per-flag BFS row rooted at the carrier's bound graph node (chase_dist,
+# rebuilt by the page flip when the carrier changes nodes; pad hops emitted
+# like every other descent), and only steers STRAIGHT at the carrier inside
+# CTF_CHASE_DIRECT_RADIUS_SQ (or standing on the carrier's own node).
+# Because the target MOVES, the direct-phase stall signal is the physical
+# stuck detector (position delta), not dsq improvement — a fleeing carrier
+# grows dsq while the chaser runs at full speed. Killing the carrier drops
+# the flag, and the dropped-flag pursuit (which outranks the chase) takes
+# over to return it. Carriers themselves never chase (deliver first), and a
+# chase never latches while the bot's own flag sits at home (no carrier can
+# exist then — the check costs nothing in the common case).
+CTF_CHASE_ENABLED = True
+# Sighting radius² (px²): a carrier seen (LOS-verified) within this latches
+# the chase. Slightly beyond FIRE_RANGE_SQ (300 px) so chasers close into
+# weapon range.
+CTF_CHASE_RADIUS_SQ = 400.0 * 400.0
+# Straight-steer phase radius² — mirror of CTF_DROP_DIRECT_RADIUS_SQ; keep
+# near the waypoint spacing scale so the straight leg cannot span geometry.
+CTF_CHASE_DIRECT_RADIUS_SQ = 160.0 * 160.0
+# Silently unlatch beyond this d² (carrier outran the chaser / teleported).
+# Generous: a ROUTED path legitimately moves away from the target around
+# walls while the carrier also moves.
+CTF_CHASE_ABANDON_RADIUS_SQ = 700.0 * 700.0
+# Sighting memory (frames): the shared intel stays live this long after the
+# LAST sighting by anyone; the pursuit ends when it expires. Ticked once per
+# frame at the page flip.
+CTF_CHASE_TTL_FRAMES = 90
+# After a direct-phase pinned timeout (physically stuck a full watchdog
+# window — wall micro-feature or body-block), this bot stops chasing for
+# this many thinks (it keeps SHOOTING; fire targeting is independent).
+CTF_CHASE_COOLDOWN_FRAMES = 240
 # Guard the engine score action itself: a map-script capture point award is
 # suppressed when the scoring team's own flag is away from base or carried by a
 # player. Last-resort backstop behind the event-driven flag_present[] — with

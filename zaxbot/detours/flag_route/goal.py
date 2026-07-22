@@ -20,6 +20,14 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     bot_char_va = c.bot_char_va
     bot_team_va = c.bot_team_va
     RMAX = c.RMAX
+    ROW = c.ROW
+    defender = c.defender
+    standoff = c.standoff
+    bot_role_va = c.bot_role_va
+    defend_radius_va = c.defend_radius_va
+    bot_current_wp_va = c.bot_current_wp_va
+    flag_dist_va = c.flag_dist_va
+    vcount_va = c.vcount_va
 
     # =====================================================================
     # ctf_pick_goal: set route_goal_flag = this bot's goal flag index (the HOME
@@ -87,6 +95,30 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     a.raw(b'\x89\xF8')                                         # eax = home (edi)
     a.jmp('cpg_store')
     a.label('cpg_pick_enemy')
+    if defender:
+        # --- DEFENDER role (not carrying): hold near OWN base instead of
+        # raiding. While the bot's current node is within defend_radius[home]
+        # of the home base (full flag_dist field, quanta units) report NO
+        # goal — the follower's random wp_advance roams it around the base;
+        # beyond the radius the goal flips to the HOME base so normal
+        # routing (door-aware, portals, seek) walks it back inside. The
+        # per-frame re-evaluation makes this a self-correcting tether: a
+        # roam step that leaves the zone is pulled back at the next arrival.
+        # Deliberately BYPASSES the flag_present/missing-policy machinery —
+        # a defender heads to its base area regardless of flag state (its
+        # own stolen flag is exactly when guarding home matters), and since
+        # the goal node itself is always inside the radius (dist 0), the
+        # final approach can never steer a non-carrier into the flag.
+        # Carrying defenders take the untouched carrier path above.
+        a.raw(b'\x8B\x0D' + le32(bot_slot_va))                # ecx = slot
+        a.raw(b'\x83\x3C\x8D' + le32(bot_role_va) + b'\x00')  # defender?
+        a.jz('cpg_role_atk')
+        a.raw(b'\x89\xF8')                                    # eax = home (edi)
+        a.raw(b'\x83\xF8\xFF')                                # no home base?
+        a.jz('cpg_store_goal')                                # -> store -1
+        a.call_lbl('cpg_tether')                              # eax = home or -1
+        a.jmp('cpg_store_goal')
+        a.label('cpg_role_atk')
     a.raw(b'\x89\xD0')                                         # eax = enemy (edx)
     a.label('cpg_store')
     a.raw(b'\x83\xF8\xFF'); a.jz('cpg_store_goal')             # no goal -> store -1
@@ -102,13 +134,28 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     # If we are carrying the enemy flag, the missing goal is our OWN home flag.
     # Do not route/final-approach to an empty home base: normal CTF forbids a
     # capture while our flag is away, and the page-flip far-base tick can wake
-    # capture entities that would otherwise stay camera-gated. Search instead.
+    # capture entities that would otherwise stay camera-gated. missing_goal is
+    # still written either way — the dropped-flag pursuit keys its any-distance
+    # latch off it, so a carrier whose home flag lies DROPPED somewhere routes
+    # to it and returns it (unlocking its own capture).
+    # STANDOFF (cfg.CTF_CARRIER_STANDOFF_ENABLED): a carrier in this state
+    # cannot capture until its flag returns, so whole-map search roaming just
+    # walks it away from where the capture will happen (user-reported). Apply
+    # the defender tether instead: goal = HOME while beyond defend_radius
+    # (route back), no goal inside it (near-base roam) — the bot hovers at its
+    # base, ready. The inside-radius flip still guarantees no final approach
+    # into the empty base (goal-node dist is 0), and the home force-tick stays
+    # off through its flag_present[home] gate. Without the flag: the old
+    # unconditional whole-map search.
     a.raw(b'\x83\x3D' + le32(route_carry_va) + b'\x00')        # carrying?
     a.jz('cpg_missing_attacker')
     a.raw(b'\x8B\x0D' + le32(bot_slot_va))                     # ecx = slot
     a.raw(b'\xC7\x04\x8D' + le32(missing_policy_va) + le32(1)) # policy = search
     a.raw(b'\x89\x04\x8D' + le32(missing_goal_va))             # missing_goal[slot] = goal
-    a.raw(b'\xB8\xFF\xFF\xFF\xFF')                             # no goal -> random graph roam
+    if standoff:
+        a.call_lbl('cpg_tether')                               # eax = home or -1
+    else:
+        a.raw(b'\xB8\xFF\xFF\xFF\xFF')                         # no goal -> random graph roam
     a.jmp('cpg_store_goal')
 
     a.label('cpg_missing_attacker')
@@ -144,4 +191,31 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     a.raw(b'\xA3' + le32(route_goal_va))                       # route_goal_flag = eax (or -1)
     a.label('cpg_done')
     a.raw(b'\xC3')
+
+    if defender:
+        # =================================================================
+        # cpg_tether(EAX = home base idx, valid) -> EAX = home (route back)
+        # or -1 (roam here). The shared near-base tether: keeps the goal
+        # only while the bot's current node lies BEYOND defend_radius[home]
+        # in the full flag_dist field; inside the zone (or with no usable
+        # node/unreachable base) it reports no goal so the follower's
+        # random wp_advance roams locally. Used by the DEFENDER role and
+        # the carrier STANDOFF. Clobbers ecx/edx/esi.
+        # =================================================================
+        a.label('cpg_tether')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_va))                # ecx = slot
+        a.raw(b'\x8B\x14\x8D' + le32(bot_current_wp_va))      # edx = current node
+        a.raw(b'\x3B\x15' + le32(vcount_va))                  # unlatched (-1) / bad?
+        a.jae('cpg_tether_roam')
+        a.raw(b'\x69\xF0' + le32(ROW))                        # imul esi, eax, ROW
+        a.raw(b'\x8D\x34\x96')                                # lea esi, [esi + edx*4]
+        a.raw(b'\x8B\xB6' + le32(flag_dist_va))               # esi = flag_dist[home][node]
+        a.raw(b'\x83\xFE\xFF')                                # unreachable?
+        a.jz('cpg_tether_roam')
+        a.raw(b'\x3B\x34\x85' + le32(defend_radius_va))       # dist vs defend_radius[home]
+        a.ja('cpg_tether_ret')                                # beyond -> keep eax = home
+        a.label('cpg_tether_roam')
+        a.raw(b'\xB8\xFF\xFF\xFF\xFF')                        # inside/unknown -> roam
+        a.label('cpg_tether_ret')
+        a.raw(b'\xC3')
 

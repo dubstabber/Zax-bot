@@ -106,6 +106,9 @@ def _emit_identify_and_setup(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_switch_target')) + le32(0))  # drop switch bump
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_switch_cd')) + le32(0))      # fresh roll cooldown
         a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_switch_try')) + le32(0))     # fresh press patience
+    if layout.has_field('bot_chase_flag'):
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_chase_flag')) + le32(0))  # drop carrier chase
+        a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_chase_cd')) + le32(0))    # fresh chase cooldown
     if layout.has_field('bot_sk_return'):
         # Fresh SK phase state: a respawned bot carries nothing (the death
         # drop consumed the load), so it starts in COLLECT with clean
@@ -204,6 +207,10 @@ def _emit_stuck_detection(a: Asm, layout: ScratchLayout) -> None:
         if layout.has_field('bot_pile_target'):
             # Same for a latched SK pile divert.
             a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_pile_target')) + le32(0))
+        if layout.has_field('bot_chase_flag'):
+            # And a latched enemy-carrier chase — the carrier is an arena
+            # away now; a fresh sighting re-latches if it is genuinely near.
+            a.raw(b'\xC7\x04\x8D' + le32(layout.va('bot_chase_flag')) + le32(0))
         if layout.has_field('bot_portal_cd'):
             # Teleported: arm the wander-entry cooldown so the roam roll at
             # the exit node (which IS the return pad's node) can't bounce the

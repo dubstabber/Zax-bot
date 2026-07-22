@@ -238,6 +238,28 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xA1' + le32(active_bot_slot_va))                # mov eax, [active_bot_slot]
     a.raw(b'\x89\x14\x85' + le32(bot_team_va))               # mov [bot_team + eax*4], edx
     logc(ord('T'))
+    # --- CTF role assignment: per-team spawn counter alternates roles, so a
+    # team's 1st bot is an ATTACKER, its 2nd a DEFENDER, 3rd attacker, ... —
+    # each team counts independently (one blue + one red bot are both
+    # attackers). Counters reset on match change (detour_df90). Non-CTF
+    # spawns always get role 0; the role only gates CTF goal selection
+    # (ctf_pick_goal), so DM/SK behaviour is untouched.
+    if cfg.CTF_DEFENDER_ENABLED and layout.has_field('bot_role'):
+        bot_role_va = layout.va('bot_role')
+        role_count_va = layout.va('role_spawn_count')
+        a.raw(b'\x83\x3D' + le32(menu_mode_va) + b'\x01')    # CTF match?
+        a.jnz('spawn_role_atk')
+        a.raw(b'\x8B\x0D' + le32(chosen_team_va))            # ecx = chosen team
+        a.raw(b'\x83\xE1\x01')                               # and ecx, 1 (defensive)
+        a.raw(b'\x8B\x14\x8D' + le32(role_count_va))         # edx = count[team]
+        a.raw(b'\xFF\x04\x8D' + le32(role_count_va))         # ++count[team]
+        a.raw(b'\x83\xE2\x01')                               # role = count & 1
+        a.jmp('spawn_role_store')
+        a.label('spawn_role_atk')
+        a.raw(b'\x31\xD2')                                   # edx = 0 (attacker)
+        a.label('spawn_role_store')
+        a.raw(b'\xA1' + le32(active_bot_slot_va))            # eax = slot
+        a.raw(b'\x89\x14\x85' + le32(bot_role_va))           # bot_role[slot] = edx
     a.label('spawn_skip_team')
 
     # --- Pre-spawn: pick the bot's name/color idx and write color1/color2
