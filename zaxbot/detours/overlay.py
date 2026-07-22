@@ -292,6 +292,13 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
             a.jz('ov_door_rr_done')                           # non-CTF: state only
             a.call_lbl('rebuild_open_routes')
             a.label('ov_door_rr_done')
+    # True per-frame tick for time-based movement behaviours (the combat
+    # strafe weave's side-flip). frame_counter increments once per BOT THINK
+    # — with N bots it advances N per frame, which made the weave flip sides
+    # nearly every frame: the live-reported "bots vibrate in place while
+    # dodging". The page flip runs exactly once per frame.
+    if layout.has_field('frame_tick'):
+        a.raw(b'\xFF\x05' + le32(layout.va('frame_tick')))
     # Enemy-carrier chase servicing (per frame): tick the per-flag sighting
     # TTL, bind the carrier's last-seen position to its nearest graph node,
     # and rebuild the per-flag BFS row only when that node CHANGED (one

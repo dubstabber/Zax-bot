@@ -111,8 +111,8 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
         # final approach can never steer a non-carrier into the flag.
         # Carrying defenders take the untouched carrier path above.
         a.raw(b'\x8B\x0D' + le32(bot_slot_va))                # ecx = slot
-        a.raw(b'\x83\x3C\x8D' + le32(bot_role_va) + b'\x00')  # defender?
-        a.jz('cpg_role_atk')
+        a.raw(b'\xF6\x04\x8D' + le32(bot_role_va) + b'\x01')  # defender? (bit0;
+        a.jz('cpg_role_atk')                                  # bit1 = route lane)
         a.raw(b'\x89\xF8')                                    # eax = home (edi)
         a.raw(b'\x83\xF8\xFF')                                # no home base?
         a.jz('cpg_store_goal')                                # -> store -1

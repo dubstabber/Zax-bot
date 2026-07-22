@@ -1,6 +1,8 @@
-"""Final stages: normalize + velocity/angle emit, wall-slide angle
-sweep, portal/plasma heading vetoes, dead-bot reset, zero-vector
-return and the host fall-through to the original prologue."""
+"""Final stages: combat strafe weave, normalize + velocity/angle emit,
+wall-slide angle sweep, portal/plasma heading vetoes, dead-bot reset,
+zero-vector return and the host fall-through to the original prologue."""
+
+import struct
 
 from ... import addresses as ax
 from ... import config as cfg
@@ -33,6 +35,90 @@ def _emit_normalize_and_emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x81\x35' + le32(dx_accum_va) + le32(0x80000000))  # xor [dx], sign -> negate
     a.raw(b'\x81\x35' + le32(dy_accum_va) + le32(0x80000000))  # xor [dy], sign -> negate
     a.label('s542360_emit_noflee')
+
+    strafe = (cfg.FIGHT_STRAFE_ENABLED
+              and layout.has_field('bot_enemy_near')
+              and layout.has_field('bot_enemy_dx')
+              and layout.has_field('strafe_tmp')
+              and layout.has_field('frame_tick'))
+    if strafe:
+        # --- Combat strafe WEAVE. While an enemy is in fight range (per-bot
+        # bot_enemy_near, stamped by pick_target with the engagement vector
+        # bot_enemy_dx/dy), add a PERPENDICULAR-to-the-enemy component to
+        # the desired vector before normalization:
+        #     v' = v + k * perp(e),   k = GAIN * |v| / |e|,
+        # sign flipping every 2^FLIP_SHIFT frames (slot-offset so bots
+        # desync) — the bot zigzags ACROSS the line of fire while still
+        # progressing along v (heading swings +-atan(GAIN)). The lateral
+        # magnitude scales with |v|, so close-in approaches (flag touch,
+        # switch press) shrink the weave naturally. Suppressed while the
+        # wall-slide sweep owns the heading (stuck/wp_try at the trigger):
+        # a weave into geometry would fight the sweep's escape.
+        strafe_tmp_va      = layout.va('strafe_tmp')
+        bot_enemy_near_va  = layout.va('bot_enemy_near')
+        bot_enemy_dx_va    = layout.va('bot_enemy_dx')
+        bot_enemy_dy_va    = layout.va('bot_enemy_dy')
+        stuck_count_va     = layout.va('bot_stuck_count')
+        wp_try_va          = layout.va('bot_wp_try')
+        a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))        # ecx = slot (reload)
+        a.raw(b'\x83\x3C\x8D' + le32(bot_enemy_near_va) + b'\x00')
+        a.jz('s542360_strafe_done')                       # no enemy near
+        a.raw(b'\x8B\x04\x8D' + le32(stuck_count_va))     # sweep engaged?
+        a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES]))
+        a.jae('s542360_strafe_done')
+        a.raw(b'\x8B\x04\x8D' + le32(wp_try_va))
+        a.raw(b'\x83\xF8' + bytes([WP_SLIDE_TRIGGER_FRAMES]))
+        a.jae('s542360_strafe_done')
+        a.raw(b'\xD9\x05' + le32(dx_accum_va))            # |v|^2
+        a.raw(b'\xD8\xC8')
+        a.raw(b'\xD9\x05' + le32(dy_accum_va))
+        a.raw(b'\xD8\xC8')
+        a.raw(b'\xDE\xC1')                                # ST0 = |v|^2
+        a.raw(b'\xD9\xE4')                                # ftst (zero desired?)
+        a.raw(b'\xDF\xE0'); a.raw(b'\x9E')                # EAX dead here (constraint #6)
+        a.jz('s542360_strafe_pop1')
+        a.raw(b'\xD9\xFA')                                # fsqrt -> |v|
+        a.raw(b'\xD9\x04\x8D' + le32(bot_enemy_dx_va))    # |e|^2
+        a.raw(b'\xD8\xC8')
+        a.raw(b'\xD9\x04\x8D' + le32(bot_enemy_dy_va))
+        a.raw(b'\xD8\xC8')
+        a.raw(b'\xDE\xC1')                                # ST0 = |e|^2, ST1 = |v|
+        a.raw(b'\xD9\xE4')                                # ftst (degenerate enemy vec?)
+        a.raw(b'\xDF\xE0'); a.raw(b'\x9E')
+        a.jz('s542360_strafe_pop2')
+        a.raw(b'\xD9\xFA')                                # ST0 = |e|, ST1 = |v|
+        a.raw(b'\xDE\xF9')                                # fdivp -> ST0 = |v| / |e|
+        a.raw(b'\xC7\x05' + le32(strafe_tmp_va)
+              + struct.pack('<f', float(cfg.FIGHT_STRAFE_GAIN)))
+        a.raw(b'\xD8\x0D' + le32(strafe_tmp_va))          # ST0 = k = GAIN*|v|/|e|
+        # Weave side: ((frame_tick >> FLIP_SHIFT) + slot) & 1 -> negate k.
+        # MUST be the true per-frame tick (page flip), NOT frame_counter:
+        # that one advances once per bot THINK (N bots = N/frame), which
+        # flipped the side nearly every frame — bots vibrated in place
+        # (live-reported) instead of running 16-frame zigzag legs.
+        a.raw(b'\xA1' + le32(layout.va('frame_tick')))
+        a.raw(b'\xC1\xE8' + bytes([cfg.FIGHT_STRAFE_FLIP_SHIFT]))
+        a.raw(b'\x01\xC8')                                # add eax, ecx (slot desync)
+        a.raw(b'\xA8\x01')                                # test al, 1
+        a.jz('s542360_strafe_side')
+        a.raw(b'\xD9\xE0')                                # fchs -> other side
+        a.label('s542360_strafe_side')
+        # dx' = dx - k*e.y ; dy' = dy + k*e.x   (perp(e) = (-e.y, e.x))
+        a.raw(b'\xD9\x04\x8D' + le32(bot_enemy_dy_va))    # ST0 = e.y, ST1 = k
+        a.raw(b'\xD8\xC9')                                # fmul st0, st1 -> k*e.y
+        a.raw(b'\xD8\x2D' + le32(dx_accum_va))            # fsubr -> ST0 = dx - k*e.y
+        a.raw(b'\xD9\x1D' + le32(dx_accum_va))            # fstp dx' (ST0 = k)
+        a.raw(b'\xD9\x04\x8D' + le32(bot_enemy_dx_va))    # ST0 = e.x, ST1 = k
+        a.raw(b'\xDE\xC9')                                # fmulp -> ST0 = k*e.x
+        a.raw(b'\xD8\x05' + le32(dy_accum_va))            # fadd dy
+        a.raw(b'\xD9\x1D' + le32(dy_accum_va))            # fstp dy' (FPU empty)
+        a.jmp('s542360_strafe_done')
+        a.label('s542360_strafe_pop2')
+        a.raw(b'\xDD\xD8')                                # pop |e|^2
+        a.label('s542360_strafe_pop1')
+        a.raw(b'\xDD\xD8')                                # pop |v|^2 / |v|
+        a.label('s542360_strafe_done')
+
     a.raw(b'\xD9\x05' + le32(dx_accum_va))                # fld dx
     a.raw(b'\xD8\xC8')                                    # fmul st,st
     a.raw(b'\xD9\x05' + le32(dy_accum_va))                # fld dy

@@ -542,12 +542,25 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   (`cfg.CTF_DEFENDER_ENABLED`; built 2026-07-21, live-confirmed working the
   same day; the carrier STANDOFF tether landed right after and its live
   pass is pending):
-  - **Assignment** (spawn side, `hook/spawn.py` after the team write): each
-    team's CTF spawns are counted (`role_spawn_count[2]`, reset on match
-    change by `detour_df90`) and `bot_role[slot] = count & 1` — a team's 1st
-    bot attacks, its 2nd defends, 3rd attacks, ... Teams count independently
-    (one blue + one red bot are both attackers). Non-CTF spawns are always
-    role 0; the role gates ONLY CTF goal selection, so DM/SK are untouched.
+  - **Assignment** (spawn side, `hook/spawn.py` — at the SUCCESS TAIL, just
+    before the join-message broadcast, gated on `botp != 0`): the role is
+    derived from the LIVE team composition — `bit0 = (living same-team
+    bots) & 1`; a team's 1st bot attacks, its 2nd defends, 3rd attacks, ...
+    Teams count independently (one blue + one red bot are both attackers).
+    It was originally a raw per-team ATTEMPT counter at the team write, but
+    R snapshots (2026-07-22, four sessions) caught `role_spawn_count` 6
+    increments ahead of the living bots every session: adds that failed
+    late (session/team full) consumed parity, so a failure landing between
+    two successes gave a team A,A — the reported "more defenders on one
+    team, more attackers on the other, tracking which team I play" (the
+    human's team fills first, so its adds fail differently). Live-count
+    also self-heals across any drift. `role_spawn_count[2]` remains as a
+    success-only diagnostic. `bot_role[slot]` is a BIT FIELD: bit0 =
+    defender (consumers test the bit, not the whole value), bit1 = the
+    attacker's ROUTE LANE — `(living same-team attackers >> 1) & 1` at
+    spawn, i.e. attacker ordinals 0,1 -> lane 0, 2,3 -> lane 1 (see the
+    route-lane bullet below). Non-CTF spawns are always role 0; the role
+    gates ONLY CTF goal selection, so DM/SK are untouched.
   - **Defender behavior** (`ctf_pick_goal` in `flag_route/goal.py`, entered
     on the not-carrying path): while the bot's current node lies within
     `defend_radius[home]` of its OWN base in the full `flag_dist` field it
@@ -583,6 +596,52 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     contiguous tail block (`layout/role.py`; df90 clears it with one
     rep-stosd — contiguity pinned in tests) + the `tag_role` R-chunk dumps
     it whole.
+- ATTACKER ROUTE-LANE SPLIT (`cfg.CTF_LANE_SPLIT_ENABLED`; built
+  2026-07-22, live pass pending — the "not all attackers down the same
+  corridor" layer): the deterministic BFS descent sent every attacker down
+  the IDENTICAL shortest path (user-reported single-file conga). Each
+  team's attackers carry a LANE bit (`bot_role` bit1, assigned at spawn:
+  ordinals 0,1 -> lane 0; 2,3 -> lane 1; wraps). In `ctf_next_hop`, lane 0
+  descends exactly as before (minimum-distance neighbour); lane 1 still
+  requires every hop to STRICTLY DESCEND the active field — the progress
+  guarantee is untouched (monotone descent terminates at the goal; pinned
+  offline on all shipped CTF graphs from every reachable node) — but picks
+  the LARGEST descending neighbour, so at every fork it peels onto the
+  alternative branch; in corridors both lanes converge (only one way
+  exists). `cnh_curd` (per-call fixed descent threshold — the running best
+  in ECX becomes a MAX under lane 1 and can no longer double as the
+  descent gate) + `cnh_lane` (per-call mode) live in `layout/lane.py`.
+  Lane 1 NEVER applies to: carriers (shortest way home), defenders, seek
+  descents, or the drop/chase/SK pursuit rows (objective-direct). CTF maps
+  are near-symmetric, so descending forks are exactly the left/right route
+  splits (offline: the max/min descents from the far node genuinely
+  diverge on 3+ shipped maps).
+- Bots WEAVE while fighting (`cfg.FIGHT_STRAFE_ENABLED`; built 2026-07-22,
+  live pass pending — the dodge layer, user-reported "bots dodge
+  vertically instead of horizontally": route jitter along the mostly
+  vertical engagement axis looked like dodging, while real projectile
+  dodging needs the PERPENDICULAR): while an enemy is inside fight range —
+  the fire scan's per-bot `bot_enemy_near` stamp (240 px), which now also
+  stamps the per-bot engagement vector `bot_enemy_dx/dy` (the global
+  best_dx/dy are per-call temps another bot's scan overwrites) — the emit
+  stage adds a perpendicular-to-the-enemy component to the desired vector
+  BEFORE normalization: `v' = v + k*perp(e)`, `k = FIGHT_STRAFE_GAIN *
+  |v|/|e|`, sign flipping every `2^FIGHT_STRAFE_FLIP_SHIFT` frames of the
+  TRUE per-frame `frame_tick` (incremented once per page flip) with a slot
+  offset so bots desync. Do NOT clock this off `frame_counter` — that
+  increments once per BOT THINK (N bots advance it N per frame), which
+  flipped the side nearly every frame and made bots visibly VIBRATE in
+  place while dodging (live-reported first pass, fixed 2026-07-22).
+  The heading swings ±atan(GAIN) (~42° at
+  0.9) to alternating sides — bots zigzag ACROSS the line of fire while
+  still progressing toward their goal (the watchdogs keep seeing
+  progress, so no false recovery triggers), and the lateral magnitude
+  scales with |v| so close-in final approaches (flag touch, switch/pad
+  press) shrink the weave naturally. Suppressed while the wall-slide
+  sweep owns the heading (stuck/wp_try at the slide trigger) — a weave
+  into geometry would fight the sweep's escape rotation. Far bots never
+  weave (the fire detour's recovery-tick path skips the scan, so the
+  stamp stays clear).
 - CTF bots PURSUE DROPPED FLAGS (`cfg.CTF_DROPPED_FLAG_ENABLED`; the "don't
   walk past the flag lying on the ground" layer). Two halves:
   - **Detection** (`entity_scan.py`, inside the `scan_portal_active` periodic
@@ -994,10 +1053,10 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     mislabelled a bot standing just past the doorway as not-crossed and
     walked it back INTO the closed door (2026-07-20 snapshots, part of the
     self-closing-door shuttle). Degenerate dot <= 0 (bot exactly on the door
-    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~1.9 KB
-    below `SCRATCH_OFF` (hook_entry_size 43125 of 45056 after the bot-menu,
-    CTF role/standoff and enemy-carrier chase layers; the
-    boundary sits at 0xB000 with the section
+    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~1.4 KB
+    below `SCRATCH_OFF` (hook_entry_size 43589 of 45056 after the bot-menu,
+    CTF role/standoff, enemy-carrier chase, route-lane and combat-strafe
+    layers; the boundary sits at 0xB000 with the section
     at 0x28000). When it runs low again, bump
     `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from

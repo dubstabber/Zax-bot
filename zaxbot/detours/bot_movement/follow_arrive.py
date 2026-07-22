@@ -317,8 +317,8 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
                 # the roll would just bounce it out and back (Hydro pads
                 # cross arenas). Its tether re-routes it home anyway; skip
                 # the coin entirely.
-                a.raw(b'\x83\x3C\x9D' + le32(layout.va('bot_role')) + b'\x00')
-                a.jnz('s542360_wp_no_wander')            # defender -> no pad roll
+                a.raw(b'\xF6\x04\x9D' + le32(layout.va('bot_role')) + b'\x01')
+                a.jnz('s542360_wp_no_wander')            # defender (bit0) -> no pad roll
             if (cfg.CTF_DEFENDER_ENABLED and cfg.CTF_CARRIER_STANDOFF_ENABLED
                     and layout.has_field('defend_radius')
                     and layout.has_field('flag_routing_active')

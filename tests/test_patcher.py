@@ -1251,20 +1251,129 @@ class CtfRoleTests(unittest.TestCase):
         self.assertFalse(layout.has_field('defend_radius'))
 
     def test_spawn_alternation_is_per_team(self):
-        # Python mirror of the emitted spawn-side rule (role = count[team]++
-        # & 1): each team alternates independently, so the example sequence
-        # from the feature request holds — six blue spawns give A/D/A/D/A/D,
-        # and one blue + one red are BOTH attackers.
-        def spawn_seq(teams):
-            count = [0, 0]
+        # Python mirror of the emitted SUCCESS-SITE rule (live-count): role
+        # bit0 = (living same-team bots) & 1, attacker lane bit1 = (living
+        # same-team attackers >> 1) & 1. Each team alternates independently
+        # (six blue spawns -> A/D/A/D/A/D; one blue + one red both attack),
+        # and — the 2026-07-22 snapshot lesson — FAILED spawn attempts must
+        # not perturb parity: the old attempt counter gave a team A,A when a
+        # full-session failure landed between two successes.
+        def spawn_seq(attempts):
+            # attempts: (team, succeeds) pairs; returns per-success role vals
+            live = []                     # (team, role_value)
             roles = []
-            for t in teams:
-                roles.append(count[t] & 1)
-                count[t] += 1
+            for team, ok in attempts:
+                if not ok:
+                    continue              # failures leave no trace
+                same = [r for (t, r) in live if t == team]
+                atk = sum(1 for r in same if not (r & 1))
+                val = 1 if (len(same) & 1) else (((atk >> 1) & 1) << 1)
+                live.append((team, val))
+                roles.append(val)
             return roles
-        self.assertEqual(spawn_seq([0] * 6), [0, 1, 0, 1, 0, 1])
-        self.assertEqual(spawn_seq([0, 1]), [0, 0])
-        self.assertEqual(spawn_seq([0, 0, 1, 1, 0]), [0, 1, 0, 1, 0])
+        A, D = 0, 1
+        LANE = 2                                       # attacker, lane 1
+        self.assertEqual(spawn_seq([(0, True)] * 6),
+                         [A, D, A, D, LANE, D])        # atk ordinals 0,1,2 -> lanes 0,0,1
+        self.assertEqual(spawn_seq([(0, True), (1, True)]), [A, A])
+        # A failed red add between two red successes must NOT yield A,A.
+        self.assertEqual(spawn_seq([(1, True), (1, False), (1, True)]),
+                         [A, D])
+        # Six failures after filling up (the live-observed pattern) change
+        # nothing for later spawns on the other team.
+        self.assertEqual(spawn_seq([(0, True), (0, True)]
+                                   + [(1, False)] * 6 + [(1, True)]),
+                         [A, D, A])
+
+    def test_lane_split_assignment_mirror(self):
+        # Attacker ordinals map to lanes 0,0,1,1 then wrap — "up to 2 bots
+        # per route". Mirror of ((atk_count >> 1) & 1).
+        self.assertEqual([((n >> 1) & 1) for n in range(6)],
+                         [0, 0, 1, 1, 0, 0])
+
+    def test_lane1_max_descent_terminates_on_shipped_graphs(self):
+        # Lane 1 replaces "step to the MIN-distance neighbour" with "step to
+        # the MAX strictly-descending neighbour". Strict descent is the
+        # termination proof; pin it on every shipped CTF graph: from EVERY
+        # node that reaches the base, max-descent arrives at the base node
+        # in at most V hops (walkable edges; pad relaxation is exercised by
+        # the routed-pursuit tests). Also record that at least a few maps
+        # actually DIVERGE from the min-descent path — the feature's point.
+        import heapq
+        import math
+        from zaxbot.flag_data import resolve_flag_data
+        flag_maps = dict(resolve_flag_data())
+        if not flag_maps:
+            self.skipTest('Data.dat not present')
+        diverged = 0
+        checked = 0
+        for name, anchors in flag_maps.items():
+            path = (Path(__file__).resolve().parents[1] / 'waypoints'
+                    / (name.replace('/', '_') + '.zwpt'))
+            if not path.exists():
+                continue
+            d = path.read_bytes()
+            magic, _ver, vc, ec = struct.unpack('<4sIII', d[:16])
+            verts = [struct.unpack('<ff', d[16 + i*8:24 + i*8])
+                     for i in range(vc)]
+            eoff = 16 + vc*8
+            edges = [struct.unpack('<I', d[eoff + e*4:eoff + e*4 + 4])[0]
+                     for e in range(ec)]
+            edges = [(w & 0xFFFF, w >> 16) for w in edges]
+            nbrs = [[] for _ in range(vc)]
+            for (i, j) in edges:
+                nbrs[i].append(j)
+                nbrs[j].append(i)
+
+            def nearest(x, y):
+                return min(range(vc),
+                           key=lambda k: (verts[k][0]-x)**2 + (verts[k][1]-y)**2)
+
+            for (x, y, _t) in anchors:
+                base = nearest(x, y)
+                dist = [-1] * vc
+                dist[base] = 0
+                pq = [(0, base)]
+                while pq:
+                    du, u = heapq.heappop(pq)
+                    if du > dist[u]:
+                        continue
+                    for v in nbrs[u]:
+                        w = max(1, round(math.dist(verts[u], verts[v])
+                                         / cfg.WP_EDGE_LEN_QUANTUM))
+                        if dist[v] == -1 or du + w < dist[v]:
+                            dist[v] = du + w
+                            heapq.heappush(pq, (du + w, v))
+
+                def descend(start, pick_max):
+                    cur, hops, path_nodes = start, 0, [start]
+                    while cur != base:
+                        cand = [v for v in nbrs[cur]
+                                if dist[v] != -1 and dist[v] < dist[cur]]
+                        if not cand:
+                            return None
+                        cur = (max if pick_max else min)(
+                            cand, key=lambda v: dist[v])
+                        path_nodes.append(cur)
+                        hops += 1
+                        if hops > vc:
+                            return None
+                    return path_nodes
+
+                for start in range(vc):
+                    if dist[start] == -1 or start == base:
+                        continue
+                    p1 = descend(start, pick_max=True)
+                    self.assertIsNotNone(
+                        p1, f'{name}: lane-1 descent from {start} failed')
+                far = max((v for v in range(vc) if dist[v] != -1),
+                          key=lambda v: dist[v])
+                if descend(far, True) != descend(far, False):
+                    diverged += 1
+                checked += 1
+        self.assertGreaterEqual(checked, 12)
+        # Symmetric CTF maps offer forks; expect real divergence somewhere.
+        self.assertGreaterEqual(diverged, 3)
 
     def test_defend_radius_scales_with_map_and_excludes_enemy_base(self):
         # Offline mirror of build_flag_routes' defender-radius pass on every
@@ -1835,8 +1944,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = 'b49d6248e21d2cdb618eb4989df26209d0e3c430cdabda74d60c0e5d232a302b'
-    HOOK_ENTRY_SIZE = 43125
+    SECTION_SHA256 = '44fab67da761fc3f9a943c0d8c2438f30b07b68c6a922e453b07933b2977f2dd'
+    HOOK_ENTRY_SIZE = 43589
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

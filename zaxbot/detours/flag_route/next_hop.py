@@ -47,6 +47,11 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     seek_dist_va = c.seek_dist_va
     bot_seek_va = c.bot_seek_va
     SEEK_ROW = c.SEEK_ROW
+    lanes = c.lanes
+    cnh_curd_va = c.cnh_curd_va
+    cnh_lane_va = c.cnh_lane_va
+    route_carry_va = c.route_carry_va
+    bot_role_va = c.bot_role_va
 
     # =====================================================================
     # ctf_next_hop(ECX = current node idx) -> EAX = goal-biased next node,
@@ -200,6 +205,24 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
         a.raw(b'\x8B\x4C\x9D\x00')                       # ecx = [ebp + ebx*4] (cur_d)
         a.raw(b'\x83\xF9\xFF')                           # cmp ecx, -1 (cur unreachable?)
         a.jz('cnh_fail')
+    if lanes:
+        # --- Route-lane select. cnh_curd = the FIXED strict-descent
+        # threshold (under lane 1 the running best in ECX becomes a MAX and
+        # can no longer double as the descent gate). Lane 1 applies only to
+        # a NON-carrying attacker with the lane bit, and never to a seek
+        # descent (targeted switch walk stays exact).
+        a.raw(b'\x89\x0D' + le32(cnh_curd_va))          # cnh_curd = cur_d
+        a.raw(b'\xC7\x05' + le32(cnh_lane_va) + le32(0))
+        a.raw(b'\x83\x3D' + le32(route_carry_va) + b'\x00')
+        a.jnz('cnh_lane_done')                          # carrier -> shortest home
+        a.raw(b'\x8B\x15' + le32(bot_slot_va))          # edx = slot
+        if seek:
+            a.raw(b'\x83\x3C\x95' + le32(bot_seek_va) + b'\x00')
+            a.jnz('cnh_lane_done')                      # seek descent -> exact
+        a.raw(b'\xF6\x04\x95' + le32(c.bot_role_va) + b'\x02')  # lane bit?
+        a.jz('cnh_lane_done')
+        a.raw(b'\xC7\x05' + le32(cnh_lane_va) + le32(1))
+        a.label('cnh_lane_done')
     a.raw(b'\xBA\xFF\xFF\xFF\xFF')                       # edx = -1 (best)
     a.raw(b'\x31\xF6')                                   # esi = 0 (edge idx)
 
@@ -259,8 +282,29 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     a.raw(b'\x3B\x05' + le32(vcount_va))               # cmp eax, vertex_count
     a.jae('cnh_scan_next')                             # out of range
     a.raw(b'\x8B\x7C\x85\x00')                          # edi = [ebp + eax*4] (nd = disti[nb])
-    a.raw(b'\x39\xCF')                                  # cmp edi, ecx (nd - best_d)
-    a.jae('cnh_scan_next')                             # nd >= best_d -> not closer
+    if lanes:
+        # Strict descent from CUR is the progress guarantee for BOTH lanes;
+        # the running best in ECX then tracks the MIN (lane 0 — identical
+        # to the pre-lane behaviour, ECX seeded with cur_d) or the MAX
+        # (lane 1 — the least-progress descending branch, which peels off
+        # the shortest path at forks; first qualifier accepted via the
+        # best-node -1 sentinel).
+        a.raw(b'\x3B\x3D' + le32(cnh_curd_va))          # nd vs cur_d
+        a.jae('cnh_scan_next')                          # not strictly descending
+        a.raw(b'\x83\x3D' + le32(cnh_lane_va) + b'\x00')
+        a.jnz('cnh_lane1_cmp')
+        a.raw(b'\x39\xCF')                              # lane 0: nd < running min?
+        a.jae('cnh_scan_next')
+        a.jmp('cnh_accept')
+        a.label('cnh_lane1_cmp')
+        a.raw(b'\x83\xFA\xFF')                          # first qualifying nb?
+        a.jz('cnh_accept')
+        a.raw(b'\x39\xCF')                              # lane 1: nd > running max?
+        a.jbe('cnh_scan_next')
+        a.label('cnh_accept')
+    else:
+        a.raw(b'\x39\xCF')                              # cmp edi, ecx (nd - best_d)
+        a.jae('cnh_scan_next')                          # nd >= best_d -> not closer
     a.raw(b'\x89\xF9')                                  # ecx = edi (best_d = nd)
     a.raw(b'\x89\xC2')                                  # edx = eax (best = nb)
     a.label('cnh_scan_next')

@@ -238,28 +238,6 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xA1' + le32(active_bot_slot_va))                # mov eax, [active_bot_slot]
     a.raw(b'\x89\x14\x85' + le32(bot_team_va))               # mov [bot_team + eax*4], edx
     logc(ord('T'))
-    # --- CTF role assignment: per-team spawn counter alternates roles, so a
-    # team's 1st bot is an ATTACKER, its 2nd a DEFENDER, 3rd attacker, ... —
-    # each team counts independently (one blue + one red bot are both
-    # attackers). Counters reset on match change (detour_df90). Non-CTF
-    # spawns always get role 0; the role only gates CTF goal selection
-    # (ctf_pick_goal), so DM/SK behaviour is untouched.
-    if cfg.CTF_DEFENDER_ENABLED and layout.has_field('bot_role'):
-        bot_role_va = layout.va('bot_role')
-        role_count_va = layout.va('role_spawn_count')
-        a.raw(b'\x83\x3D' + le32(menu_mode_va) + b'\x01')    # CTF match?
-        a.jnz('spawn_role_atk')
-        a.raw(b'\x8B\x0D' + le32(chosen_team_va))            # ecx = chosen team
-        a.raw(b'\x83\xE1\x01')                               # and ecx, 1 (defensive)
-        a.raw(b'\x8B\x14\x8D' + le32(role_count_va))         # edx = count[team]
-        a.raw(b'\xFF\x04\x8D' + le32(role_count_va))         # ++count[team]
-        a.raw(b'\x83\xE2\x01')                               # role = count & 1
-        a.jmp('spawn_role_store')
-        a.label('spawn_role_atk')
-        a.raw(b'\x31\xD2')                                   # edx = 0 (attacker)
-        a.label('spawn_role_store')
-        a.raw(b'\xA1' + le32(active_bot_slot_va))            # eax = slot
-        a.raw(b'\x89\x14\x85' + le32(bot_role_va))           # bot_role[slot] = edx
     a.label('spawn_skip_team')
 
     # --- Pre-spawn: pick the bot's name/color idx and write color1/color2
@@ -446,6 +424,62 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # nickname, broadcast via sub_59B260(text, -1), release the temp CString.
     # Falls back to the generic scratch msg if no participant was bound
     # (picked_name_idx would be stale from an earlier spawn).
+    # --- CTF role + route-lane assignment (SUCCESS-ONLY, live-count) --------
+    # Previously assigned at the team write from a raw per-team attempt
+    # counter — live snapshots (2026-07-22, four sessions) caught it 6
+    # increments ahead of the living bots per session: adds that failed
+    # after the counter bump (team/session full) consumed role parity, so a
+    # failure between two successes gave a team two attackers in a row (the
+    # reported cross-team role imbalance, which tracked the human's team
+    # because that team fills first). Now the role is derived HERE — only a
+    # bound spawn reaches this point — from the LIVE team composition, which
+    # also self-heals across any counting drift: bit0 = (living same-team
+    # bots) & 1, and for attackers bit1 = the route lane ((existing
+    # same-team attacker count >> 1) & 1: attacker ordinals 0,1 share lane
+    # 0/the shortest path, 2,3 take lane 1 — "at most 2 bots per route").
+    # role_spawn_count stays as a success-only diagnostic counter.
+    if cfg.CTF_DEFENDER_ENABLED and layout.has_field('bot_role'):
+        bot_role_va = layout.va('bot_role')
+        role_count_va = layout.va('role_spawn_count')
+        a.raw(b'\x83\x3D' + le32(botp_va) + b'\x00')         # bound participant?
+        a.jz('spawn_role_done')
+        a.raw(b'\xA1' + le32(active_bot_slot_va))            # eax = slot
+        a.raw(b'\x83\xF8' + bytes([cfg.MAX_BOT_SLOTS]))      # defensive range
+        a.jae('spawn_role_done')
+        a.raw(b'\x83\x3D' + le32(menu_mode_va) + b'\x01')    # CTF match?
+        a.jz('spawn_role_ctf')
+        a.raw(b'\xC7\x04\x85' + le32(bot_role_va) + le32(0)) # non-CTF -> attacker
+        a.jmp('spawn_role_done')
+        a.label('spawn_role_ctf')
+        a.raw(b'\x8B\x0D' + le32(chosen_team_va))            # ecx = chosen team
+        a.raw(b'\x83\xE1\x01')                               # and ecx, 1 (defensive)
+        a.raw(b'\x31\xD2')                                   # edx = live same-team bots
+        a.raw(b'\x31\xF6')                                   # esi = ... of which attackers
+        a.raw(b'\x31\xDB')                                   # ebx = slot iterator
+        a.label('spawn_role_scan')
+        a.raw(b'\x39\xC3')                                   # i == this bot's slot?
+        a.jz('spawn_role_next')
+        a.raw(b'\x83\x3C\x9D' + le32(bot_participants_va) + b'\x00')
+        a.jz('spawn_role_next')                              # slot not live
+        a.raw(b'\x3B\x0C\x9D' + le32(bot_team_va))           # same team?
+        a.jnz('spawn_role_next')
+        a.raw(b'\x42')                                       # ++live
+        a.raw(b'\xF6\x04\x9D' + le32(bot_role_va) + b'\x01') # defender bit set?
+        a.jnz('spawn_role_next')
+        a.raw(b'\x46')                                       # ++attackers
+        a.label('spawn_role_next')
+        a.raw(b'\x43')                                       # ++i
+        a.raw(b'\x83\xFB' + bytes([cfg.MAX_BOT_SLOTS]))
+        a.jb('spawn_role_scan')
+        a.raw(b'\x83\xE2\x01')                               # role bit = live & 1
+        a.jnz('spawn_role_store')                            # defender -> value 1
+        a.raw(b'\xD1\xEE')                                   # attacker: lane = (atk >> 1) & 1
+        a.raw(b'\x83\xE6\x01')
+        a.raw(b'\x8D\x14\x75\x00\x00\x00\x00')               # lea edx, [esi*2] (bit1 = lane)
+        a.label('spawn_role_store')
+        a.raw(b'\x89\x14\x85' + le32(bot_role_va))           # bot_role[slot] = role|lane
+        a.raw(b'\xFF\x04\x8D' + le32(role_count_va))         # ++count[team] (diagnostic)
+        a.label('spawn_role_done')
     a.raw(b'\xC7\x05' + le32(active_bot_slot_va) + le32(0xFFFFFFFF))
     a.raw(b'\x83\x3D' + le32(botp_va) + b'\x00')              # cmp [botp], 0
     a.jz('spawn_msg_generic')

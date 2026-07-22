@@ -129,6 +129,15 @@ def build_ctx(layout: ScratchLayout) -> SimpleNamespace:
     # of whole-map search roaming. Piggybacks on the defender fields.
     standoff = defender and cfg.CTF_CARRIER_STANDOFF_ENABLED
 
+    # Attacker route-lane split: lane-1 attackers (bot_role bit1) descend the
+    # goal field by the LARGEST strictly-descending neighbour so they peel
+    # onto alternative branches at forks — see cfg.CTF_LANE_SPLIT_ENABLED.
+    lanes = (defender and cfg.CTF_LANE_SPLIT_ENABLED
+             and layout.has_field('cnh_curd')
+             and layout.has_field('cnh_lane'))
+    cnh_curd_va = layout.va('cnh_curd') if lanes else None
+    cnh_lane_va = layout.va('cnh_lane') if lanes else None
+
     # Door-aware rerouting: a SECOND per-base BFS field (flag_dist_open) that
     # SKIPS every graph edge crossing a currently-blocked door, so bots route
     # AROUND closed doors when an alternative exists (live-reported gap: two

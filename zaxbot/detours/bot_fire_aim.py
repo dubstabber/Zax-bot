@@ -91,6 +91,16 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.ja('s5436f0_far_target')                        # beyond fight range
         a.raw(b'\x8B\x15' + le32(bot_slot_tmp_va))        # edx = slot
         a.raw(b'\xC7\x04\x95' + le32(layout.va('bot_enemy_near')) + le32(1))
+        if cfg.FIGHT_STRAFE_ENABLED and layout.has_field('bot_enemy_dx'):
+            # Per-bot enemy vector for the combat strafe weave (the global
+            # best_dx/dy are per-call temps another bot's scan overwrites;
+            # the movement side needs THIS bot's engagement axis). Valid
+            # only while bot_enemy_near is set — the flag is re-derived
+            # every scan, so staleness needs no clearing.
+            a.raw(b'\xA1' + le32(best_dx_va))
+            a.raw(b'\x89\x04\x95' + le32(layout.va('bot_enemy_dx')))
+            a.raw(b'\xA1' + le32(best_dy_va))
+            a.raw(b'\x89\x04\x95' + le32(layout.va('bot_enemy_dy')))
         a.label('s5436f0_far_target')
 
     # --- (5) Dispatch on the bot's current weapon. compute_proj_speed writes

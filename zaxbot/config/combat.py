@@ -74,3 +74,31 @@ WEAPON_SPEEDS = []  # type: list[tuple[int, float]]
 # bytes in .zaxbot scratch, so keep some headroom.
 WEAPON_SPEEDS_MAX = 32
 
+# --- Combat strafe (dodge weave) -----------------------------------------
+# While an enemy is in fight range (the pick_target scan's per-bot
+# bot_enemy_near stamp, FIGHT_STALL_RADIUS_SQ) the follower WEAVES: the
+# desired movement vector gets a PERPENDICULAR-to-the-enemy component added
+# before the angle emit, flipping sides every 2^FIGHT_STRAFE_FLIP_SHIFT
+# frames (offset by the bot slot so bots don't dance in sync). This makes
+# bots dodge ACROSS the line of fire — sidestepping projectiles — instead
+# of the useless along-the-engagement-axis bobbing they showed before
+# (user-reported: "they dodge vertically instead of horizontally"; on the
+# mostly vertical CTF routes a fight lines up vertically, so route jitter
+# looked like vertical dodging while real dodging needs the horizontal
+# perpendicular). The weave preserves a dominant goal-ward component
+# (progress continues, just slower), scales the lateral magnitude with the
+# remaining goal distance (close-in it shrinks, so final approaches still
+# land), and is suppressed outright while the wall-slide sweep owns the
+# heading (stuck/wp_try at the trigger) — a weave into a wall would fight
+# the sweep. The fire detour stamps the per-bot enemy vector
+# (bot_enemy_dx/dy) alongside bot_enemy_near.
+FIGHT_STRAFE_ENABLED = True
+# Lateral gain relative to the goal-ward vector: the perpendicular
+# component's magnitude = GAIN * |desired|. 0.9 swings the heading ~42 deg
+# to alternating sides (progress factor cos ~0.74). 0 disables the weave
+# without removing the machinery.
+FIGHT_STRAFE_GAIN = 0.9
+# log2 of the side-flip period in frames: 4 -> flip every 16 frames
+# (~0.27 s per side at 60 fps, a full zigzag cycle ~0.53 s).
+FIGHT_STRAFE_FLIP_SHIFT = 4
+

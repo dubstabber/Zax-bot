@@ -487,6 +487,16 @@ ignore this knob (they skip `apply_lead` unconditionally).
   physical stuck detector, not dsq (the target moves). Killing the carrier
   drops the flag; the drop pursuit outranks the chase and returns it.
   Defenders chase too — the intercept play the roadmap wanted.
+- Success-only role assignment: roles derive from the LIVE team composition
+  at the spawn's success tail (snapshot-diagnosed: the old attempt counter
+  absorbed 6 phantom increments per session from failed adds, scrambling
+  role parity between the teams depending on which one filled first).
+- Attacker route lanes (`bot_role` bit1): lane-1 attackers descend the goal
+  field by the LARGEST strictly-descending neighbour, peeling onto the
+  alternative branch at forks — at most ~2 attackers share a route.
+- Combat strafe weave: fighting bots add an alternating perpendicular
+  component to their movement (per-bot enemy vector stamped by the fire
+  scan), dodging across the line of fire instead of bobbing along it.
 
 ## Still open
 

@@ -86,10 +86,18 @@ CTF_DROP_RETRY_COOLDOWN_FRAMES = 240
 # --- CTF attacker/defender roles ------------------------------------------
 # Spawned CTF bots ALTERNATE roles per team: the 1st bot spawned onto a team
 # is an ATTACKER (classic steal-the-flag behaviour), the 2nd a DEFENDER, the
-# 3rd an attacker again, and so on. Each team counts its own spawns
-# (role_spawn_count[2], reset on match change), so one blue + one red bot are
-# BOTH attackers. Non-CTF spawns are always role 0 (the role only gates CTF
-# goal selection).
+# 3rd an attacker again, and so on — one blue + one red bot are BOTH
+# attackers. The role is derived at SPAWN-SUCCESS time from the LIVE team
+# composition (count of already-living same-team bots, & 1), NOT from a raw
+# attempt counter: live snapshots (2026-07-22, four sessions) caught
+# role_spawn_count holding 6 phantom increments per session — failed adds
+# (team/session full) consumed parity, so a failure landing between two
+# successes gave a team A,A instead of A,D (the reported "more defenders on
+# one team, more attackers on the other, depending on which team I play" —
+# the human's team fills differently). role_spawn_count remains as a
+# success-only diagnostic. bot_role[slot] is a BIT FIELD: bit0 = defender,
+# bit1 = the attacker's route lane (see CTF_LANE_SPLIT_ENABLED). Non-CTF
+# spawns are always role 0 (the role only gates CTF goal selection).
 #
 # A DEFENDER holds near its OWN base instead of raiding: while its current
 # node's distance to the home base (the per-match flag_dist BFS field, in
@@ -111,6 +119,23 @@ CTF_DEFEND_RADIUS_PCT = 30
 # Lower clamp for tiny/degenerate maps, in the same quanta (16 = ~256 px).
 # Must stay <= 127 (imm8 compare in the builder).
 CTF_DEFEND_RADIUS_MIN = 16
+# --- Attacker route-lane split --------------------------------------------
+# With several attackers per team, the deterministic BFS descent sent them
+# all down the IDENTICAL shortest path — a single-file conga line
+# (user-reported: "many bots choose the same path; at most 2 should share a
+# route"). Each team's attackers are split into two LANES at spawn (packed
+# into bot_role bit1: attacker ordinal 0,1 -> lane 0; 2,3 -> lane 1; 5th+
+# wraps): lane 0 descends the goal field exactly as today (minimum-distance
+# neighbour = the shortest path); lane 1 still requires every hop to
+# STRICTLY DESCEND the field (progress stays guaranteed — monotone descent
+# terminates at the goal) but picks the LARGEST descending neighbour, so at
+# every fork it peels onto the alternative branch. Where the graph offers no
+# choice (corridors) both lanes converge — correct, there is only one way.
+# CTF maps are near-symmetric, so forks with two descending branches are
+# exactly the left/right route splits. Carriers ALWAYS take lane 0 (deliver
+# on the shortest path), as do defenders, seek descents and the
+# drop/chase/SK pursuits (objective-direct by design).
+CTF_LANE_SPLIT_ENABLED = True
 # --- CTF carrier STANDOFF tether ------------------------------------------
 # A bot carrying the enemy flag while its OWN flag is also away cannot
 # capture until the home flag returns (the vanilla checker rule), so
