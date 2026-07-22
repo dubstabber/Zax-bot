@@ -5,6 +5,13 @@ This project adds host-side bot support to *Zax: The Alien Hunter*
 fullscreen-DirectDraw, single-thread C++ program with working DirectPlay
 multiplayer but no built-in bots.
 
+All addresses in `zaxbot/addresses.py` and this document are verified against
+one specific build: the **Polish release, version 1.1, build 1309** (in-game
+version string `Zax Wersja 1.1 Kompilacja 1309`). Untested on other language
+releases or build numbers — a different build may lay out `Zax.exe`
+differently, which would invalidate the hardcoded VAs and prologue bytes
+throughout `addresses.py`.
+
 ## Read first
 
 The detailed notes live in `docs/`:

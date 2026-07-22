@@ -22,6 +22,18 @@ normally and don't need the mod (they'll see the bots as regular players).
 - **Windows** — the game is a Windows program; the mod is developed and
   tested on Windows 11. It has also been run on Linux under Wine.
 
+## Tested game version
+
+This mod has only been tested against the **Polish release, version 1.1,
+build 1309** (shown in-game as `Zax Wersja 1.1 Kompilacja 1309`). The
+patch relies on exact byte offsets and function addresses inside
+`Zax.exe` (see `zaxbot/addresses.py`); other language releases or build
+numbers may lay out the executable differently, so `zax_patch.py` may
+fail to patch correctly, or patch cleanly but crash/misbehave at runtime,
+on a different version. If you're on a different version and want to try
+it, verify the prologue bytes in `zaxbot/addresses.py` against your
+`Zax.exe` first.
+
 ## Install
 
 All of this happens inside the game's install folder (the one containing
