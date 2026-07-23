@@ -1282,18 +1282,19 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     Keys/minerals excluded. All respawn in place (10-15 s), so like
     minerals there is NO presence tracking — a consumed anchor costs one
     cooldown-bounded empty visit.
-  - **WEAPON AUTO-EQUIP** (`weapon_equip_tick` in `world_scan/items.py`,
-    page flip, `cfg.WEAPON_EQUIP_ENABLED`; the root cause of "most of
-    the fight happens with the welder" — bots GRABBED better guns by
-    walk-over but nothing ever SELECTED them, so every fight stayed on
-    the spawn weapon): every `WEAPON_EQUIP_CHECK_FRAMES` (90) per live
-    bot, if the SELECTED Primary item is the welder (`welder_def_key`,
-    resolved per match in `load_items`) or nothing is selected, the
-    first carried non-welder Primary item whose can-fire virtual passes
-    (item vtbl+0x98 — rounds + reuse delay, pure checks) is selected via
-    the spawn.py force-switch sequence. A bot on a working real gun is
-    left untouched (no churn); all guns empty ⇒ the welder stays (the
-    engine's fire path auto-cycles on empty anyway). All modes.
+  - **NO patch-side weapon equip** — the ENGINE auto-switches to a
+    picked-up weapon it considers better (user-confirmed 2026-07-23,
+    "always worked good for the bots"). A brief `weapon_equip_tick`
+    built on the opposite assumption FROZE the game at CTF bot spawn the
+    same day and was removed: its Primary-group walk assumed
+    `sub_425350` terminates with -1, but that iterator WRAPS (constraint
+    #7 / addresses.py), so a welder-only fresh bot spun the scan
+    forever on the first page flip. The welder-heavy fights that
+    motivated it were actually the weapon-NEED count wrapping too (a
+    lone welder counted as `WEAPON_NEED_MIN_OWNED`, clearing bit3, so
+    weapons were never pursued at all — confirmed by the pre-freeze
+    snapshot: goody layer live, filler pursuits resolving, zero weapon
+    latches); fixed with the `sub_425470` last-item loop guard.
   - **Routing fields**: `build_item_routes` (df90, mode-independent, arms
     `item_routing_active`) fills one MULTI-SOURCE `bfs_run_seeded` row per
     CATEGORY (`item_dist`, cat-major); `sk_pile_route_refresh` (page flip)
@@ -1594,7 +1595,7 @@ Older emitted labels or disabled detours are not active unless they appear in
 | `sub_5A6E60` | `CDropAllOreAndCrystalsAction` per-target apply (`this`=ECX, victim at `[esp+8]`, `ret 0x10`; prologue `83 EC 10 53 55 56`): spawns the UNNAMED death pile (clone of the `Ore_Crystals01` model template, placed within 500 px via `sub_4EB7B0`) holding the victim's whole load; bails when nothing carried. Detoured for pile self-registration |
 | `sub_5AB9B0` | secondary-item deploy (`__stdcall(char) ret 4`, prologue `83 EC 1C 53 55 56 57`): Secondary-group selection lookup, can-fire gate `item->vtbl[+0x98]` (pure checks: `sub_42A4A0` → def vtbl+0x8C `sub_5B8020` — reuse delay + rounds + `!(char+0x1C & 0x10000000)`), round consume (item vtbl+0x5C), deployed entity from `[def+0x20]` via `sub_5176F0(key, CEntityProjectile-desc `sub_491930`, char, 0, -1)` placed AT `sub_4FB0A0(char)`, layer-register `sub_4EB6F0`, then the def's New Shot Action `[def+0x54]` (MP branch deletes the mine after ~15 s). Only in-image caller = the pending-action event execute `sub_5AB970` (human right-click enqueues at `0x5448be`, in an IDA-undefined region). Detoured for mine registration |
 | `"Proximity Mine"` / `"Secondary"` | item-def name @`0x6251E0` (resolve `sub_523DF0(dword_6C0C08, name, -1)` — the `[item+8]`/`sub_426860` key space) / inventory-group name @`0x60B788` (resolve `sub_523DF0(dword_6C0800, name, -1)` — the engine's own call at `0x544876`) |
-| `sub_425350` / `sub_424F60` | inventory-group iterate: `__thiscall(inv; prev_id or -1, group_key) -> next item id / -1, ret 8` / `__thiscall(inv; item_id) -> CInventoryItem*, ret 4` (the engine's Secondary auto-cycle shape at `0x544932`) |
+| `sub_425350` / `sub_425470` / `sub_424F60` | inventory-group iterate: `sub_425350(inv; prev_id or -1, group_key) -> next id, ret 8` — **WRAPS past the group end** (returns the FIRST item again after the last; -1 only for an empty group) — / `sub_425470(inv; -1, group_key) -> LAST item id, ret 8` — the engine's own loop-termination guard (`0x543a48`/`0x544973`); every group walk must stop on `id == last` — / `sub_424F60(inv; item_id) -> CInventoryItem*, ret 4` |
 | `stats + 0xEE/+0xF2/+0xF6` | SK replicated WORDs: carried ore / carried crystals (mirrored by SK gametype vtable `+0xA0` = `sub_5616B0`) / SK score |
 | `VT_SK_VA + 0xA0/+0xA8` | SK-only vtable slots: carried-mineral stats sync (`sub_5616B0`) / scoreboard cell renderer (`sub_561760`) |
 | `sub_4F37E0` | MP world update (virtual): builds one activation POINT per participant from `part+0xC0/+0xC4` (layer idx gate at `+0xDC`) |
@@ -1624,6 +1625,14 @@ Older emitted labels or disabled detours are not active unless they appear in
    found via the `door_*`/`edge_*` R-snapshot chunks, fixed with
    `push eax / fnstsw ax; sahf / pop eax` — pop preserves EFLAGS). Prefer
    `fcomip` (sets EFLAGS directly, no AX) when the stack order allows.
+7. The inventory-group iterator `sub_425350` WRAPS: with prev = the
+   group's last item it returns the FIRST item again, and -1 only for an
+   EMPTY group. Any walk that terminates on -1 alone spins forever on a
+   single-item group — this froze the game at bot spawn (2026-07-23,
+   weapon-equip tick; a welder-only bot cycled its own weapon endlessly)
+   and silently overcounted the weapon-need test. Mirror the engine's own
+   loops (`0x543a48`/`0x544973`): fetch `sub_425470(inv; -1, key)` = the
+   LAST item id first and stop when the walk reaches it.
 
 ## Open work
 

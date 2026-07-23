@@ -305,15 +305,25 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.jz('mt_fire')
 
     # Slow path: iterate the Secondary group for the mine item by def key
-    # (the engine's own auto-cycle shape at 0x544932..).
+    # (the engine's own auto-cycle shape at 0x544932..). TERMINATION:
+    # sub_425350 WRAPS past the group end (see addresses.py), so the walk
+    # carries the engine's sub_425470 last-item guard in EDI — the
+    # carried-rounds gate above means a mine item EXISTS and the def
+    # match normally exits first, but a naive loop here would spin
+    # forever the day that invariant slips.
     a.label('mt_find')
+    a.raw(b'\xFF\x35' + le32(sec_key_va))                       # push group key
+    a.raw(b'\x6A\xFF')                                          # push -1
+    a.raw(b'\x8B\x0D' + le32(spill_va))                         # ecx = inv
+    a.call_va(ax.SUB_425470_VA)                                 # eax = last id / -1
+    a.raw(b'\x8B\xF8')                                          # edi = last id
     a.raw(b'\x83\xC8\xFF')                                      # eax = -1 (prev)
     a.label('mt_find_loop')
     a.raw(b'\xFF\x35' + le32(sec_key_va))                       # push group key
     a.raw(b'\x50')                                              # push prev id
     a.raw(b'\x8B\x0D' + le32(spill_va))                         # ecx = inv
     a.call_va(ax.SUB_425350_VA)                                 # eax = next id / -1
-    a.raw(b'\x83\xF8\xFF'); a.jz('mt_next')                     # group exhausted
+    a.raw(b'\x83\xF8\xFF'); a.jz('mt_next')                     # empty group
     a.raw(b'\xA3' + le32(tmp_id_va))                            # mine_tmp_id = id
     a.raw(b'\x50')                                              # push id
     a.raw(b'\x8B\x0D' + le32(spill_va))                         # ecx = inv
@@ -321,8 +331,12 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x85\xC0'); a.jz('mt_next')
     a.raw(b'\x8B\x50' + bytes([ax.ITEM_DEF_KEY_OFF]))           # edx = item def key
     a.raw(b'\x3B\x15' + le32(def_key_va))                       # == mine def?
-    a.raw(b'\xA1' + le32(tmp_id_va))                            # eax = id (flags kept)
-    a.jnz('mt_find_loop')
+    a.jz('mt_found')
+    a.raw(b'\xA1' + le32(tmp_id_va))                            # eax = id
+    a.raw(b'\x3B\xC7')                                          # id == last item?
+    a.jz('mt_next')                                             # group end, no mine
+    a.jmp('mt_find_loop')
+    a.label('mt_found')
     # Found: select it. Clear the pending slot field first (sub_425590 bails
     # on a pending switch), call the engine selector, then force the switch
     # NOW by writing the slot fields — the exact spawn.py force-weapon

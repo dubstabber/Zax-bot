@@ -329,13 +329,6 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # builds.
     if cfg.MINE_ENABLED and layout.has_field('mine_ttl'):
         a.call_lbl('mine_tick')
-    # Weapon auto-equip servicing: per-bot cooldown-paced check that
-    # switches a bot off the starter welder onto any carried Primary
-    # weapon whose can-fire gate passes. Self-contained pushad/popad;
-    # inert stub on builds without the goody item fields.
-    if (cfg.ITEM_PURSUIT_ENABLED and cfg.WEAPON_EQUIP_ENABLED
-            and layout.has_field('welder_def_key')):
-        a.call_lbl('weapon_equip_tick')
     # Far CTF capture support. The bot force-tick above keeps the carrier
     # moving, but capture itself is driven by the base "checker" trigger at the
     # destination. Those entities are also camera-gated by the engine, so a bot

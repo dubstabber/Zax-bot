@@ -174,16 +174,14 @@ WEAPON_PURSUE_CHANCE_MAX  = 100
 WEAPON_ROLL_RETRY_FRAMES  = 45
 WEAPON_NEED_MIN_OWNED     = 3
 
-# WEAPON AUTO-EQUIP (user-reported 2026-07-23: "most of the fight happens
-# with the [starter] Modified Laser Welder" — bots picked up better guns
-# but nothing ever SELECTED them, so every fight stayed on the welder).
-# A page-flip pass checks each live bot every WEAPON_EQUIP_CHECK_FRAMES:
-# if the SELECTED Primary item is the welder (def key resolved per match)
-# and the bot carries another Primary weapon whose can-fire gate passes
-# (item vtbl+0x98 — has ammo, off delay), it is selected via the
-# spawn.py force-switch sequence. Bots on a working real gun are left
-# alone (no churn); if every carried gun is empty the welder stays (the
-# engine's own fire path auto-cycles on empty anyway).
-WEAPON_EQUIP_ENABLED      = True
-WEAPON_EQUIP_CHECK_FRAMES = 90
+# NOTE (2026-07-23): NO auto-equip layer exists — the ENGINE already
+# auto-switches to a picked-up weapon it considers better (user-confirmed:
+# "it has always worked good for the bots"). A patch-side equip tick was
+# briefly added on the wrong premise and REMOVED the same day after it
+# froze the game: its group walk assumed sub_425350 ends with -1, but
+# that iterator WRAPS (see addresses.py) and a welder-only bot spun the
+# scan forever. The welder-heavy fights the tick tried to fix were
+# actually the weapon-NEED count wrapping too (a lone welder counted as
+# MIN, clearing bit3 so weapons were never pursued) — fixed with the
+# engine's own sub_425470 last-item loop guard.
 

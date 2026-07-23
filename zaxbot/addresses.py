@@ -476,12 +476,25 @@ S5AB9B0_PROLOGUE    = b'\x83\xEC\x1C\x53\x55\x56\x57'  # sub esp,1Ch; push ebx/e
 SECONDARY_STR_VA      = 0x60B788  # "Secondary" (inventory-group name)
 PROXIMITY_MINE_STR_VA = 0x6251E0  # "Proximity Mine" (item-def name)
 MODIFIED_LASER_WELDER_STR_VA = 0x624CA4  # "Modified Laser Welder" (item-def
-                                  # name; the MP SPAWN weapon — resolved per
-                                  # match for the weapon auto-equip check)
+                                  # name; the MP SPAWN weapon, user-confirmed
+                                  # 2026-07-23 — currently unused: the ENGINE
+                                  # auto-switches to better picked-up weapons,
+                                  # no patch-side equip needed)
 # Inventory-group iteration (the engine's own Secondary auto-cycle at
 # 0x544932..): next item id in a group / item object by id. Both __thiscall
 # on the inventory (sub_4267E0 result).
-SUB_425350_VA = 0x425350  # (inv; prev_id or -1, group_key) -> next item id / -1; ret 8
+# WARNING — sub_425350 WRAPS (live-frozen 2026-07-23, decompile-confirmed):
+# with prev == the group's LAST item it returns the FIRST item again; -1
+# comes back only when the group holds NO items at all. Any iteration over
+# a group MUST therefore terminate on `id == sub_425470(inv; -1, key)`
+# (the last-item id) exactly like the engine's own cycle loops at
+# 0x543a48/0x544973 — a naive "-1 ends the walk" loop spins forever on a
+# single-item group (the weapon-equip freeze) and a bounded count
+# overcounts (a lone item counts as N — the weapon-need bug).
+SUB_425350_VA = 0x425350  # (inv; prev_id or -1, group_key) -> next id in group,
+                          # WRAPPING past the end; -1 only if group empty; ret 8
+SUB_425470_VA = 0x425470  # (inv; -1, group_key) -> LAST item id in group / -1;
+                          # the engine's own loop-termination guard; ret 8
 SUB_424F60_VA = 0x424F60  # (inv; item_id) -> CInventoryItem*; ret 4
 ITEM_DEF_KEY_OFF = 0x8    # [item+8] = item-def KEY (sub_482DE0; same id space
                           # as sub_523DF0(dword_6C0C08, name, -1))
