@@ -1352,9 +1352,25 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     the PATCHED entry. Success = the carried-round count DROPPED (the
     deploy has no useful return); success re-arms the long cooldown
     (`MINE_PLACE_COOLDOWN_FRAMES`, 600). Bots roam constantly, so the low
-    per-window chance scatters mines organically over the map — the
-    CTF-specific placement rules are a planned follow-up gate in
-    `mine_tick` before the roll.
+    per-window chance scatters mines organically over the map.
+    **CTF TERRITORY GATE** (`cfg.MINE_CTF_TERRITORY_ENABLED`, in `mt_try`
+    between the char capture and the rounds gate; user rule 2026-07-23:
+    "mine the enemy half, rarely the middle, never the own half"):
+    territory is classified by PATH distance from the CTF routing BFS
+    fields — at the bot's current node (follower target, else
+    `wp_find_nearest`), `own_d`/`enemy_d` = `flag_dist[base][node]` with
+    bases mapped through `flag_team[]` vs `bot_team[slot]`. `enemy_d +
+    band < own_d` ⇒ enemy half, place; `own_d + band < enemy_d` ⇒ own
+    half, deny (CTF defenders hold their rounds until they cross out);
+    the `|diff| <= band` strip is the middle ⇒ an EXTRA roll <
+    `mine_ctf_mid_chance` (both knobs scratch-packed live-tunable;
+    defaults band 16 quanta = 256 px of path, chance 15 ⇒ mid-map mines
+    on ~5% of already-successful windows). Path metric, not Euclidean,
+    so a spot behind a wall is classified by how you WALK there. Inert
+    outside CTF (menu_mode gate), while routing is unarmed, or when
+    either distance is unreachable (falls back to place-anywhere).
+    Classifier semantics pinned in
+    `test_ctf_territory_classification_rule`.
   - **Registration** (`detour_5AB9B0`, `detours/mine_register.py`): the
     deploy chokepoint detour predicts at ENTRY whether THIS call deploys a
     mine (selected Secondary item's `[item+8]` == mine def key AND its
@@ -1635,10 +1651,12 @@ Older emitted labels or disabled detours are not active unless they appear in
   avoidance narrowed to the bot's OWN mines the same day per user — a
   mine kills anyone including its placer and CTF teammates regardless of
   the friendly-fire setting, and bots must stay killable by other
-  players' mines). Remaining: CTF-mode placement rules (user-requested
-  follow-up — gate `mine_tick`'s attempt per bot before the RNG roll,
-  e.g. mine the own-base approach / flag-route chokepoints instead of
-  random roam spots); PC2-placed mines are invisible to the ring (remote
+  players' mines). CTF TERRITORY PLACEMENT DONE (2026-07-23, live pass
+  pending): the BFS-classified enemy-half/middle/own-half gate in
+  `mine_tick` — see the Current state bullet. Remaining: possible finer
+  CTF rules (e.g. bias toward flag-route chokepoints or the enemy-base
+  approach specifically, rather than anywhere in the enemy half);
+  PC2-placed mines are invisible to the ring (remote
   deploys run client-side — would need the entity-replication creation
   path or a periodic model-matched grid scan; irrelevant while avoidance
   is own-only, PC2 can't be a bot); and the avoid/spacing radii are

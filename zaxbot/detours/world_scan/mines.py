@@ -144,9 +144,107 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xC7\x04\xB5' + le32(cd_va)
           + le32(max(1, cfg.MINE_PLACE_RETRY_FRAMES)))
     a.raw(b'\x89\x3D' + le32(tmp_char_va))                      # mine_tmp_char = char
+
+    # --- CTF TERRITORY GATE (user rule: mine the ENEMY half, rarely the
+    # middle, never the own half). Territory = PATH distance to each base
+    # from the CTF routing BFS fields (flag_dist, WP_EDGE_LEN_QUANTUM
+    # units — walls count, unlike a Euclidean split): at the bot's current
+    # graph node, enemy_d + band < own_d ⇒ enemy half (place); own_d +
+    # band < enemy_d ⇒ own half (deny); the |diff| <= band strip is the
+    # middle ⇒ extra RNG roll < mine_ctf_mid_chance. Inert outside CTF
+    # (menu_mode gate) and while routing is unarmed; missing/unreachable
+    # distances fall back to place-anywhere. Runs BEFORE the rounds/RNG
+    # work; mine_tmp_id/mine_tmp_cnt/mine_spill are free as temps here
+    # (their real uses start below).
+    territory_on = (
+        cfg.MINE_CTF_TERRITORY_ENABLED
+        and layout.has_field('flag_dist')
+        and layout.has_field('flag_team')
+        and layout.has_field('flag_routing_active')
+        and layout.has_field('menu_mode')
+        and layout.has_field('bot_team')
+        and layout.has_field('bot_current_wp')
+        and layout.has_field('wp_scratch')
+        and layout.has_field('mine_ctf_mid_band')
+    )
+    if territory_on:
+        vmax = cfg.OVERLAY_VERTEX_MAX
+        vshift = vmax.bit_length() - 1
+        assert (1 << vshift) == vmax, 'flag_dist row indexing needs power-of-two VMAX'
+        a.raw(b'\x83\x3D' + le32(layout.va('menu_mode')) + b'\x01')  # CTF?
+        a.jnz('mtg_pass')
+        a.raw(b'\x83\x3D' + le32(layout.va('flag_routing_active')) + b'\x00')
+        a.jz('mtg_pass')
+        a.raw(b'\x83\x3D' + le32(layout.va('flag_count')) + b'\x02')
+        a.jb('mtg_pass')                                        # need both bases
+        # Node: the follower's current target node, else nearest to the bot.
+        a.raw(b'\x8B\x35' + le32(tmp_slot_va))                  # esi = slot
+        a.raw(b'\x8B\x04\xB5' + le32(layout.va('bot_current_wp')))
+        a.raw(b'\x83\xF8\xFF'); a.jnz('mtg_node_ok')
+        a.raw(b'\x8B\x0D' + le32(tmp_char_va))                  # ecx = char
+        a.raw(b'\x8B\x51' + bytes([ax.ENTITY_POS_X_OFF]))       # edx = x bits
+        a.raw(b'\x89\x15' + le32(layout.va('wp_scratch')))
+        a.raw(b'\x8B\x51' + bytes([ax.ENTITY_POS_Y_OFF]))       # edx = y bits
+        a.raw(b'\x89\x15' + le32(layout.va('wp_scratch') + 4))
+        a.call_lbl('wp_find_nearest')                           # ebx = node / -1
+        a.raw(b'\x8B\xC3')                                      # eax = node
+        a.raw(b'\x83\xF8\xFF'); a.jz('mt_next')                 # no node -> hold fire
+        a.label('mtg_node_ok')
+        a.raw(b'\x3D' + le32(vmax)); a.jae('mt_next')           # defensive row bound
+        a.raw(b'\xA3' + le32(tmp_id_va))                        # node
+        # My team; then scan the bases for own/enemy path distance.
+        a.raw(b'\xA1' + le32(tmp_slot_va))                      # eax = slot
+        a.raw(b'\x8B\x3C\x85' + le32(layout.va('bot_team')))    # edi = my team
+        a.raw(b'\xC7\x05' + le32(spill_va) + le32(0xFFFFFFFF))  # own_d = -1
+        a.raw(b'\xC7\x05' + le32(tmp_cnt_va) + le32(0xFFFFFFFF))  # enemy_d = -1
+        a.raw(b'\x31\xF6')                                      # esi = base idx
+        a.label('mtg_base_loop')
+        a.raw(b'\x3B\x35' + le32(layout.va('flag_count')))
+        a.jae('mtg_eval')
+        a.raw(b'\x83\xFE' + bytes([cfg.FLAG_ROUTE_MAX]))        # defensive cap
+        a.jae('mtg_eval')
+        a.raw(b'\x8B\xCE')                                      # ecx = base
+        a.raw(b'\xC1\xE1' + bytes([vshift]))                    # ecx = base*VMAX
+        a.raw(b'\x03\x0D' + le32(tmp_id_va))                    # + node
+        a.raw(b'\x8B\x14\x8D' + le32(layout.va('flag_dist')))   # edx = dist
+        a.raw(b'\x8B\x04\xB5' + le32(layout.va('flag_team')))   # eax = base team
+        a.raw(b'\x3B\xC7')                                      # mine or theirs?
+        a.jnz('mtg_enemyd')
+        a.raw(b'\x89\x15' + le32(spill_va))                     # own_d = dist
+        a.jmp('mtg_nextb')
+        a.label('mtg_enemyd')
+        a.raw(b'\x89\x15' + le32(tmp_cnt_va))                   # enemy_d = dist
+        a.label('mtg_nextb')
+        a.raw(b'\x46')                                          # ++base
+        a.jmp('mtg_base_loop')
+        a.label('mtg_eval')
+        a.raw(b'\xA1' + le32(spill_va))                         # eax = own_d
+        a.raw(b'\x83\xF8\xFF'); a.jz('mtg_pass')                # unknown -> allow
+        a.raw(b'\x8B\x15' + le32(tmp_cnt_va))                   # edx = enemy_d
+        a.raw(b'\x83\xFA\xFF'); a.jz('mtg_pass')
+        # Enemy half: enemy_d + band < own_d -> place.
+        a.raw(b'\x8B\xCA')                                      # ecx = enemy_d
+        a.raw(b'\x03\x0D' + le32(layout.va('mine_ctf_mid_band')))
+        a.raw(b'\x3B\xC8')                                      # cmp ecx, own_d
+        a.jb('mtg_pass')
+        # Own half: own_d + band < enemy_d -> deny.
+        a.raw(b'\x8B\xC8')                                      # ecx = own_d
+        a.raw(b'\x03\x0D' + le32(layout.va('mine_ctf_mid_band')))
+        a.raw(b'\x3B\xCA')                                      # cmp ecx, enemy_d
+        a.jb('mt_next')
+        # Middle strip: rare extra roll.
+        a.raw(b'\x6A\x63')                                      # push 99
+        a.raw(b'\x6A\x00')                                      # push 0
+        a.raw(b'\xB9' + le32(ax.RNG_OBJ_VA))                    # ecx = RNG
+        a.call_va(ax.RNG_SUB)                                   # eax = 0..99
+        a.raw(b'\x3B\x05' + le32(layout.va('mine_ctf_mid_chance')))
+        a.jae('mt_next')
+        a.label('mtg_pass')
+
     # Carried mine rounds (the engine's own counter; 0 = nothing to place).
     a.raw(b'\x8B\x15' + le32(def_key_va))                       # edx = mine def key
-    a.raw(b'\x8B\xCF')                                          # ecx = char
+    a.raw(b'\x8B\x0D' + le32(tmp_char_va))                      # ecx = char (edi is
+                                                                # gate-clobbered)
     a.call_va(ax.SUB_426860_VA)                                 # eax = rounds
     a.raw(b'\x85\xC0'); a.jz('mt_next')
     a.raw(b'\xA3' + le32(tmp_cnt_va))                           # pre-fire count

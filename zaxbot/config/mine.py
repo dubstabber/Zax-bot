@@ -64,6 +64,24 @@ MINE_SPACING_RADIUS_SQ = 128.0 * 128.0
 MINE_AVOID_ENABLED = True
 MINE_AVOID_RADIUS_SQ = 96.0 * 96.0
 
+# CTF territory placement rules (user-requested 2026-07-23): a bot only
+# mines the ENEMY team's territory, RARELY the middle of the map, and
+# never its own half. Territory is classified by the CTF routing BFS
+# fields (path distance to each base in WP_EDGE_LEN_QUANTUM units, so
+# walls count — a spot behind the enemy wall is not "enemy territory"
+# just because it is Euclidean-close): own_d vs enemy_d at the bot's
+# current graph node. |own_d - enemy_d| <= MID_BAND quanta = the middle
+# strip (16 quanta = 256 px of path); there the placement additionally
+# rolls RNG < MINE_CTF_MID_CHANCE (on top of the main MINE_PLACE_CHANCE
+# roll, so mid-map mines are ~15% of an already-rolled attempt). Deeper
+# into the own half the attempt is denied outright — CTF defenders
+# therefore hold their rounds until they cross out. DM/SK are untouched
+# (the gate keys off the detected CTF mode). Both knobs are packed into
+# scratch next to mine_place_chance for live tuning.
+MINE_CTF_TERRITORY_ENABLED = True
+MINE_CTF_MID_BAND_QUANTA = 16
+MINE_CTF_MID_CHANCE = 15
+
 # Only avoid the bot's OWN mines (live-confirmed 2026-07-23: a deployed
 # mine has NO owner or team immunity — it kills its placer, and in CTF it
 # kills same-team players even with friendly fire disabled). Avoiding

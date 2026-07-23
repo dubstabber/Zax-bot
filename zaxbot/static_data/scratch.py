@@ -132,6 +132,8 @@ def write_static_scratch_data(
     mine_avoid_radius_sq=9216.0,
     mine_spacing_sq=16384.0,
     mine_place_chance=0,
+    mine_ctf_mid_band=16,
+    mine_ctf_mid_chance=0,
 ):
     # Digit-validation per mode. DM and SK are both free-for-all (only '1' is
     # meaningful — "spawn one bot"); CTF is the only team mode and accepts
@@ -469,6 +471,10 @@ def write_static_scratch_data(
                      struct.pack('<f', mine_spacing_sq))
         layout.write(section, scratch_off, 'mine_place_chance',
                      struct.pack('<I', max(0, min(100, int(mine_place_chance)))))
+        layout.write(section, scratch_off, 'mine_ctf_mid_band',
+                     struct.pack('<I', max(0, int(mine_ctf_mid_band))))
+        layout.write(section, scratch_off, 'mine_ctf_mid_chance',
+                     struct.pack('<I', max(0, min(100, int(mine_ctf_mid_chance)))))
     # Pickup self-registration master switch (per-frame CPickupAI detour).
     if layout.has_field('pickup_register_enabled'):
         layout.write(section, scratch_off, 'pickup_register_enabled',

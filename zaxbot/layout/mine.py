@@ -63,6 +63,10 @@ def extend_mine(c):
               'mine: min placement spacing d^2 (float, static from cfg)'),
         field('mine_place_chance', 0x04,
               'mine: placement roll threshold 0..100 (static from cfg)'),
+        field('mine_ctf_mid_band', 0x04,
+              'mine: CTF middle-strip half-width in BFS quanta (static from cfg)'),
+        field('mine_ctf_mid_chance', 0x04,
+              'mine: CTF middle-strip extra roll threshold 0..100 (static from cfg)'),
         # --- diag tag, then per-call temps (excluded from the dump)
         field('tag_mines', 0x10, 'diag: mine state dump chunk tag'),
         field('mine_tmp_slot', 0x04, 'mine: mine_tick loop slot spill'),

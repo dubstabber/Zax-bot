@@ -148,4 +148,6 @@ def write_static_from_config(section, scratch_off, layout):
         mine_avoid_radius_sq=cfg.MINE_AVOID_RADIUS_SQ,
         mine_spacing_sq=cfg.MINE_SPACING_RADIUS_SQ,
         mine_place_chance=cfg.MINE_PLACE_CHANCE,
+        mine_ctf_mid_band=cfg.MINE_CTF_MID_BAND_QUANTA,
+        mine_ctf_mid_chance=cfg.MINE_CTF_MID_CHANCE,
     )

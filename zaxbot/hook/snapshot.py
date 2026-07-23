@@ -346,7 +346,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # construction (mine.py); the mreg_*/mine_tmp_* per-call temps after
     # tag_mines are excluded.
     if layout.has_field('tag_mines') and layout.has_field('mine_def_key'):
-        mines_dump_len = (layout.field('mine_place_chance').end
+        mines_dump_len = (layout.field('mine_ctf_mid_chance').end
                           - layout.field('mine_def_key').offset)
         emit_chunk(layout.va('tag_mines'),
                    b'\xB8' + le32(layout.va('mine_def_key')),

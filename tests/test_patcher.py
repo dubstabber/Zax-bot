@@ -1254,8 +1254,12 @@ class MineTests(unittest.TestCase):
                          layout.field('mine_avoid_radius_sq').end)
         self.assertEqual(layout.field('mine_place_chance').offset,
                          layout.field('mine_spacing_sq').end)
-        self.assertEqual(layout.field('tag_mines').offset,
+        self.assertEqual(layout.field('mine_ctf_mid_band').offset,
                          layout.field('mine_place_chance').end)
+        self.assertEqual(layout.field('mine_ctf_mid_chance').offset,
+                         layout.field('mine_ctf_mid_band').end)
+        self.assertEqual(layout.field('tag_mines').offset,
+                         layout.field('mine_ctf_mid_chance').end)
         # The registration detour's temps must be distinct from mine_tick's
         # (the detour runs INSIDE mine_tick's sub_5AB9B0 call).
         self.assertTrue(layout.has_field('mreg_char'))
@@ -1268,6 +1272,35 @@ class MineTests(unittest.TestCase):
         self.assertFalse(layout.has_field('mine_def_key'))
         self.assertFalse(layout.has_field('mine_ttl'))
         self.assertFalse(layout.has_field('mreg_char'))
+
+    def test_ctf_territory_classification_rule(self):
+        # Python mirror of the emitted mt_try territory gate: at the bot's
+        # node, own_d/enemy_d are the CTF routing BFS path distances to the
+        # two bases. enemy_d + band < own_d -> PLACE (enemy half);
+        # own_d + band < enemy_d -> DENY (own half); otherwise the middle
+        # strip -> RARE (extra mine_ctf_mid_chance roll). Unknown distances
+        # (unreachable/-1) fall back to PLACE (the DM behavior).
+        band = cfg.MINE_CTF_MID_BAND_QUANTA
+        UNREACHABLE = 0xFFFFFFFF
+
+        def classify(own_d, enemy_d):
+            if own_d == UNREACHABLE or enemy_d == UNREACHABLE:
+                return 'place'
+            if enemy_d + band < own_d:
+                return 'place'
+            if own_d + band < enemy_d:
+                return 'deny'
+            return 'rare'
+
+        self.assertEqual(classify(100, 20), 'place')   # deep in enemy half
+        self.assertEqual(classify(20, 100), 'deny')    # deep in own half
+        self.assertEqual(classify(50, 50), 'rare')     # dead centre
+        self.assertEqual(classify(50, 50 + band), 'rare')   # band edge (own side)
+        self.assertEqual(classify(50 + band, 50), 'rare')   # band edge (enemy side)
+        self.assertEqual(classify(50, 50 + band + 1), 'deny')
+        self.assertEqual(classify(50 + band + 1, 50), 'place')
+        self.assertEqual(classify(UNREACHABLE, 50), 'place')
+        self.assertEqual(classify(50, UNREACHABLE), 'place')
 
 
 class CtfRoleTests(unittest.TestCase):
@@ -2008,8 +2041,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '568b6544cb2289ef2cd46a7b036da2fcc0158fb0e999ee69975b5b2b7413897d'
-    HOOK_ENTRY_SIZE = 45421
+    SECTION_SHA256 = '81ee2d511ce18935bc959aadff7738458542944a6886c93beafbb3e7e015ba8f'
+    HOOK_ENTRY_SIZE = 45740
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(
