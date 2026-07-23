@@ -339,6 +339,19 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
                    b'\xB8' + le32(layout.va('item_routing_active')),
                    goody_dump_len, 'snap_skip_goody')
 
+    # Proximity-mine state: cached keys, ring cursor, diag counters, per-bot
+    # placement cooldowns, the live TTL/owner/position ring and the packed
+    # knobs — one R press pins which mines the bots currently know about
+    # and why a placement did or did not fire. Contiguous by layout
+    # construction (mine.py); the mreg_*/mine_tmp_* per-call temps after
+    # tag_mines are excluded.
+    if layout.has_field('tag_mines') and layout.has_field('mine_def_key'):
+        mines_dump_len = (layout.field('mine_place_chance').end
+                          - layout.field('mine_def_key').offset)
+        emit_chunk(layout.va('tag_mines'),
+                   b'\xB8' + le32(layout.va('mine_def_key')),
+                   mines_dump_len, 'snap_skip_mines')
+
     # Waypoint-graph probe. wp_compute populates wp_diag_data[0..7]:
     #   [+0x00] MGR, [+0x04] WM, [+0x08] LV, [+0x0C] WPM,
     #   [+0x10] char count, [+0x14] layer_arr, [+0x18] LAY, [+0x1C] WPM_REAL.

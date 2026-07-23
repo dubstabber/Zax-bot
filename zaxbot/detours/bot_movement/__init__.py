@@ -114,6 +114,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     vector_emit._emit_normalize_and_emit(a, layout)
     vector_emit._emit_wall_slide(a, layout)
     vector_emit._emit_portal_veto(a, layout)
+    vector_emit._emit_mine_veto(a, layout)
     vector_emit._emit_plasma_veto(a, layout)
     vector_emit._emit_dead_and_zero_return(a, layout)
     vector_emit._emit_normal_fallthrough(a)

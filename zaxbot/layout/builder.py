@@ -8,7 +8,7 @@ are pre-seeded to ``None``.
 from types import SimpleNamespace
 
 from . import (carry, chase, core, door, entity_scan, fight, flag, lane, lava,
-               menu, movement, need, pickup, portal, role, sk, switch,
+               menu, mine, movement, need, pickup, portal, role, sk, switch,
                waypoints, wedge)
 from .model import ScratchLayout
 
@@ -61,6 +61,7 @@ def build_scratch_layout(
     item_static_point_max=0,
     item_map_name_slot=0,
     item_categories=0,
+    mine_table_max=0,
 ):
     c = SimpleNamespace(**locals())
     c.MAX_BOT_SLOTS = None
@@ -123,6 +124,7 @@ def build_scratch_layout(
     lane.extend_lane(c)
     need.extend_need(c)
     carry.extend_carry(c)
+    mine.extend_mine(c)
 
     c.fields.extend(c.overlay_fields)
     return ScratchLayout(base_va, scratch_size, c.fields)

@@ -52,7 +52,8 @@ The detailed notes live in `docs/`:
     split per stage/domain, each preserving the original emit order:
     - `world_scan/` - per-match world-data loaders + periodic scans
       (`portals`, `flags`, `doors`, `plasma`, `switches`, `sk`, `items`,
-      `goody`, `hazard_pickup`).
+      `goody`, `hazard_pickup`, `mines` — `load_mine` + the `mine_tick`
+      placement pass).
     - `flag_route/` - routing: `_ctx.py` (shared VA/gate context),
       `fields` (BFS/SPFA builders), `goal`, `next_hop`, `seek`, `drop`,
       `sk_routes`.
@@ -92,7 +93,7 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 
 - WM_KEYDOWN hook at `0x599A1A` redirects `call sub_599580` to
   `.zaxbot:hook_entry`, then tail-jumps back to `sub_599580`.
-- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x26000`, RWX (grown from
+- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x29000`, RWX (grown from
   `0xA000` for the CTF flag static tables, then to `0xC000` for the CTF routing
   BFS distance field, then to `0xD000` for far-base CTF flag entity force-ticks,
   then to `0xF000` for the door detection static tables, then to `0x11000` for
@@ -103,13 +104,14 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   static mineral anchors, team-indexed bin tables, the mineral field + 16
   per-bin BFS rows, and the 512-slot pickup table — then to `0x27000` for
   the graphical bot menu, then to `0x28000` for the enemy-carrier chase
-  layer — sighting intel + per-flag chase BFS rows).
-- Scratch starts at `0x725000` (`SCRATCH_OFF = 0xB000`; the code/scratch
+  layer — sighting intel + per-flag chase BFS rows — then to `0x29000` for
+  the proximity-mine layer's code room).
+- Scratch starts at `0x726000` (`SCRATCH_OFF = 0xC000`; the code/scratch
   boundary moved from `0x5A00` at the door layer, from `0x6800` at the switch
   layer, from `0x7000` at the portal routing layer, from `0x8000` when
   the dropped-flag ROUTED pursuit landed with ~456 code bytes left, from
-  `0x9000` at the SK layer with ~3.0 KB left, then from `0xA000` at the
-  bot-menu layer).
+  `0x9000` at the SK layer with ~3.0 KB left, from `0xA000` at the
+  bot-menu layer, then from `0xB000` at the proximity-mine layer).
 - B opens a GRAPHICAL bot menu (`build_bot_menu` in `zaxbot/hook/bot_menu.py`),
   built from the engine's own widget tree exactly like the in-game Esc quit
   dialog (base `CWindow` vtable `0x5EAAC4` cloned into scratch with slot 0 =
@@ -1082,11 +1084,11 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     mislabelled a bot standing just past the doorway as not-crossed and
     walked it back INTO the closed door (2026-07-20 snapshots, part of the
     self-closing-door shuttle). Degenerate dot <= 0 (bot exactly on the door
-    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~1.2 KB
-    below `SCRATCH_OFF` (hook_entry_size 43828 of 45056 after the bot-menu,
+    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~3.7 KB
+    below `SCRATCH_OFF` (hook_entry_size 45390 of 49152 after the bot-menu,
     CTF role/standoff, enemy-carrier chase, route-lane, combat-strafe,
-    pickup need-gate and carrier-escape layers; the boundary sits at 0xB000
-    with the section at 0x28000). When it runs low again, bump
+    pickup need-gate, carrier-escape and proximity-mine layers; the boundary
+    sits at 0xC000 with the section at 0x29000). When it runs low again, bump
     `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
     `flag_routing_active`) was added for diagnosing route commitment.
@@ -1319,6 +1321,80 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     tests pin the census, the scratch-block invariants, and — on every
     shipped SK graph — that all graph nodes reach a mineral zone and every
     bin is reachable from every mineral node.
+- Bots PLACE PROXIMITY MINES and steer around THEIR OWN (`cfg.MINE_ENABLED`;
+  built 2026-07-23; placement + overlay markers live-confirmed same day.
+  LIVE-CONFIRMED mine semantics: a deployed mine has NO owner or team
+  immunity — it kills its placer (standing on your own mine is suicide)
+  and in CTF it kills same-team players even with friendly fire disabled).
+  Engine model (IDA session
+  2026-07-23, see the `mine-deploy-mechanism` memory): the Proximity Mine is
+  a SECONDARY-slot weapon (`Inventory Type=Secondary`, ammo = itself, 1
+  round per pickup, reuse delay 0.3 s) whose "projectile" is the deployed
+  mine — a CEntityProjectile owned by the placing char, spawned exactly AT
+  the char's position; the human right-click enqueues a pending-action event
+  whose execute is **`sub_5AB9B0(char)`**, the engine's complete deploy
+  (selection lookup, can-fire gate `item->vtbl[+0x98]`, round consume,
+  entity create/place/register, New Shot Action). The def's MP script
+  warp-deletes a deployed mine after ~15 s — which is why the live-mine
+  table is a plain TTL RING (`MINE_TTL_FRAMES` = 900) with no liveness
+  scanning. Pieces:
+  - **Placement** (`mine_tick`, page flip, `world_scan/mines.py`): per live
+    bot, a cooldown counts down; at 0 the bot re-arms a short retry window
+    (`MINE_PLACE_RETRY_FRAMES`) and attempts: carried-rounds gate
+    (`sub_426860` on the per-match `mine_def_key`), RNG roll <
+    `mine_place_chance` (scratch knob, default 35), a spacing sweep (no
+    live ring mine within `MINE_SPACING_RADIUS_SQ` of the bot — a wedged
+    bot must not stack its reserve on one spot), then force-select the mine
+    in the Secondary slot (fast path when already selected; else the
+    engine's own group iterate `sub_425350`/`sub_424F60` matched on
+    `[item+8] == mine_def_key`, the spawn.py select + force-switch
+    sequence on the Secondary slot) and call `sub_5AB9B0(char)` through
+    the PATCHED entry. Success = the carried-round count DROPPED (the
+    deploy has no useful return); success re-arms the long cooldown
+    (`MINE_PLACE_COOLDOWN_FRAMES`, 600). Bots roam constantly, so the low
+    per-window chance scatters mines organically over the map — the
+    CTF-specific placement rules are a planned follow-up gate in
+    `mine_tick` before the roll.
+  - **Registration** (`detour_5AB9B0`, `detours/mine_register.py`): the
+    deploy chokepoint detour predicts at ENTRY whether THIS call deploys a
+    mine (selected Secondary item's `[item+8]` == mine def key AND its
+    can-fire virtual passes — exactly the body's own gates, and the mine
+    lands at the char's position) and appends (char `+0x4C/+0x50`, TTL
+    seed, owner) into the ring. Owner = the `mine_placing_slot` HANDSHAKE
+    `mine_tick` sets (slot+1) around its deploy call and resets after — 0
+    = no bot placement in flight = the HOST HUMAN (stored -1). The
+    original `bot_chars[]` pointer sweep was live-refuted (2026-07-23
+    snapshots: `place_count` 5 with every ring owner -1): that table is
+    captured at SPAWN and each respawn creates a NEW char object, so
+    every post-respawn bot mine mis-attributed to the human and the
+    own-mine veto never matched — the reported "bot still steps on its
+    own mine". PC2 mines deploy client-side and are NOT observed (open).
+    Uses its own `mreg_*` temps — `mine_tmp_*` are LIVE across the detour
+    when the deploy is bot-initiated.
+  - **Avoidance — OWN MINES ONLY** (`s542360_mine_veto` in
+    `vector_emit.py`, between the portal and plasma vetoes;
+    `cfg.MINE_AVOID_ENABLED` + `cfg.MINE_AVOID_OWN_ONLY`): mirror of the
+    portal veto — any candidate heading whose `LAVA_LOOKAHEAD_PX`
+    lookahead point lands within sqrt(`MINE_AVOID_RADIUS_SQ`) (96 px) of a
+    LIVE ring mine rotates onward (`lava_sweep_step` per try, full circle
+    cap). No cooldown gate (mines are always dangerous), and the exempt
+    entry is POSITIONAL: a mine whose bubble already CONTAINS the bot is
+    skipped — otherwise every escape heading would be vetoed, and that
+    exemption is also what lets the owner walk off its own just-placed
+    mine (the deploy drops it at the bot's feet). The veto (and the
+    placement spacing sweep) filter on `mine_owner[] == bot slot`
+    (user-requested 2026-07-23): a mine kills its own placer, so a bot
+    must never step on its own — but avoiding everyone else's mines
+    would make bots immune to the host player's mines. Ownership is
+    SLOT-keyed, so a respawned bot still avoids its previous life's
+    mines; host-human mines carry owner -1 and never match a bot slot.
+  - Overlay: every live ring mine draws as an oval + double-radius ring
+    (portal color — B-driven palette, the ring is the signal). R-snapshot
+    chunk `mines` dumps keys, cursor, counters, per-bot cooldowns, the
+    whole ring and the packed knobs. `load_mine` (df90) clears
+    `mine_def_key..mine_pos` with one rep-stosd — the packed knobs sit
+    AFTER the cleared run so a match change can't zero the live-tunable
+    chance (layout pinned in `MineTests`).
 - General world-entity enumeration (`detours/entity_scan.py:scan_entities`,
   gated by `cfg.SCAN_ENTITIES_ENABLED`). The long-standing blocker for object
   detection was that there is no flat entity list: `mgr+0x290` is players,
@@ -1396,6 +1472,11 @@ Current patched sites:
 - `0x5A6E60` - CDropAllOreAndCrystalsAction per-target apply; SK death-pile
   self-registration into the `sk_pile` ring (gated by `cfg.SK_ENABLED`;
   fast-skips outside armed SK matches).
+- `0x5AB9B0` - the engine's secondary-item deploy `sub_5AB9B0(char)`;
+  proximity-mine self-registration into the `mine_pos`/`mine_ttl` ring
+  (gated by `cfg.MINE_ENABLED`; fast-skips while no match has resolved the
+  mine def key). Catches host-human right-clicks AND bot placements (the
+  `mine_tick` placement path calls through the patched entry).
 - `0x480889` - synthetic-id name-block skip in `sub_480800`.
 - `0x4F5204` - character iterator NULL-skip.
 
@@ -1457,6 +1538,9 @@ Older emitted labels or disabled detours are not active unless they appear in
 | `sub_591FC0(dword_6C0C08, "Ore Deposits"/"Crystals", -1)` | the item-def KEY resolve the SK stats sync (`sub_5616B0`) makes and caches in `dword_713160`/`dword_71315C`; `load_sk` mirrors it per match into `sk_def_ore`/`sk_def_crystal` (engine strings at `0x60B7D4`/`0x60B7C8`) |
 | `sub_561AB0` | `CSalvageKingScoreMineralsAction` per-target apply: consumes the toucher's WHOLE mineral load, `stats+0xF6 += OrePointsValue(+0xC8)*ore + CrystalPointsValue(+0xCC)*crystals`, checks the score limit. NO ownership check here — ownership is the map-script `CIsOnSameTeamAction` gate (toucher entity team `+0x24` == bin part `Team Number` == `NN-1`) |
 | `sub_5A6E60` | `CDropAllOreAndCrystalsAction` per-target apply (`this`=ECX, victim at `[esp+8]`, `ret 0x10`; prologue `83 EC 10 53 55 56`): spawns the UNNAMED death pile (clone of the `Ore_Crystals01` model template, placed within 500 px via `sub_4EB7B0`) holding the victim's whole load; bails when nothing carried. Detoured for pile self-registration |
+| `sub_5AB9B0` | secondary-item deploy (`__stdcall(char) ret 4`, prologue `83 EC 1C 53 55 56 57`): Secondary-group selection lookup, can-fire gate `item->vtbl[+0x98]` (pure checks: `sub_42A4A0` → def vtbl+0x8C `sub_5B8020` — reuse delay + rounds + `!(char+0x1C & 0x10000000)`), round consume (item vtbl+0x5C), deployed entity from `[def+0x20]` via `sub_5176F0(key, CEntityProjectile-desc `sub_491930`, char, 0, -1)` placed AT `sub_4FB0A0(char)`, layer-register `sub_4EB6F0`, then the def's New Shot Action `[def+0x54]` (MP branch deletes the mine after ~15 s). Only in-image caller = the pending-action event execute `sub_5AB970` (human right-click enqueues at `0x5448be`, in an IDA-undefined region). Detoured for mine registration |
+| `"Proximity Mine"` / `"Secondary"` | item-def name @`0x6251E0` (resolve `sub_523DF0(dword_6C0C08, name, -1)` — the `[item+8]`/`sub_426860` key space) / inventory-group name @`0x60B788` (resolve `sub_523DF0(dword_6C0800, name, -1)` — the engine's own call at `0x544876`) |
+| `sub_425350` / `sub_424F60` | inventory-group iterate: `__thiscall(inv; prev_id or -1, group_key) -> next item id / -1, ret 8` / `__thiscall(inv; item_id) -> CInventoryItem*, ret 4` (the engine's Secondary auto-cycle shape at `0x544932`) |
 | `stats + 0xEE/+0xF2/+0xF6` | SK replicated WORDs: carried ore / carried crystals (mirrored by SK gametype vtable `+0xA0` = `sub_5616B0`) / SK score |
 | `VT_SK_VA + 0xA0/+0xA8` | SK-only vtable slots: carried-mineral stats sync (`sub_5616B0`) / scoreboard cell renderer (`sub_561760`) |
 | `sub_4F37E0` | MP world update (virtual): builds one activation POINT per participant from `part+0xC0/+0xC4` (layer idx gate at `+0xDC`) |
@@ -1546,6 +1630,19 @@ Older emitted labels or disabled detours are not active unless they appear in
   `portal_has_dest` so those pads graduate from wander-only to routed edges
   the first time something teleports; those are DM-only today, so nothing
   currently routes through them anyway.
+- Proximity mines — PLACEMENT + OWN-MINE AVOIDANCE DONE (see the mine
+  bullet in "Current state"; placement/overlay live-confirmed 2026-07-23;
+  avoidance narrowed to the bot's OWN mines the same day per user — a
+  mine kills anyone including its placer and CTF teammates regardless of
+  the friendly-fire setting, and bots must stay killable by other
+  players' mines). Remaining: CTF-mode placement rules (user-requested
+  follow-up — gate `mine_tick`'s attempt per bot before the RNG roll,
+  e.g. mine the own-base approach / flag-route chokepoints instead of
+  random roam spots); PC2-placed mines are invisible to the ring (remote
+  deploys run client-side — would need the entity-replication creation
+  path or a periodic model-matched grid scan; irrelevant while avoidance
+  is own-only, PC2 can't be a bot); and the avoid/spacing radii are
+  first-guess knobs (`MINE_AVOID_RADIUS_SQ` 96 px) — tune live.
 - Populate or hook DirectPlay player data so PC2 sees chosen bot names
   (and team colors in CTF/SK).
 - Door awareness — DETECTION + DIRECTIONAL REROUTING DONE (see the door

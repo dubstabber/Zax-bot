@@ -27,6 +27,7 @@ from ..detours import (
     flag_events,
     flag_give_guard,
     flag_route,
+    mine_register,
     name_block,
     overlay,
     pickup_register,
@@ -64,6 +65,7 @@ _DETOUR_LABEL_KEYS = {
     'detour_4C2D60':           'detour_4C2D60_va',
     'detour_5A6E60':           'detour_5A6E60_va',
     'detour_5B4DA0':           'detour_5B4DA0_va',
+    'detour_5AB9B0':           'detour_5AB9B0_va',
 }
 
 
@@ -135,6 +137,7 @@ def build_hook(section_va_abs):
     pickup_register.emit(a, layout)
     portal_register.emit(a, layout)
     sk_pile_register.emit(a, layout)
+    mine_register.emit(a, layout)
     entity_scan.emit(a, layout)
     flag_events.emit(a, layout)
     flag_route.emit(a, layout)

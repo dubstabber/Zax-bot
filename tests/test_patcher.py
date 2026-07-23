@@ -1206,6 +1206,70 @@ class SwitchWanderTests(unittest.TestCase):
         self.assertFalse(layout.has_field('switch_wander_chance'))
 
 
+class MineTests(unittest.TestCase):
+    """Proximity-mine scratch invariants.
+
+    Three consumers rely on the physical ordering in layout/mine.py:
+    load_mine clears mine_def_key..mine_pos with ONE rep stosd (the packed
+    knobs after mine_pos must stay OUTSIDE that range or a match change
+    would zero the live-tunable chance), the `mines` snapshot chunk dumps
+    mine_def_key..mine_place_chance as one contiguous range, and the
+    registration detour masks the ring cursor (power-of-two ring).
+    """
+
+    def _layout(self, mine_table_max=None):
+        return build_scratch_layout(
+            zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA + zax_patch.SCRATCH_OFF,
+            zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF,
+            zax_patch.NUM_BOT_NAMES,
+            zax_patch.NAME_SLOT_SIZE,
+            zax_patch.NAME_SLOT_ASCII,
+            cfg.WEAPON_SPEEDS_MAX,
+            overlay_vertex_max=cfg.OVERLAY_VERTEX_MAX,
+            overlay_edge_max=cfg.OVERLAY_EDGE_MAX,
+            mine_table_max=(cfg.MINE_TABLE_MAX if mine_table_max is None
+                            else mine_table_max),
+        )
+
+    def test_mine_scratch_block_layout_invariants(self):
+        layout = self._layout()
+        # The cleared run is contiguous: mine_def_key .. mine_pos.
+        order = ['mine_def_key', 'mine_sec_key', 'mine_ring_next',
+                 'mine_place_count', 'mine_reg_count', 'bot_mine_cd',
+                 'mine_ttl', 'mine_owner', 'mine_pos']
+        for prev, name in zip(order, order[1:]):
+            self.assertEqual(layout.field(name).offset,
+                             layout.field(prev).end, name)
+        self.assertEqual(layout.field('bot_mine_cd').size, cfg.MAX_BOT_SLOTS * 4)
+        self.assertEqual(layout.field('mine_ttl').size, cfg.MINE_TABLE_MAX * 4)
+        self.assertEqual(layout.field('mine_owner').size, cfg.MINE_TABLE_MAX * 4)
+        self.assertEqual(layout.field('mine_pos').size, cfg.MINE_TABLE_MAX * 8)
+        # Ring cursor mask requires a power-of-two ring.
+        self.assertEqual(cfg.MINE_TABLE_MAX & (cfg.MINE_TABLE_MAX - 1), 0)
+        # The static knobs sit AFTER the cleared run (a match change must
+        # not zero them) and the tag closes the dumped range.
+        self.assertEqual(layout.field('mine_avoid_radius_sq').offset,
+                         layout.field('mine_pos').end)
+        self.assertEqual(layout.field('mine_spacing_sq').offset,
+                         layout.field('mine_avoid_radius_sq').end)
+        self.assertEqual(layout.field('mine_place_chance').offset,
+                         layout.field('mine_spacing_sq').end)
+        self.assertEqual(layout.field('tag_mines').offset,
+                         layout.field('mine_place_chance').end)
+        # The registration detour's temps must be distinct from mine_tick's
+        # (the detour runs INSIDE mine_tick's sub_5AB9B0 call).
+        self.assertTrue(layout.has_field('mreg_char'))
+        self.assertTrue(layout.has_field('mreg_item'))
+        self.assertGreaterEqual(layout.field('mreg_char').offset,
+                                layout.field('tag_mines').end)
+
+    def test_mine_block_absent_without_cap(self):
+        layout = self._layout(mine_table_max=0)
+        self.assertFalse(layout.has_field('mine_def_key'))
+        self.assertFalse(layout.has_field('mine_ttl'))
+        self.assertFalse(layout.has_field('mreg_char'))
+
+
 class CtfRoleTests(unittest.TestCase):
     """CTF attacker/defender role scratch invariants + the map-size-derived
     defender patrol radius on the shipped graphs.
@@ -1944,8 +2008,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '88de3aa3d06048a5abfab65087b28036c05b1adc43eceb2adb1cb89fc625ac9b'
-    HOOK_ENTRY_SIZE = 43828
+    SECTION_SHA256 = '568b6544cb2289ef2cd46a7b036da2fcc0158fb0e999ee69975b5b2b7413897d'
+    HOOK_ENTRY_SIZE = 45421
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

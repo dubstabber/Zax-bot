@@ -17,11 +17,12 @@ Modules (in emit order):
 - ``sk``            — ``load_sk`` (Salvage King minerals + bins).
 - ``items``         — ``load_items`` (filler-item anchors).
 - ``goody``         — ``goody_scan_piles`` / ``goody_scan_items``.
+- ``mines``         — ``load_mine`` / ``mine_tick`` (proximity-mine ring).
 """
 
 from ...asm import Asm
 from ...layout import ScratchLayout
-from . import doors, flags, goody, hazard_pickup, items, plasma, portals, sk, switches
+from . import doors, flags, goody, hazard_pickup, items, mines, plasma, portals, sk, switches
 
 
 def emit(a: Asm, layout: ScratchLayout) -> None:
@@ -34,3 +35,4 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     sk.emit(a, layout)
     items.emit(a, layout)
     goody.emit(a, layout)
+    mines.emit(a, layout)

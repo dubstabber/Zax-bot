@@ -66,4 +66,5 @@ def build_layout_from_config(scratch_va, scratch_size):
         item_static_point_max=cfg.ITEM_STATIC_POINT_MAX if cfg.ITEM_PURSUIT_ENABLED else 0,
         item_map_name_slot=cfg.ITEM_MAP_NAME_SLOT if cfg.ITEM_PURSUIT_ENABLED else 0,
         item_categories=cfg.ITEM_CATEGORIES if cfg.ITEM_PURSUIT_ENABLED else 0,
+        mine_table_max=cfg.MINE_TABLE_MAX if cfg.MINE_ENABLED else 0,
     )

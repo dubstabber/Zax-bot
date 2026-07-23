@@ -145,4 +145,7 @@ def write_static_from_config(section, scratch_off, layout):
         item_pursue_radius_sq=cfg.ITEM_PURSUE_RADIUS_SQ,
         goody_direct_radius_sq=cfg.GOODY_DIRECT_RADIUS_SQ,
         goody_abandon_radius_sq=cfg.GOODY_ABANDON_RADIUS_SQ,
+        mine_avoid_radius_sq=cfg.MINE_AVOID_RADIUS_SQ,
+        mine_spacing_sq=cfg.MINE_SPACING_RADIUS_SQ,
+        mine_place_chance=cfg.MINE_PLACE_CHANCE,
     )

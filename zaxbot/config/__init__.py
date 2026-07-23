@@ -22,6 +22,7 @@ from .door import *  # noqa: F401,F403
 from .switch import *  # noqa: F401,F403
 from .ctf_route import *  # noqa: F401,F403
 from .sk import *  # noqa: F401,F403
+from .mine import *  # noqa: F401,F403
 from .simulation import *  # noqa: F401,F403
 from .lava import *  # noqa: F401,F403
 from .waypoints import *  # noqa: F401,F403

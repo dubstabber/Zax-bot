@@ -316,9 +316,9 @@ def _emit_portal_veto(a: Asm, layout: ScratchLayout) -> None:
 
     a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))              # ecx = slot
     a.raw(b'\x83\x3C\x8D' + le32(bot_portal_cd_va) + b'\x00')  # cooldown running?
-    a.jz('s542360_plasma_veto')                             # no -> pads are fair game
+    a.jz('s542360_mine_veto')                               # no -> pads are fair game
     a.raw(b'\x8B\x54\x24\x28')                              # edx = out_angle ptr
-    a.raw(b'\x85\xD2'); a.jz('s542360_plasma_veto')         # no angle slot
+    a.raw(b'\x85\xD2'); a.jz('s542360_mine_veto')           # no angle slot
     # Exempt pad = the deliberately latched one (idx, or -1 when unlatched).
     a.raw(b'\x8B\x04\x8D' + le32(bot_portal_target_va))     # eax = latch (idx+1 / 0)
     a.raw(b'\x48')                                          # eax = idx / -1
@@ -373,12 +373,147 @@ def _emit_portal_veto(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xFF\x05' + le32(lava_k_va))                    # ++k
     a.raw(b'\x83\x3D' + le32(lava_k_va) + bytes([LAVA_SWEEP_COUNT]))
     a.jb('s542360_pvt_loop')
-    a.jmp('s542360_plasma_veto')                            # all vetoed -> keep base
+    a.jmp('s542360_mine_veto')                              # all vetoed -> keep base
 
     a.label('s542360_pvt_ok')
     a.raw(b'\x8B\x54\x24\x28')                              # edx = out_angle ptr
     a.raw(b'\xA1' + le32(veto_angle_va))                    # eax = chosen angle bits
     a.raw(b'\x89\x02')                                      # [edx] = pad-clear heading
+    # fall through to the mine veto
+
+
+def _emit_mine_veto(a: Asm, layout: ScratchLayout) -> None:
+    """Live-mine heading veto — mines are virtual walls.
+
+    Mirror of the portal veto directly above (same per-call temps — the
+    vetoes run sequentially in one call, never concurrently): any candidate
+    heading whose ``LAVA_LOOKAHEAD_PX`` lookahead point lands within
+    sqrt(``mine_avoid_radius_sq``) of a LIVE ring mine (``mine_ttl`` > 0)
+    is rotated onward, up to a full circle. Three deliberate differences:
+
+    - No cooldown gate: mines are dangerous whenever they exist, so the
+      scan runs every think (dead ring slots cost one int cmp each).
+    - The exempt entry is positional, not an index: a mine whose bubble
+      already CONTAINS the bot (d² from ``bot_pos`` below the radius) is
+      skipped entirely — every escape heading would otherwise be vetoed,
+      and walking OUT is the best the bot can do. This is also what lets
+      the OWNER walk off its own just-placed mine (the deploy drops it
+      exactly at the bot's feet).
+    - With ``cfg.MINE_AVOID_OWN_ONLY`` (default), only mines whose ring
+      ``mine_owner`` equals THIS bot's slot are considered — a deployed
+      mine kills its own placer (live-confirmed; no owner/team immunity,
+      CTF friendly-fire setting ignored), but avoiding everyone else's
+      mines would make bots immune to the host player's mines. Ownership
+      is slot-keyed, so a respawned bot still avoids the mines it placed
+      in its previous life.
+
+    Emitted between the portal and plasma vetoes; the label is always
+    present (empty fall-through when disabled) so the portal veto can
+    target it unconditionally."""
+    a.label('s542360_mine_veto')
+    ok = (cfg.MINE_ENABLED and cfg.MINE_AVOID_ENABLED
+          and layout.has_field('mine_ttl')
+          and layout.has_field('mine_pos')
+          and layout.has_field('mine_avoid_radius_sq'))
+    if not ok:
+        return                                              # fall through to plasma veto
+
+    bot_pos_va           = layout.va('bot_pos')
+    lava_lookahead_px_va = layout.va('lava_lookahead_px')
+    lava_sweep_step_va   = layout.va('lava_sweep_step')
+    veto_angle_va        = layout.va('lava_veto_angle')
+    veto_cos_va          = layout.va('lava_veto_cos')
+    veto_sin_va          = layout.va('lava_veto_sin')
+    lava_k_va            = layout.va('lava_k')
+    wp_seg_x_va          = layout.va('wp_seg_x')
+    wp_seg_y_va          = layout.va('wp_seg_y')
+    mine_ttl_va          = layout.va('mine_ttl')
+    mine_pos_va          = layout.va('mine_pos')
+    mine_owner_va        = layout.va('mine_owner')
+    mine_radius_va       = layout.va('mine_avoid_radius_sq')
+
+    a.raw(b'\x8B\x54\x24\x28')                              # edx = out_angle ptr
+    a.raw(b'\x85\xD2'); a.jz('s542360_plasma_veto')         # no angle slot
+    a.raw(b'\x8B\x02')                                      # eax = base angle bits
+    a.raw(b'\xA3' + le32(veto_angle_va))                    # veto_angle = base heading
+    a.raw(b'\xC7\x05' + le32(lava_k_va) + le32(0))          # k = 0
+    if cfg.MINE_AVOID_OWN_ONLY:
+        # ecx = this bot's slot for the per-mine owner filter. Nothing in
+        # the loop below touches ecx (FPU + esi only), so one load serves
+        # all sweep iterations.
+        a.raw(b'\x8B\x0D' + le32(layout.va('bot_slot_tmp')))  # ecx = slot
+
+    a.label('s542360_mvt_loop')
+    # Lookahead point of the candidate heading.
+    a.raw(b'\xD9\x05' + le32(veto_angle_va))                # fld veto_angle
+    a.raw(b'\xD9\xFB')                                      # fsincos -> ST0=cos, ST1=sin
+    a.raw(b'\xD9\x1D' + le32(veto_cos_va))                  # fstp cos (-> ST0=sin)
+    a.raw(b'\xD9\x1D' + le32(veto_sin_va))                  # fstp sin (-> empty)
+    a.raw(b'\xD9\x05' + le32(lava_lookahead_px_va))         # fld look
+    a.raw(b'\xD8\x0D' + le32(veto_cos_va))                  # fmul cos
+    a.raw(b'\xD8\x05' + le32(bot_pos_va))                   # fadd bot.x
+    a.raw(b'\xD9\x1D' + le32(wp_seg_x_va))                  # fstp look.x
+    a.raw(b'\xD9\x05' + le32(lava_lookahead_px_va))         # fld look
+    a.raw(b'\xD8\x0D' + le32(veto_sin_va))                  # fmul sin
+    a.raw(b'\xD8\x05' + le32(bot_pos_va + 4))               # fadd bot.y
+    a.raw(b'\xD9\x1D' + le32(wp_seg_y_va))                  # fstp look.y
+    # Scan the ring: blocked when the lookahead lands inside a live mine's
+    # bubble and the bot is not already inside that same bubble.
+    a.raw(b'\x31\xF6')                                      # esi = ring slot
+    a.label('s542360_mvt_scan')
+    a.raw(b'\x83\xFE' + bytes([cfg.MINE_TABLE_MAX]))        # slot >= ring size?
+    a.jae('s542360_mvt_ok')
+    a.raw(b'\x83\x3C\xB5' + le32(mine_ttl_va) + b'\x00')    # dead slot?
+    a.jz('s542360_mvt_next')
+    if cfg.MINE_AVOID_OWN_ONLY:
+        # Not this bot's mine -> not avoided (host-human mines carry -1
+        # and never match). A dead bot's slot persists, so respawned bots
+        # keep avoiding their previous life's mines.
+        a.raw(b'\x3B\x0C\xB5' + le32(mine_owner_va))        # owner == my slot?
+        a.jnz('s542360_mvt_next')
+    # Inside-exempt: d²(bot, mine) < radius² -> skip this mine.
+    a.raw(b'\xD9\x04\xF5' + le32(mine_pos_va))              # fld mine.x
+    a.raw(b'\xD8\x25' + le32(bot_pos_va))                   # fsub bot.x
+    a.raw(b'\xD8\xC8')                                      # fmul st,st
+    a.raw(b'\xD9\x04\xF5' + le32(mine_pos_va + 4))          # fld mine.y
+    a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))               # fsub bot.y
+    a.raw(b'\xD8\xC8')                                      # fmul st,st
+    a.raw(b'\xDE\xC1')                                      # faddp -> d²
+    a.raw(b'\xD8\x1D' + le32(mine_radius_va))               # fcomp radius² (pops)
+    a.raw(b'\xDF\xE0'); a.raw(b'\x9E')                      # fnstsw ax; sahf
+    a.jb('s542360_mvt_next')                                # already inside -> exempt
+    # Lookahead test: d²(look, mine) < radius² -> heading is mine-ward.
+    a.raw(b'\xD9\x04\xF5' + le32(mine_pos_va))              # fld mine.x
+    a.raw(b'\xD8\x25' + le32(wp_seg_x_va))                  # fsub look.x
+    a.raw(b'\xD8\xC8')                                      # fmul st,st
+    a.raw(b'\xD9\x04\xF5' + le32(mine_pos_va + 4))          # fld mine.y
+    a.raw(b'\xD8\x25' + le32(wp_seg_y_va))                  # fsub look.y
+    a.raw(b'\xD8\xC8')                                      # fmul st,st
+    a.raw(b'\xDE\xC1')                                      # faddp -> d²
+    a.raw(b'\xD8\x1D' + le32(mine_radius_va))               # fcomp radius² (pops)
+    a.raw(b'\xDF\xE0'); a.raw(b'\x9E')                      # fnstsw ax; sahf
+    a.jb('s542360_mvt_blocked')                             # mine-ward
+    a.label('s542360_mvt_next')
+    a.raw(b'\x46')                                          # ++slot
+    a.jmp('s542360_mvt_scan')
+
+    a.label('s542360_mvt_blocked')
+    # Rotate the heading and retry, up to a full circle; if every heading
+    # is mine-ward keep the base angle (the bot is boxed in — walking any
+    # direction risks the same, and the wall-slide machinery still owns
+    # real geometry).
+    a.raw(b'\xD9\x05' + le32(veto_angle_va))                # fld veto_angle
+    a.raw(b'\xD8\x05' + le32(lava_sweep_step_va))           # fadd sweep step
+    a.raw(b'\xD9\x1D' + le32(veto_angle_va))                # fstp veto_angle
+    a.raw(b'\xFF\x05' + le32(lava_k_va))                    # ++k
+    a.raw(b'\x83\x3D' + le32(lava_k_va) + bytes([LAVA_SWEEP_COUNT]))
+    a.jb('s542360_mvt_loop')
+    a.jmp('s542360_plasma_veto')                            # all vetoed -> keep base
+
+    a.label('s542360_mvt_ok')
+    a.raw(b'\x8B\x54\x24\x28')                              # edx = out_angle ptr
+    a.raw(b'\xA1' + le32(veto_angle_va))                    # eax = chosen angle bits
+    a.raw(b'\x89\x02')                                      # [edx] = mine-clear heading
     # fall through to the plasma veto
 
 

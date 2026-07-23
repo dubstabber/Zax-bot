@@ -454,6 +454,37 @@ SUB_5A6E60_VA       = 0x5A6E60
 S5A6E60_RESUME      = 0x5A6E66  # after the 6-byte prologue, at `mov esi,[esp+24h]`
 S5A6E60_PROLOGUE    = b'\x83\xEC\x10\x53\x55\x56'  # sub esp,10h; push ebx; push ebp; push esi
 
+# --- Proximity-mine deploy (secondary fire) --------------------------------
+# sub_5AB9B0(char) is the engine's COMPLETE secondary-item deploy: resolves
+# the char's Secondary-group selection (sub_523DF0(dword_6C0800, "Secondary",
+# -1) -> sub_425290 -> inv.vtbl[+0x68]), gates on item->vtbl[+0x98](item,
+# char) (reuse delay + rounds + !(char+0x1C & 0x10000000)), consumes a round
+# (item vtbl+0x5C), creates the deployed entity from the def's Projectile
+# model key ([def+0x20]) via sub_5176F0(key, CEntityProjectile-desc, char, 0,
+# -1) — the OWNER is the placing char — places it exactly AT sub_4FB0A0(char)
+# (ent vtbl+0xA4), registers it into the layer (sub_4EB6F0) and runs the
+# def's New Shot Action ([def+0x54]) — whose MP branch warp-deletes the mine
+# after ~15 s. __stdcall(char), ret 4. Only caller in-image is the pending-
+# action event execute sub_5AB970 (the human right-click enqueues that event
+# at 0x5448be); remote clients deploy CLIENT-side, so a host detour here
+# observes host-human + bot deploys only. Detoured for mine registration;
+# the bot placement path calls THROUGH the patched entry so one site
+# registers both.
+SUB_5AB9B0_VA       = 0x5AB9B0
+S5AB9B0_RESUME      = 0x5AB9B7  # after the 7-byte prologue, at `mov edi,[esp+30h]`
+S5AB9B0_PROLOGUE    = b'\x83\xEC\x1C\x53\x55\x56\x57'  # sub esp,1Ch; push ebx/ebp/esi/edi
+SECONDARY_STR_VA      = 0x60B788  # "Secondary" (inventory-group name)
+PROXIMITY_MINE_STR_VA = 0x6251E0  # "Proximity Mine" (item-def name)
+# Inventory-group iteration (the engine's own Secondary auto-cycle at
+# 0x544932..): next item id in a group / item object by id. Both __thiscall
+# on the inventory (sub_4267E0 result).
+SUB_425350_VA = 0x425350  # (inv; prev_id or -1, group_key) -> next item id / -1; ret 8
+SUB_424F60_VA = 0x424F60  # (inv; item_id) -> CInventoryItem*; ret 4
+ITEM_DEF_KEY_OFF = 0x8    # [item+8] = item-def KEY (sub_482DE0; same id space
+                          # as sub_523DF0(dword_6C0C08, name, -1))
+ITEM_TRY_FIRE_OFF = 0x98  # item vtbl slot: (item, char) -> AL can-fire; pure
+                          # checks (sub_42A4A0 -> def vtbl+0x8C sub_5B8020)
+
 # --- Active-gametype getter (used by detect_mode) --------------------------
 # `sub_59FF90(ecx=mgr)` returns the active CMultiPlayerGameType-derived
 # instance (or NULL). [result+0] is one of `VT_DM_VA`/`VT_CTF_VA`/`VT_SK_VA`.

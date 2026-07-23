@@ -139,6 +139,23 @@ def build_enabled_patches():
             )
         )
 
+    if cfg.MINE_ENABLED:
+        # Proximity-mine deploy self-registration: detours the engine's
+        # complete secondary-item deploy sub_5AB9B0(char) — the single host
+        # site every mine placement funnels through (host-human right-click
+        # via the pending-action event, bot placements via mine_tick's
+        # direct call). Records the char position (the mine lands exactly
+        # there) into the mine_pos/mine_ttl ring when the selected Secondary
+        # item is the mine AND its can-fire gate passes. Fires only on
+        # deploy attempts; fast-skips while no match has resolved the def
+        # key.
+        patches.append(
+            RelocationPatch(
+                'sub_5AB9B0 proximity-mine deploy registration', 'jmp',
+                ax.SUB_5AB9B0_VA, ax.S5AB9B0_PROLOGUE, 'detour_5AB9B0_va', 7,
+            )
+        )
+
     if cfg.CTF_SCORE_GUARD_ENABLED:
         # Last-resort backstop: suppress a capture point award while the
         # scoring team's own flag is away/carried. Should never fire with the

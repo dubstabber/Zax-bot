@@ -188,6 +188,12 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # Inert stubs on non-item builds.
     a.call_lbl('load_items')
     a.call_lbl('build_item_routes')
+    # Proximity-mine per-match reset: clears the live-mine ring, cursor,
+    # per-bot placement cooldowns and diag counters, then resolves the
+    # "Proximity Mine" item-def key + "Secondary" group key (the engine's
+    # own resolver calls). No graph/order dependency; inert stub on
+    # non-mine builds.
+    a.call_lbl('load_mine')
     # Static edge->door adjacency for the door-aware routing field. Doors and
     # the graph never move mid-match, so the point-segment sweep runs once
     # here (wp_load above loaded the graph; load_doors filled door_table).

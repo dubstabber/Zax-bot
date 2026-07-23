@@ -322,6 +322,13 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.call_lbl('sk_pile_tick')
         if layout.has_field('sk_pile_dirty'):
             a.call_lbl('sk_pile_route_refresh')
+    # Proximity-mine servicing: age the live-mine ring TTLs (they mirror the
+    # deployed mine's own ~15 s scripted self-delete) and run the per-bot
+    # placement pass (cooldowns, carried-rounds gate, RNG roll, force-select
+    # + engine deploy). Self-contained pushad/popad; inert stub on non-mine
+    # builds.
+    if cfg.MINE_ENABLED and layout.has_field('mine_ttl'):
+        a.call_lbl('mine_tick')
     # Far CTF capture support. The bot force-tick above keeps the carrier
     # moving, but capture itself is driven by the base "checker" trigger at the
     # destination. Those entities are also camera-gated by the engine, so a bot
@@ -754,6 +761,53 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\x46')                                        # ++idx
         a.jmp('ov_switch_loop')
         a.label('ov_after_switches')
+
+    # --- Draw live mines --------------------------------------------------
+    # Every live ring slot (mine_ttl > 0, maintained by detour_5AB9B0 +
+    # mine_tick) renders as an oval PLUS a double-radius ring at the deploy
+    # spot. Reuses the portal color — in the 8-bit palettized mode all
+    # B=255 markers share one hue anyway; the ring + placement context is
+    # the signal (mines sit where bots/humans walked, pads are static).
+    if (cfg.MINE_ENABLED and layout.has_field('mine_ttl')
+            and overlay_portal_color_va):
+        mine_pos_ov_va = layout.va('mine_pos')
+        mine_ttl_ov_va = layout.va('mine_ttl')
+        mine_ring_radius = struct.unpack(
+            '<I', struct.pack('<f', cfg.OVERLAY_VERTEX_RADIUS * 2.0))[0]
+        a.raw(b'\x31\xF6')                                    # esi = ring slot
+        a.label('ov_mine_loop')
+        a.raw(b'\x83\xFE' + bytes([cfg.MINE_TABLE_MAX]))      # slot >= ring size?
+        a.jae('ov_after_mines')
+        a.raw(b'\x83\x3C\xB5' + le32(mine_ttl_ov_va) + b'\x00')
+        a.jz('ov_mine_next')                                  # dead slot
+        a.raw(b'\xD9\x04\xF5' + le32(mine_pos_ov_va))         # fld mine.x
+        a.raw(b'\xD8\x25' + le32(overlay_cam_x_va))           # fsub cam.x
+        a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va))          # fstp p1.x
+        a.raw(b'\xD9\x04\xF5' + le32(mine_pos_ov_va + 4))     # fld mine.y
+        a.raw(b'\xD8\x25' + le32(overlay_cam_y_va))           # fsub cam.y
+        a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va + 4))      # fstp p1.y
+        _emit_point_cull(
+            a, overlay_tmp_p1_va,
+            overlay_cull_min_x_va, overlay_cull_max_x_va,
+            overlay_cull_min_y_va, overlay_cull_max_y_va,
+            'ov_mine_next',
+        )
+        a.raw(b'\xBA' + le32(overlay_tmp_p1_va))              # edx = &p1
+        a.raw(b'\x68' + le32(overlay_portal_color_va))        # push &color
+        a.raw(b'\xFF\x35' + le32(overlay_vertex_aspect_va))   # push aspect
+        a.raw(b'\xFF\x35' + le32(overlay_vertex_radius_va))   # push radius
+        a.raw(b'\x89\xF9')                                    # ecx = renderer
+        a.call_va(ax.SUB_4FCCC0_VA)
+        a.raw(b'\xBA' + le32(overlay_tmp_p1_va))              # edx = &p1
+        a.raw(b'\x68' + le32(overlay_portal_color_va))        # push &color
+        a.raw(b'\xFF\x35' + le32(overlay_vertex_aspect_va))   # push aspect
+        a.raw(b'\x68' + le32(mine_ring_radius))               # push 2x radius (imm float bits)
+        a.raw(b'\x89\xF9')                                    # ecx = renderer
+        a.call_va(ax.SUB_4FCCC0_VA)
+        a.label('ov_mine_next')
+        a.raw(b'\x46')                                        # ++slot
+        a.jmp('ov_mine_loop')
+        a.label('ov_after_mines')
 
     # --- Draw edges -------------------------------------------------------
     if overlay_edges_va and overlay_vertices_va:

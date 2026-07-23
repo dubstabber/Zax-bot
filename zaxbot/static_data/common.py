@@ -73,6 +73,9 @@ DUMP_TAGS = (
     # CTF enemy-carrier chase state (shared per-flag sighting intel, row
     # roots, per-bot latches/cooldowns).
     ('tag_chase', 'chase'),
+    # Proximity-mine state (keys, ring cursor/counters, per-bot cooldowns,
+    # the live TTL/owner/position ring + packed knobs).
+    ('tag_mines', 'mines'),
 )
 
 
