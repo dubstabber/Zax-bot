@@ -9,13 +9,14 @@ prefix is a clean category discriminator —
 * ``Items/Medical/``  -> HEALTH  (fruit / fruit piles, 58 shipped)
 * ``Items/Energy/``   -> ENERGY  (battery charges/levels, 128 shipped)
 * ``Items/Shields/``  -> SHIELD  (shield charges/belts, 86 shipped)
-* WEAPON — gun-granting pickups only (150 shipped), matched by an explicit
+* WEAPON — gun-granting pickups only (220 shipped), matched by an explicit
   model SET (census 2026-07-23), NOT the ``Items/Weapons/`` prefix: more
   than half the parts under that prefix are AMMO packs (``PU Semi Auto
   Ammo``, ``PU Grenade Canister``, ``PU Missile 5 Pack``, ``PU Proximity
-  Mine`` — 255 of 475), and ``PU Light Pistol`` (70) is the starter gun
-  every bot already carries, i.e. effectively an ammo pickup too. Those
-  stay walk-over-only; the weapon category exists so bots PRIORITIZE
+  Mine`` — 255 of 475), which stay walk-over-only. The set INCLUDES
+  ``PU Light Pistol`` (70): the actual spawn loadout is the (very weak)
+  Modified Laser Welder — user-corrected 2026-07-23 — so even the pistol
+  is a genuine upgrade. The weapon category exists so bots PRIORITIZE
   arming up (ranked above the fillers, below the objective pursuits).
 
 Pure ammo pickups are deliberately excluded — bots collect ammo by
@@ -49,9 +50,10 @@ _CAT_BY_PREFIX = (
 )
 
 # Gun-granting pickup models (lowercased). Explicit include SET — the
-# Items/Weapons/ prefix also covers the ammo packs and the starter pistol,
-# which must NOT be pursued (see the module docstring).
+# Items/Weapons/ prefix also covers the ammo packs, which must NOT be
+# pursued (see the module docstring).
 _WEAPON_PICKUP_MODELS = frozenset((
+    'items/weapons/power ups/pu light pistol',
     'items/weapons/power ups/pu semi auto pistol',
     'items/weapons/power ups/pu full auto pistol',
     'items/weapons/power ups/pu twin disrupter',

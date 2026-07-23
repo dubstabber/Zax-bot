@@ -475,6 +475,9 @@ S5AB9B0_RESUME      = 0x5AB9B7  # after the 7-byte prologue, at `mov edi,[esp+30
 S5AB9B0_PROLOGUE    = b'\x83\xEC\x1C\x53\x55\x56\x57'  # sub esp,1Ch; push ebx/ebp/esi/edi
 SECONDARY_STR_VA      = 0x60B788  # "Secondary" (inventory-group name)
 PROXIMITY_MINE_STR_VA = 0x6251E0  # "Proximity Mine" (item-def name)
+MODIFIED_LASER_WELDER_STR_VA = 0x624CA4  # "Modified Laser Welder" (item-def
+                                  # name; the MP SPAWN weapon — resolved per
+                                  # match for the weapon auto-equip check)
 # Inventory-group iteration (the engine's own Secondary auto-cycle at
 # 0x544932..): next item id in a group / item object by id. Both __thiscall
 # on the inventory (sub_4267E0 result).

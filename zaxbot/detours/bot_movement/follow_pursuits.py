@@ -5,6 +5,7 @@ wander-bump press."""
 
 import struct
 
+from ... import addresses as ax
 from ... import config as cfg
 from ...asm import Asm, le32
 from ...layout import ScratchLayout
@@ -574,18 +575,56 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
         # below the objective pursuits): scan the weapon category alone
         # first, within its own larger radius — a needed gun in range wins
         # over any nearer filler. The need mask's bit3 gates it inside the
-        # scan (armed bots stop hunting). Misses fall through to the
+        # scan (armed bots stop hunting). The latch itself is a
+        # DISTANCE-WEIGHTED ROLL ("the closer the weapon, the higher the
+        # chance"): chance = weapon_chance_max * (R² − d²)/R², so an
+        # adjacent gun is a near-certain grab while one at the radius edge
+        # almost never diverts an attacker off its route — and a bot whose
+        # route naturally closes on the pickup re-rolls with rising odds
+        # each retry window. A lost roll arms the shared goody cooldown
+        # for the SHORT retry (not the grab cooldown) and skips this
+        # window's filler entry too (a latch would violate the
+        # cd-implies-no-latch invariant). Scan misses fall through to the
         # any-category filler scan, which can still pick a weapon as the
         # nearest-of-any.
         weapon_rank = (cfg.ITEM_CATEGORIES >= 4
-                       and layout.has_field('weapon_pursue_radius_sq'))
+                       and layout.has_field('weapon_pursue_radius_sq')
+                       and layout.has_field('weapon_chance_max'))
         if weapon_rank:
-            a.raw(b'\xA1' + le32(layout.va('weapon_pursue_radius_sq')))
+            weapon_rad_va    = layout.va('weapon_pursue_radius_sq')
+            weapon_chance_va = layout.va('weapon_chance_max')
+            a.raw(b'\xA1' + le32(weapon_rad_va))
             a.raw(b'\xA3' + le32(goody_scan_rad_va))      # radius = weapon pursue
             a.raw(b'\xC7\x05' + le32(goody_scan_cat_va)
                   + le32(3))                              # weapons only
             a.call_lbl('goody_scan_items')                # ebx = idx or -1
-            a.raw(b'\x83\xFB\xFF'); a.jnz('s542360_gd_item_kind')
+            a.raw(b'\x83\xFB\xFF'); a.jz('s542360_gd_w_none')
+            # chance = chance_max * (R² − d²) / R²  (d² <= R² by the scan
+            # radius; goody_tx/ty hold the found weapon's position).
+            a.raw(b'\xD9\x05' + le32(goody_tx_va))        # fld weapon.x
+            a.raw(b'\xD8\x25' + le32(bot_pos_va))         # fsub bot.x
+            a.raw(b'\xD8\xC8')                            # fmul st,st
+            a.raw(b'\xD9\x05' + le32(goody_ty_va))        # fld weapon.y
+            a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))     # fsub bot.y
+            a.raw(b'\xD8\xC8')                            # fmul st,st
+            a.raw(b'\xDE\xC1')                            # faddp -> st0 = d²
+            a.raw(b'\xD9\x05' + le32(weapon_rad_va))      # st0 = R², st1 = d²
+            a.raw(b'\xD8\xE1')                            # fsub st0,st1 -> R²-d²
+            a.raw(b'\xD8\x35' + le32(weapon_rad_va))      # fdiv R² -> t (0..1]
+            a.raw(b'\xD8\x0D' + le32(weapon_chance_va))   # fmul chance_max
+            a.raw(b'\xDB\x1D' + le32(goody_scan_cat_va))  # fistp -> int chance
+            a.raw(b'\xDD\xD8')                            # fstp st0 (pop d²)
+            a.raw(b'\x6A\x63')                            # push 99
+            a.raw(b'\x6A\x00')                            # push 0
+            a.raw(b'\xB9' + le32(ax.RNG_OBJ_VA))          # ecx = RNG instance
+            a.call_va(ax.RNG_SUB)                         # eax = 0..99
+            a.raw(b'\x3B\x05' + le32(goody_scan_cat_va))  # roll < chance?
+            a.jb('s542360_gd_item_kind')                  # won -> latch weapon
+            a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))    # ecx = slot
+            a.raw(b'\xC7\x04\x8D' + le32(bot_pile_cd_va)
+                  + le32(max(1, cfg.WEAPON_ROLL_RETRY_FRAMES)))
+            a.jmp('s542360_gd_done')                      # lost -> short retry
+            a.label('s542360_gd_w_none')
         a.raw(b'\xA1' + le32(item_radius_mv_va))          # radius = item pursue
         a.raw(b'\xA3' + le32(goody_scan_rad_va))
         a.raw(b'\xC7\x05' + le32(goody_scan_cat_va) + b'\xFF\xFF\xFF\xFF')  # any cat

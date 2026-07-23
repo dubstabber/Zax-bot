@@ -112,6 +112,7 @@ def extend_sk(c):
 
 
 def extend_goody(c):
+    MAX_BOT_SLOTS = c.MAX_BOT_SLOTS
     item_table_max = c.item_table_max
     item_static_map_max = c.item_static_map_max
     item_static_point_max = c.item_static_point_max
@@ -164,6 +165,16 @@ def extend_goody(c):
         _gd_field('weapon_pursue_radius_sq', 0x04,
                   'goody: weapon-pickup priority divert radius^2 (float; larger '
                   'than the filler radius — arming up is worth a longer walk)')
+        _gd_field('weapon_chance_max', 0x04,
+                  'goody: weapon-roll chance at d=0 (float 0..100; scales '
+                  'linearly to 0 at the radius edge)')
+        _gd_field('welder_def_key', 0x04,
+                  'goody: per-match "Modified Laser Welder" item-def key '
+                  '(the spawn weapon; 0 = unresolved)')
+        _gd_field('bot_equip_cd', MAX_BOT_SLOTS * 4,
+                  'goody: per-bot frames until the next auto-equip check')
+        _gd_field('weq_tmp_slot', 0x04, 'goody: equip-tick loop slot spill')
+        _gd_field('weq_tmp_id', 0x04, 'goody: equip-tick candidate item id')
         if sk_pile_max_capped > 0:
             _gd_field('sk_pile_dirty', 0x04,
                       'goody: 1 = pile set changed, rebuild sk_pile_dist next flip')

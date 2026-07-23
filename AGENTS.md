@@ -1271,15 +1271,29 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   - **Static goody anchors** (`item_data.py` → `load_items`, per match,
     ALL modes): every MP map's pickups whose model path starts
     `Items/Medical|Energy|Shields/` (272 fillers across 17 maps; category
-    by prefix) PLUS category 3 = WEAPON pickups (150; user-requested
+    by prefix) PLUS category 3 = WEAPON pickups (220; user-requested
     2026-07-23) matched by an explicit gun-GRANTING model set — NOT the
     `Items/Weapons/` prefix, because 255 of that prefix's 475 parts are
     AMMO packs (`PU Semi Auto Ammo`/`PU Grenade Canister`/`PU Missile 5
-    Pack`/`PU Proximity Mine`) and `PU Light Pistol` (70) is the starter
-    gun every bot already carries — those stay walk-over-only. Census
-    pinned in tests (422 total). Keys/minerals excluded. All respawn in
-    place (10-15 s), so like minerals there is NO presence tracking — a
-    consumed anchor costs one cooldown-bounded empty visit.
+    Pack`/`PU Proximity Mine`), which stay walk-over-only. `PU Light
+    Pistol` (70) IS in the set: the actual MP spawn loadout is the far
+    weaker **Modified Laser Welder** (user-corrected 2026-07-23), so even
+    the pistol is an upgrade. Census pinned in tests (492 total).
+    Keys/minerals excluded. All respawn in place (10-15 s), so like
+    minerals there is NO presence tracking — a consumed anchor costs one
+    cooldown-bounded empty visit.
+  - **WEAPON AUTO-EQUIP** (`weapon_equip_tick` in `world_scan/items.py`,
+    page flip, `cfg.WEAPON_EQUIP_ENABLED`; the root cause of "most of
+    the fight happens with the welder" — bots GRABBED better guns by
+    walk-over but nothing ever SELECTED them, so every fight stayed on
+    the spawn weapon): every `WEAPON_EQUIP_CHECK_FRAMES` (90) per live
+    bot, if the SELECTED Primary item is the welder (`welder_def_key`,
+    resolved per match in `load_items`) or nothing is selected, the
+    first carried non-welder Primary item whose can-fire virtual passes
+    (item vtbl+0x98 — rounds + reuse delay, pure checks) is selected via
+    the spawn.py force-switch sequence. A bot on a working real gun is
+    left untouched (no churn); all guns empty ⇒ the welder stays (the
+    engine's fire path auto-cycles on empty anyway). All modes.
   - **Routing fields**: `build_item_routes` (df90, mode-independent, arms
     `item_routing_active`) fills one MULTI-SOURCE `bfs_run_seeded` row per
     CATEGORY (`item_dist`, cat-major); `sk_pile_route_refresh` (page flip)
@@ -1295,16 +1309,24 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     up is worth a longer walk), then the any-category filler fallback
     within `ITEM_PURSUE_RADIUS_SQ`; shared per-bot cooldown; the CTF drop
     pursuit / enemy-carrier chase / pad approach still outrank the whole
-    block by dispatch order — exactly the user's exception list. Entries
-    are NEED-GATED (`cfg.ITEM_NEED_GATE_ENABLED`, built 2026-07-22 from
-    the user's greed report): `goody_update_need` refreshes
-    `goody_need_mask` (bit0 health / bit1 energy / bit2 shield / bit3
-    WEAPON) once per goody think from the bot's LIVE state, and the item
-    scan skips clear-bit categories. Bit3's need test: fewer than
-    `WEAPON_NEED_MIN_OWNED` (3) items in the engine's "Primary" group
-    (counted via the group iterate `sub_425350`, key lazily cached in
-    `primary_hash` like spawn.py's force-weapon path) — spawn loadout is
-    the lone starter pistol, so fresh bots hunt guns and armed bots stop
+    block by dispatch order — exactly the user's exception list. The
+    weapon entry is a DISTANCE-WEIGHTED ROLL (user refinement same day:
+    "the closer the weapon, the higher the chance"): chance =
+    `weapon_chance_max` × (R²−d²)/R² — adjacent gun ≈ certain grab,
+    radius-edge gun almost never diverts, and an attacker whose route
+    closes on the pickup re-rolls with rising odds every
+    `WEAPON_ROLL_RETRY_FRAMES` (45; a lost roll arms the SHARED goody
+    cooldown with that short value and skips the window's filler entry
+    too — a latch while the cd runs would violate the cd-implies-no-latch
+    invariant). Entries are NEED-GATED (`cfg.ITEM_NEED_GATE_ENABLED`,
+    built 2026-07-22 from the user's greed report): `goody_update_need`
+    refreshes `goody_need_mask` (bit0 health / bit1 energy / bit2 shield
+    / bit3 WEAPON) once per goody think from the bot's LIVE state, and
+    the item scan skips clear-bit categories. Bit3's need test: fewer
+    than `WEAPON_NEED_MIN_OWNED` (3) items in the engine's "Primary"
+    group (counted via the group iterate `sub_425350`, key lazily cached
+    in `primary_hash` like spawn.py's force-weapon path) — spawn loadout
+    is the lone welder, so fresh bots hunt guns and armed bots stop
     detouring. No engine pickup-useful predicate exists for whole
     weapons; the count IS the need test.
     The tests are the ENGINE'S OWN pickup-useful predicates, not

@@ -139,11 +139,11 @@ ITEM_GRAB_COOLDOWN_FRAMES = 300
 # walls, so keep this comfortably above the entry radii).
 GOODY_DIRECT_RADIUS_SQ  = 160.0 * 160.0
 GOODY_ABANDON_RADIUS_SQ = 600.0 * 600.0
-# Live per-map goody table (Caves of Gold authors 62 fillers+weapons — the
-# shipped max since the weapon category landed).
-ITEM_TABLE_MAX        = 64
+# Live per-map goody table (Caves of Gold / The Foundry author 71
+# fillers+weapons each — the shipped max since the weapon category landed).
+ITEM_TABLE_MAX        = 80
 ITEM_STATIC_MAP_MAX   = 20   # shipped Data.dat has 17 MP goody maps
-ITEM_STATIC_POINT_MAX = 448  # shipped Data.dat has 422 anchors (272 fillers + 150 weapons)
+ITEM_STATIC_POINT_MAX = 512  # shipped Data.dat has 492 anchors (272 fillers + 220 weapons)
 ITEM_MAP_NAME_SLOT    = 96   # fixed ASCII bytes per map path, incl. NUL
 ITEM_CATEGORIES       = 4    # health / energy / shield / weapon (item_data.ITEM_CAT_*)
 
@@ -151,15 +151,39 @@ ITEM_CATEGORIES       = 4    # health / energy / shield / weapon (item_data.ITEM
 # should prioritize weapon pickups over ammo and other regular things,
 # except the dropped flags / flag carrier / dropped pile"). Category 3 =
 # gun-GRANTING pickups only (item_data's explicit model set — ammo packs
-# and the starter Light Pistol stay walk-over-only). Ranking: the entry
-# scan tries piles (SK), then WEAPONS within their own (larger) radius,
-# then the any-category filler fallback — while the CTF drop pursuit, the
-# enemy-carrier chase and the pad approach still outrank the whole goody
-# block by dispatch order, exactly the exception list the user gave.
+# stay walk-over-only; PU Light Pistol IS included because the actual
+# spawn loadout is the far weaker Modified Laser Welder). Ranking: the
+# entry scan tries piles (SK), then WEAPONS within their own (larger)
+# radius, then the any-category filler fallback — while the CTF drop
+# pursuit, the enemy-carrier chase and the pad approach still outrank the
+# whole goody block by dispatch order, exactly the exception list the
+# user gave.
+# The weapon entry is a DISTANCE-WEIGHTED ROLL (user rule 2026-07-23:
+# "the closer the weapon, the higher the chance"): chance =
+# WEAPON_PURSUE_CHANCE_MAX * (R^2 - d^2) / R^2 — an adjacent gun is a
+# near-certain grab, one at the radius edge almost never diverts, and an
+# attacker en route keeps re-rolling with rising odds as its path closes
+# on the pickup. A failed roll arms the shared goody cooldown for
+# WEAPON_ROLL_RETRY_FRAMES (short) instead of the full grab cooldown.
 # Need gate: a bot "needs a weapon" while it carries fewer than
-# WEAPON_NEED_MIN_OWNED Primary-group items (spawn loadout = 1 starter
-# pistol, so fresh bots hunt guns and armed bots stop detouring); the bit
-# shares the goody_need_mask machinery (bit3).
-WEAPON_PURSUE_RADIUS_SQ = 350.0 * 350.0
-WEAPON_NEED_MIN_OWNED   = 3
+# WEAPON_NEED_MIN_OWNED Primary-group items (spawn loadout = the lone
+# welder, so fresh bots hunt guns and armed bots stop detouring); the
+# bit shares the goody_need_mask machinery (bit3).
+WEAPON_PURSUE_RADIUS_SQ   = 350.0 * 350.0
+WEAPON_PURSUE_CHANCE_MAX  = 100
+WEAPON_ROLL_RETRY_FRAMES  = 45
+WEAPON_NEED_MIN_OWNED     = 3
+
+# WEAPON AUTO-EQUIP (user-reported 2026-07-23: "most of the fight happens
+# with the [starter] Modified Laser Welder" — bots picked up better guns
+# but nothing ever SELECTED them, so every fight stayed on the welder).
+# A page-flip pass checks each live bot every WEAPON_EQUIP_CHECK_FRAMES:
+# if the SELECTED Primary item is the welder (def key resolved per match)
+# and the bot carries another Primary weapon whose can-fire gate passes
+# (item vtbl+0x98 — has ammo, off delay), it is selected via the
+# spawn.py force-switch sequence. Bots on a working real gun are left
+# alone (no churn); if every carried gun is empty the welder stays (the
+# engine's own fire path auto-cycles on empty anyway).
+WEAPON_EQUIP_ENABLED      = True
+WEAPON_EQUIP_CHECK_FRAMES = 90
 

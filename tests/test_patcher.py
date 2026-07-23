@@ -1755,23 +1755,23 @@ class SalvageKingTests(unittest.TestCase):
     # weapons via the explicit gun-granting model set — ammo packs and the
     # starter Light Pistol are deliberately NOT weapons).
     ITEM_CENSUS = {
-        'Battle on the Ice.zax': (0, 13, 11, 14),
-        'Curse of the Temple.zax': (0, 8, 8, 10),
-        'Doom ship.zax': (0, 9, 7, 14),
-        'Hydro Vengence.zax': (0, 7, 4, 10),
-        'Temple Melee.zax': (2, 8, 4, 7),
+        'Battle on the Ice.zax': (0, 13, 11, 15),
+        'Curse of the Temple.zax': (0, 8, 8, 14),
+        'Doom ship.zax': (0, 9, 7, 18),
+        'Hydro Vengence.zax': (0, 7, 4, 12),
+        'Temple Melee.zax': (2, 8, 4, 11),
         'Torture Chamber.zax': (0, 5, 4, 6),
-        'Hydroplant Bouncefest.zax': (0, 4, 4, 3),
-        'Jungle Ruins.zax': (15, 8, 7, 7),
-        'Temple Deathgrip.zax': (2, 2, 3, 2),
-        'Caves of Gold.zax': (14, 17, 11, 20),
-        'Cold Crucible.zax': (8, 6, 1, 6),
-        'Cold Sweat.zax': (3, 4, 1, 6),
-        'Corridor of Suffering.zax': (4, 7, 1, 5),
-        'Jungle Madness.zax': (2, 4, 2, 5),
-        'Molten Ice.zax': (0, 1, 1, 3),
-        'The Foundry.zax': (0, 19, 16, 26),
-        'Underground Frenzy.zax': (8, 6, 1, 6),
+        'Hydroplant Bouncefest.zax': (0, 4, 4, 5),
+        'Jungle Ruins.zax': (15, 8, 7, 10),
+        'Temple Deathgrip.zax': (2, 2, 3, 4),
+        'Caves of Gold.zax': (14, 17, 11, 29),
+        'Cold Crucible.zax': (8, 6, 1, 14),
+        'Cold Sweat.zax': (3, 4, 1, 9),
+        'Corridor of Suffering.zax': (4, 7, 1, 10),
+        'Jungle Madness.zax': (2, 4, 2, 7),
+        'Molten Ice.zax': (0, 1, 1, 6),
+        'The Foundry.zax': (0, 19, 16, 36),
+        'Underground Frenzy.zax': (8, 6, 1, 14),
     }
 
     def test_item_census_is_pinned(self):
@@ -1789,7 +1789,7 @@ class SalvageKingTests(unittest.TestCase):
             seen[base] = tuple(counts)
         self.assertEqual(seen, self.ITEM_CENSUS)
         total = sum(len(m.items) for m in maps)
-        self.assertEqual(total, 422)   # 272 fillers + 150 weapons
+        self.assertEqual(total, 492)   # 272 fillers + 220 weapons
         self.assertLessEqual(total, cfg.ITEM_STATIC_POINT_MAX)
         self.assertLessEqual(len(maps), cfg.ITEM_STATIC_MAP_MAX)
         self.assertLessEqual(max(len(m.items) for m in maps),
@@ -2043,8 +2043,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '4b9218a23238c38f095b502fc664aadfbaa6ae56dac1166ce1c84be9c3e2c4c7'
-    HOOK_ENTRY_SIZE = 45885
+    SECTION_SHA256 = '8eb8a22d4bedd1f35b12b006f934159ceb8d7daf9bdc4f958c90ce825e5a7c55'
+    HOOK_ENTRY_SIZE = 46458
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

@@ -130,6 +130,7 @@ def write_static_scratch_data(
     goody_direct_radius_sq=25600.0,
     goody_abandon_radius_sq=360000.0,
     weapon_pursue_radius_sq=122500.0,
+    weapon_chance_max=100,
     mine_avoid_radius_sq=9216.0,
     mine_spacing_sq=16384.0,
     mine_place_chance=0,
@@ -465,6 +466,9 @@ def write_static_scratch_data(
         if layout.has_field('weapon_pursue_radius_sq'):
             layout.write(section, scratch_off, 'weapon_pursue_radius_sq',
                          struct.pack('<f', weapon_pursue_radius_sq))
+        if layout.has_field('weapon_chance_max'):
+            layout.write(section, scratch_off, 'weapon_chance_max',
+                         struct.pack('<f', float(max(0, min(100, weapon_chance_max)))))
     # Proximity-mine knobs (avoid/spacing bubbles + the placement roll
     # threshold). Static-packed — deliberately OUTSIDE load_mine's per-match
     # clear range so the chance stays live-tunable across matches.
