@@ -76,10 +76,21 @@ the `Zax.exe` next to it from the local `Zax.exe.bak`; do not assume old
 `/run/media/...` Linux paths. Then the user runs `Zax.exe` and reports runtime
 behavior. Do not launch the game from automation.
 
-Historical Linux/Wine results are still useful but not definitive. A severe
-low-FPS regression from earlier diagnostic builds with waypoint-overlay /
-pickup-registration hot-path detours was observed on Windows 11 only on the
-same machine; it did not reproduce on Linux via Wine. The visual waypoint
+Historical Linux/Wine results are still useful but not definitive. The severe
+Windows-only low-FPS regression with the overlay visible (2-6 FPS on Windows
+11, no drop under Wine) was ROOT-CAUSED and fixed 2026-07-23: every CGraphics
+primitive self-locks the DirectDraw back buffer per call when the global lock
+flag `dword_713318` is clear (`sub_568D90`: Lock → one line → Unlock — and an
+oval is 10-25 line segments), and the overlay pass runs at the page flip AFTER
+the engine's own frame-wide lock bracket (`sub_40F5F0`: `sub_567BB0` lock →
+render → `sub_567C90` unlock) has released it — so every overlay primitive
+paid a full Lock/Unlock, a multi-ms GPU/GDI sync on native Windows but a
+near-free system-memory pointer fetch under Wine. `detours/overlay.py` now
+mirrors the engine's bracket: one `sub_567BB0` before the draw pass (every
+primitive then takes the locked fast path), one `sub_567C90` before resuming
+into the flip — the unlock is LOAD-BEARING, `sub_5693A0` refuses to Flip
+while the flag is set and the windowed Blt would fail. Any FUTURE draw pass
+added to a hook must batch the lock the same way. The visual waypoint
 overlay hook is installed for authoring but starts hidden; press O in a live MP
 match to toggle drawing. When visible, the overlay cheap-culls off-screen graph
 segments before calling the engine draw helpers; tune `OVERLAY_CULL_MARGIN` if
@@ -93,7 +104,7 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
 
 - WM_KEYDOWN hook at `0x599A1A` redirects `call sub_599580` to
   `.zaxbot:hook_entry`, then tail-jumps back to `sub_599580`.
-- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x29000`, RWX (grown from
+- `.zaxbot`: VA `0x71A000`, raw `0x231000`, size `0x2A000`, RWX (grown from
   `0xA000` for the CTF flag static tables, then to `0xC000` for the CTF routing
   BFS distance field, then to `0xD000` for far-base CTF flag entity force-ticks,
   then to `0xF000` for the door detection static tables, then to `0x11000` for
@@ -105,7 +116,8 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   per-bin BFS rows, and the 512-slot pickup table — then to `0x27000` for
   the graphical bot menu, then to `0x28000` for the enemy-carrier chase
   layer — sighting intel + per-flag chase BFS rows — then to `0x29000` for
-  the proximity-mine layer's code room).
+  the proximity-mine layer's code room, then to `0x2A000` for the
+  weapon-pickup goody layer).
 - Scratch starts at `0x726000` (`SCRATCH_OFF = 0xC000`; the code/scratch
   boundary moved from `0x5A00` at the door layer, from `0x6800` at the switch
   layer, from `0x7000` at the portal routing layer, from `0x8000` when
@@ -1084,11 +1096,12 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     mislabelled a bot standing just past the doorway as not-crossed and
     walked it back INTO the closed door (2026-07-20 snapshots, part of the
     self-closing-door shuttle). Degenerate dot <= 0 (bot exactly on the door
-    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~3.7 KB
-    below `SCRATCH_OFF` (hook_entry_size 45390 of 49152 after the bot-menu,
+    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~2.9 KB
+    below `SCRATCH_OFF` (hook_entry_size 46132 of 49152 after the bot-menu,
     CTF role/standoff, enemy-carrier chase, route-lane, combat-strafe,
-    pickup need-gate, carrier-escape and proximity-mine layers; the boundary
-    sits at 0xC000 with the section at 0x29000). When it runs low again, bump
+    pickup need-gate, carrier-escape, proximity-mine and overlay-batched-lock
+    layers; the boundary sits at 0xC000 with the section at 0x2A000). When it
+    runs low again, bump
     `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
     `flag_routing_active`) was added for diagnosing route commitment.

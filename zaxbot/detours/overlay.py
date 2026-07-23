@@ -34,6 +34,23 @@ the rendered color is driven only by blue: ``blue=0`` renders BLACK (vertices,
 edges), ``blue=255`` renders a visible color. Keep visible graph elements on a
 non-zero blue channel. See ``cfg.OVERLAY_*_COLOR`` and ``ax.SUB_53F010_VA``.
 
+**Batched surface lock (the Windows FPS fix).** Every CGraphics primitive
+self-locks when the global lock flag ``dword_713318`` is clear:
+``sub_568D90`` does Lock -> ONE line -> Unlock per call, and an oval
+(``sub_4FCD10``) is 10-25 such line calls. Our pass runs at the page flip,
+after the engine's own frame bracket (``sub_40F5F0``: ``sub_567BB0`` lock →
+render → ``sub_567C90`` unlock) has released the lock — so unbatched, every
+overlay primitive paid a full DirectDraw Lock/Unlock round-trip. Under Wine
+that's a system-memory pointer fetch; on native Windows it's a multi-ms
+GPU/GDI sync, which collapsed the game to 2-6 FPS with the overlay visible
+(Windows-only, exactly as live-reported). The detour now mirrors the
+engine's bracket: ``sub_567BB0`` once before the draws (every primitive then
+takes the ``dword_713318`` fast path), ``sub_567C90`` once before resuming.
+Unlocking before resume is load-bearing: ``sub_5693A0``'s fullscreen path
+refuses to Flip while ``dword_713318`` is set (and the windowed Blt would
+fail), so a leaked lock drops the frame. ``overlay_locked`` tracks
+ownership; a failed lock degrades to the old per-primitive path.
+
 For each enabled overlay, the detour:
 
 1. Skips fast if ``overlay_enabled`` is 0.
@@ -44,14 +61,17 @@ For each enabled overlay, the detour:
    host's camera-tracker layer. Reads ``layer+0xC0/0xC4`` floats into
    ``overlay_cam_x/y`` and sets ``overlay_cam_ok = 1``. Failure on any
    step leaves ``cam_ok = 0`` and the loops bail.
-5. Calls ``sub_53F010`` once per color.
-6. Loops vertices: subtract cam to get screen p1, cheap-cull off-screen
+5. Locks the back buffer ONCE via ``sub_567BB0`` (see above) and records
+   ownership in ``overlay_locked``.
+6. Calls ``sub_53F010`` once per color (pure struct writes, lock-safe).
+7. Loops vertices: subtract cam to get screen p1, cheap-cull off-screen
    points, then call ``sub_4FCCC0(renderer, &p1, radius, aspect, &color)``.
-7. Loops detected pickups from ``pickup_table`` using the same oval path.
-8. Loops edges: subtract cam from both endpoints, cheap-cull segments whose
+8. Loops detected pickups from ``pickup_table`` using the same oval path.
+9. Loops edges: subtract cam from both endpoints, cheap-cull segments whose
    endpoints are both outside the same side of the screen, then call
    ``sub_4B3CB0(renderer, &p1, &p2, &color)``.
-9. ``popad``, re-execute displaced ``mov al, byte_6210C0``, jump back.
+10. Unlocks via ``sub_567C90`` if this pass locked, ``popad``, re-execute
+    displaced ``mov al, byte_6210C0``, jump back.
 """
 
 import struct
@@ -81,6 +101,7 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     overlay_cull_max_x_va     = layout.va('overlay_cull_max_x')
     overlay_cull_min_y_va     = layout.va('overlay_cull_min_y')
     overlay_cull_max_y_va     = layout.va('overlay_cull_max_y')
+    overlay_locked_va         = layout.va('overlay_locked')
     overlay_vertices_va       = layout.va('overlay_vertices') if layout.has_field('overlay_vertices') else 0
     overlay_edges_va          = layout.va('overlay_edges')    if layout.has_field('overlay_edges')    else 0
     wp_selected_idx_va        = layout.va('wp_selected_idx')
@@ -454,6 +475,28 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x83\x3D' + le32(overlay_cam_ok_va) + b'\x00')    # cmp [cam_ok], 0
     a.jz('ov_popad_only')
 
+    # --- Batch the back-buffer lock around the whole draw pass ------------
+    # Every engine primitive (sub_568D90 & friends) self-locks per call when
+    # dword_713318 is clear: Lock -> one line -> Unlock. On native Windows a
+    # DirectDraw Lock/Unlock is a multi-ms GPU/GDI sync, and an oval is 10-25
+    # line segments, so an unbatched overlay pass was hundreds of syncs per
+    # frame — the Windows-only 2-6 FPS collapse (Wine's system-memory
+    # surfaces made the same locks nearly free). Mirror the engine's own
+    # frame bracket (sub_40F5F0): sub_567BB0 once here, sub_567C90 once at
+    # ov_unlock_popad — every draw below then takes the locked fast path.
+    # overlay_locked tracks OWNERSHIP: if the flag was already set (foreign
+    # lock — never the case at flip time, defensive) we neither lock nor
+    # unlock; if sub_567BB0 fails (surface lost) the flag stays 0 and every
+    # draw simply falls back to today's per-primitive path.
+    a.raw(b'\xC7\x05' + le32(overlay_locked_va) + le32(0))    # mov [overlay_locked], 0
+    a.raw(b'\x83\x3D' + le32(ax.DDRAW_LOCKED_FLAG_VA) + b'\x00')  # already locked?
+    a.jnz('ov_lock_done')
+    a.raw(b'\x89\xF9')                                        # mov ecx, edi (renderer)
+    a.call_va(ax.SUB_567BB0_VA)                               # lock back buffer once
+    a.raw(b'\xA1' + le32(ax.DDRAW_LOCKED_FLAG_VA))            # eax = lock flag (1 = locked)
+    a.raw(b'\xA3' + le32(overlay_locked_va))                  # overlay_locked = flag
+    a.label('ov_lock_done')
+
     # --- Build vertex color ----------------------------------------------
     a.raw(b'\x6A' + bytes([va_]))
     a.raw(b'\x6A' + bytes([vb]))
@@ -813,10 +856,10 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     if overlay_edges_va and overlay_vertices_va:
         a.raw(b'\x31\xF6')                                    # xor esi, esi
         a.raw(b'\x8B\x1D' + le32(overlay_edge_count_va))      # mov ebx, [edge_count]
-        a.raw(b'\x85\xDB'); a.jz('ov_popad_only')
+        a.raw(b'\x85\xDB'); a.jz('ov_unlock_popad')
 
         a.label('ov_edge_loop')
-        a.raw(b'\x39\xDE'); a.jae('ov_popad_only')
+        a.raw(b'\x39\xDE'); a.jae('ov_unlock_popad')
         a.raw(b'\x0F\xB7\x04\xB5' + le32(overlay_edges_va))   # movzx eax, word [edges + esi*4]
         a.raw(b'\x0F\xB7\x14\xB5' + le32(overlay_edges_va + 2))  # movzx edx, word [edges + esi*4 + 2]
         a.raw(b'\x3B\x05' + le32(overlay_vertex_count_va))
@@ -861,6 +904,18 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.label('ov_skip_edge')
         a.raw(b'\x46')                                        # inc esi
         a.jmp('ov_edge_loop')
+
+    # Release the batched surface lock (only if this pass took it). MUST run
+    # before resuming: sub_5693A0's fullscreen path skips the Flip outright
+    # while dword_713318 is set, and the windowed Blt would fail — a leaked
+    # lock is a dropped frame. sub_567C90 is idempotent (checks the flag).
+    # Pre-lock bails jump straight to ov_popad_only and skip this.
+    a.label('ov_unlock_popad')
+    a.raw(b'\x83\x3D' + le32(overlay_locked_va) + b'\x00')    # did this pass lock?
+    a.jz('ov_popad_only')
+    a.raw(b'\xC7\x05' + le32(overlay_locked_va) + le32(0))    # mov [overlay_locked], 0
+    a.raw(b'\x8B\x0D' + le32(overlay_renderer_tmp_va))        # mov ecx, [renderer_tmp]
+    a.call_va(ax.SUB_567C90_VA)                               # unlock back buffer
 
     a.label('ov_popad_only')
     a.raw(b'\x61')                                            # popad

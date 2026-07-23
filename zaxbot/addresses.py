@@ -593,14 +593,38 @@ JOIN_FMT_CSTRING_VA         = 0x71407C  # global CString: "%s joined the game" (
 #   a visible color. This is why overlay elements need a non-zero blue component
 #   to show up at all (see cfg.OVERLAY_*_COLOR). Confirmed in-game 2026-06-01.
 #
-# Surface lock/unlock is automatic — `sub_568D90` self-wraps via the global
-# `dword_713318` lock flag, so the helpers above are safe to call from any
-# frame-aligned hook (page-flip detour, key handler).
+# Surface lock/unlock is automatic BUT PER-PRIMITIVE — `sub_568D90` (and every
+# other CGraphics primitive) self-wraps via the global `dword_713318` lock
+# flag: if the back buffer is NOT already locked it calls `sub_567BB0` (lock),
+# draws ONE line, then immediately Unlocks (back-buffer vtbl+0x80) and clears
+# the flag. Only when `dword_713318` is already set does it take the fast path
+# (raw Bresenham into the locked pixels, no DirectDraw calls). The engine's
+# own render loop (sub_40F5F0) therefore brackets a whole frame with ONE
+# sub_567BB0 ... sub_567C90 pair so every internal draw is fast-path.
+#
+# A frame-aligned hook that issues many draws (the waypoint overlay) MUST do
+# the same: on native Windows each DirectDraw Lock/Unlock is a GPU/GDI sync
+# costing milliseconds (Wine's system-memory surfaces make it nearly free,
+# which is why the 2-6 FPS overlay collapse was Windows-only), and an oval is
+# 10-25 line segments = 10-25 Lock/Unlock pairs unbatched. Lock once before
+# the draw pass, unlock before resuming into sub_5693A0 — its fullscreen path
+# checks `dword_713318` and SKIPS the flip while the surface is locked (and
+# the windowed Blt would fail), so a leaked lock = a dropped frame.
+#
+# `sub_567BB0(this=renderer)` — Restore-on-lost + Lock(back buffer,
+#   DDLOCK_WAIT); on success sets `dword_713318 = 1` and caches the surface
+#   pixel base at renderer+0xC. Does NOT check the flag first — never call it
+#   while already locked (100 failing Lock retries). ret 0.
+# `sub_567C90(this=renderer)` — Unlock + clears renderer+0xC and the flag;
+#   idempotent (no-op while unlocked). ret 0.
 RENDERER_OWNER_VA       = 0x6C02CC
 RENDERER_OFF_IN_OWNER   = 0x04
 SUB_4B3CB0_VA           = 0x4B3CB0
 SUB_4FCCC0_VA           = 0x4FCCC0
 SUB_53F010_VA           = 0x53F010
+SUB_567BB0_VA           = 0x567BB0   # renderer back-buffer batch LOCK
+SUB_567C90_VA           = 0x567C90   # renderer back-buffer batch UNLOCK
+DDRAW_LOCKED_FLAG_VA    = 0x713318   # 1 while the back buffer is locked
 
 # `sub_4F5DA0(this=worldmgr, &out_pos, char_idx)` returns the SMOOTHED
 # camera target (`layer + 0xD0` floats) for the given char. The engine's

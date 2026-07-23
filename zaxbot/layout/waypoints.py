@@ -74,6 +74,14 @@ def extend_wp_overlay(c):
                      'overlay: selected-vertex CColor (rebuilt per-frame)'),
         ScratchField('wp_snap_radius_sq',     OVERLAY_BASE + 0x70, 0x04,
                      'waypoint edit: snap radius² (float, world units)'),
+        # 1 while the overlay draw pass owns the batched DirectDraw back-
+        # buffer lock (sub_567BB0 at pass start / sub_567C90 before resuming
+        # into the flip). Without the batch every line — and every oval
+        # SEGMENT, 10-25 per oval — pays its own Lock/Unlock inside
+        # sub_568D90, a per-call GPU/GDI sync on native Windows (the 2-6 FPS
+        # overlay collapse; Wine's system-memory surfaces hid it on Linux).
+        ScratchField('overlay_locked',        OVERLAY_BASE + 0x74, 0x04,
+                     'overlay: 1 = draw pass holds the batched surface lock'),
     ]
     # Vertex / edge tables start at +0x80 (after the per-frame scratch
     # above, including waypoint-editor state) so growing the fix-up state
