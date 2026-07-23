@@ -570,11 +570,28 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
         a.label('s542360_gd_entry_items')
         a.raw(b'\x83\x3D' + le32(item_active_mv_va) + b'\x00')
         a.jz('s542360_gd_done')
+        # WEAPON PRIORITY (user rule 2026-07-23: weapons over ammo/fillers,
+        # below the objective pursuits): scan the weapon category alone
+        # first, within its own larger radius — a needed gun in range wins
+        # over any nearer filler. The need mask's bit3 gates it inside the
+        # scan (armed bots stop hunting). Misses fall through to the
+        # any-category filler scan, which can still pick a weapon as the
+        # nearest-of-any.
+        weapon_rank = (cfg.ITEM_CATEGORIES >= 4
+                       and layout.has_field('weapon_pursue_radius_sq'))
+        if weapon_rank:
+            a.raw(b'\xA1' + le32(layout.va('weapon_pursue_radius_sq')))
+            a.raw(b'\xA3' + le32(goody_scan_rad_va))      # radius = weapon pursue
+            a.raw(b'\xC7\x05' + le32(goody_scan_cat_va)
+                  + le32(3))                              # weapons only
+            a.call_lbl('goody_scan_items')                # ebx = idx or -1
+            a.raw(b'\x83\xFB\xFF'); a.jnz('s542360_gd_item_kind')
         a.raw(b'\xA1' + le32(item_radius_mv_va))          # radius = item pursue
         a.raw(b'\xA3' + le32(goody_scan_rad_va))
         a.raw(b'\xC7\x05' + le32(goody_scan_cat_va) + b'\xFF\xFF\xFF\xFF')  # any cat
         a.call_lbl('goody_scan_items')                    # ebx = idx or -1
         a.raw(b'\x83\xFB\xFF'); a.jz('s542360_gd_done')
+        a.label('s542360_gd_item_kind')
         a.raw(b'\x8B\x04\x9D' + le32(item_cat_mv_va))     # eax = item_cat[idx]
         a.raw(b'\x83\xC0\x02')                            # kind = category + 2
         a.label('s542360_gd_latch')

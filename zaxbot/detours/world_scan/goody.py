@@ -147,8 +147,53 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xFF\x35' + le32(bot_char_tmp_va))                  # push char
         a.call_va(ax.SUB_SHIELD_NEED_VA)                            # al = shield useful?
         a.raw(b'\x5A')                                              # pop edx (mask)
-        a.raw(b'\x84\xC0'); a.jz('gun_store')
+        a.raw(b'\x84\xC0'); a.jz('gun_weapon')
         a.raw(b'\x83\xCA\x04')                                      # mask |= 4 (shield)
+        a.label('gun_weapon')
+        # Bit 3 = "needs a weapon": the bot carries fewer than
+        # cfg.WEAPON_NEED_MIN_OWNED Primary-group items (spawn loadout is 1
+        # starter pistol, so fresh bots hunt guns; an armed bot's bit goes
+        # clear and the weapon category stops latching). No engine
+        # pickup-useful predicate exists for whole weapons, so the count IS
+        # the need test. Iterates the engine's own group list
+        # (sub_425350); the Primary group key is lazily resolved into the
+        # shared primary_hash slot exactly like spawn.py's force-weapon
+        # path. ebx/esi are callee-saved for our caller — preserved.
+        weapon_need = (cfg.ITEM_CATEGORIES >= 4
+                       and layout.has_field('primary_hash'))
+        if weapon_need:
+            primary_hash_va = layout.va('primary_hash')
+            a.raw(b'\x52')                                          # push mask
+            a.raw(b'\x53\x56')                                      # push ebx; push esi
+            a.raw(b'\x83\x3D' + le32(primary_hash_va) + b'\x00')    # hash resolved?
+            a.jnz('gun_w_hash_ok')
+            a.raw(b'\x6A\xFF')                                      # push -1
+            a.raw(b'\x68' + le32(ax.PRIMARY_STR_VA))                # push "Primary"
+            a.raw(b'\xB9' + le32(ax.SLOT_NAME_REGISTRY_VA))         # ecx = registry
+            a.call_va(ax.SUB_523DF0_VA)                             # eax = group key
+            a.raw(b'\xA3' + le32(primary_hash_va))
+            a.label('gun_w_hash_ok')
+            a.raw(b'\x8B\x0D' + le32(bot_char_tmp_va))              # ecx = char
+            a.call_va(ax.SUB_4267E0_VA)                             # eax = inventory
+            a.raw(b'\x8B\xD8')                                      # ebx = inv
+            a.raw(b'\x85\xDB'); a.jz('gun_w_no')                    # no inv -> no bit
+            a.raw(b'\x31\xF6')                                      # esi = count
+            a.raw(b'\x83\xC8\xFF')                                  # eax = -1 (prev id)
+            a.label('gun_w_loop')
+            a.raw(b'\xFF\x35' + le32(primary_hash_va))              # push group key
+            a.raw(b'\x50')                                          # push prev id
+            a.raw(b'\x8B\xCB')                                      # ecx = inv
+            a.call_va(ax.SUB_425350_VA)                             # eax = next id / -1
+            a.raw(b'\x83\xF8\xFF'); a.jz('gun_w_yes')               # exhausted below MIN
+            a.raw(b'\x46')                                          # ++count
+            a.raw(b'\x83\xFE' + bytes([max(1, cfg.WEAPON_NEED_MIN_OWNED)]))
+            a.jb('gun_w_loop')                                      # still hungry
+            a.label('gun_w_no')                                     # satisfied
+            a.raw(b'\x5E\x5B\x5A')                                  # pop esi/ebx/edx
+            a.jmp('gun_store')
+            a.label('gun_w_yes')
+            a.raw(b'\x5E\x5B\x5A')                                  # pop esi/ebx/edx
+            a.raw(b'\x83\xCA\x08')                                  # mask |= 8 (weapon)
         a.label('gun_store')
         a.raw(b'\x89\x15' + le32(goody_need_mask_va))               # store mask
         a.raw(b'\xC3')

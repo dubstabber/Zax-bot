@@ -139,10 +139,27 @@ ITEM_GRAB_COOLDOWN_FRAMES = 300
 # walls, so keep this comfortably above the entry radii).
 GOODY_DIRECT_RADIUS_SQ  = 160.0 * 160.0
 GOODY_ABANDON_RADIUS_SQ = 600.0 * 600.0
-# Live per-map filler table (Caves of Gold authors 42 — the shipped max).
-ITEM_TABLE_MAX        = 48
-ITEM_STATIC_MAP_MAX   = 20   # shipped Data.dat has 17 MP filler maps
-ITEM_STATIC_POINT_MAX = 288  # shipped Data.dat has 272 filler anchors
+# Live per-map goody table (Caves of Gold authors 62 fillers+weapons — the
+# shipped max since the weapon category landed).
+ITEM_TABLE_MAX        = 64
+ITEM_STATIC_MAP_MAX   = 20   # shipped Data.dat has 17 MP goody maps
+ITEM_STATIC_POINT_MAX = 448  # shipped Data.dat has 422 anchors (272 fillers + 150 weapons)
 ITEM_MAP_NAME_SLOT    = 96   # fixed ASCII bytes per map path, incl. NUL
-ITEM_CATEGORIES       = 3    # health / energy / shield (item_data.ITEM_CAT_*)
+ITEM_CATEGORIES       = 4    # health / energy / shield / weapon (item_data.ITEM_CAT_*)
+
+# WEAPON pickups as a pursuit category (user-requested 2026-07-23: "bots
+# should prioritize weapon pickups over ammo and other regular things,
+# except the dropped flags / flag carrier / dropped pile"). Category 3 =
+# gun-GRANTING pickups only (item_data's explicit model set — ammo packs
+# and the starter Light Pistol stay walk-over-only). Ranking: the entry
+# scan tries piles (SK), then WEAPONS within their own (larger) radius,
+# then the any-category filler fallback — while the CTF drop pursuit, the
+# enemy-carrier chase and the pad approach still outrank the whole goody
+# block by dispatch order, exactly the exception list the user gave.
+# Need gate: a bot "needs a weapon" while it carries fewer than
+# WEAPON_NEED_MIN_OWNED Primary-group items (spawn loadout = 1 starter
+# pistol, so fresh bots hunt guns and armed bots stop detouring); the bit
+# shares the goody_need_mask machinery (bit3).
+WEAPON_PURSUE_RADIUS_SQ = 350.0 * 350.0
+WEAPON_NEED_MIN_OWNED   = 3
 

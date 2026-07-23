@@ -161,6 +161,9 @@ def extend_goody(c):
                   'goody: straight-steer (direct phase) radius^2, piles + items (float)')
         _gd_field('goody_abandon_radius_sq', 0x04,
                   'goody: silently unlatch beyond this d^2 (float)')
+        _gd_field('weapon_pursue_radius_sq', 0x04,
+                  'goody: weapon-pickup priority divert radius^2 (float; larger '
+                  'than the filler radius — arming up is worth a longer walk)')
         if sk_pile_max_capped > 0:
             _gd_field('sk_pile_dirty', 0x04,
                       'goody: 1 = pile set changed, rebuild sk_pile_dist next flip')
@@ -177,7 +180,8 @@ def extend_goody(c):
         _gd_field('item_table', item_table_max_capped * 8,
                   'goody: live filler anchor positions (float[2] each)')
         _gd_field('item_cat', item_table_max_capped * 4,
-                  'goody: live filler category per anchor (0 health / 1 energy / 2 shield)')
+                  'goody: live category per anchor (0 health / 1 energy / '
+                  '2 shield / 3 weapon)')
         _gd_field('item_node', item_table_max_capped * 4,
                   'goody: nearest graph node per filler (-1 = unbound)')
         _gd_field('item_dist', item_cats_capped * overlay_vertex_max_capped * 4,

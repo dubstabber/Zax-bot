@@ -9,14 +9,22 @@ prefix is a clean category discriminator —
 * ``Items/Medical/``  -> HEALTH  (fruit / fruit piles, 58 shipped)
 * ``Items/Energy/``   -> ENERGY  (battery charges/levels, 128 shipped)
 * ``Items/Shields/``  -> SHIELD  (shield charges/belts, 86 shipped)
+* WEAPON — gun-granting pickups only (150 shipped), matched by an explicit
+  model SET (census 2026-07-23), NOT the ``Items/Weapons/`` prefix: more
+  than half the parts under that prefix are AMMO packs (``PU Semi Auto
+  Ammo``, ``PU Grenade Canister``, ``PU Missile 5 Pack``, ``PU Proximity
+  Mine`` — 255 of 475), and ``PU Light Pistol`` (70) is the starter gun
+  every bot already carries, i.e. effectively an ammo pickup too. Those
+  stay walk-over-only; the weapon category exists so bots PRIORITIZE
+  arming up (ranked above the fillers, below the objective pursuits).
 
-Weapon/ammo pickups (``Items/Weapons/``) are deliberately excluded — bots
-carry a default loadout and collect ammo by walk-over anyway — as are keys
-and the SK minerals (``Items/Money/``, owned by the SK layer). Positions are
-the authored Level Part ``Position X/Y`` like every other static pipeline.
-These anchors feed the per-category multi-source routing fields the
-generalized goody-pursuit descends (graph-safe divert instead of the removed
-straight-steer pickup divert that ground bots into walls).
+Pure ammo pickups are deliberately excluded — bots collect ammo by
+walk-over anyway — as are keys and the SK minerals (``Items/Money/``,
+owned by the SK layer). Positions are the authored Level Part
+``Position X/Y`` like every other static pipeline. These anchors feed the
+per-category multi-source routing fields the generalized goody-pursuit
+descends (graph-safe divert instead of the removed straight-steer pickup
+divert that ground bots into walls).
 """
 
 from __future__ import annotations
@@ -31,13 +39,33 @@ from .portal_data import _iter_local_files, _find_block
 ITEM_CAT_HEALTH = 0
 ITEM_CAT_ENERGY = 1
 ITEM_CAT_SHIELD = 2
-ITEM_CATEGORIES = 3
+ITEM_CAT_WEAPON = 3
+ITEM_CATEGORIES = 4
 
 _CAT_BY_PREFIX = (
     ('items/medical/', ITEM_CAT_HEALTH),
     ('items/energy/',  ITEM_CAT_ENERGY),
     ('items/shields/', ITEM_CAT_SHIELD),
 )
+
+# Gun-granting pickup models (lowercased). Explicit include SET — the
+# Items/Weapons/ prefix also covers the ammo packs and the starter pistol,
+# which must NOT be pursued (see the module docstring).
+_WEAPON_PICKUP_MODELS = frozenset((
+    'items/weapons/power ups/pu semi auto pistol',
+    'items/weapons/power ups/pu full auto pistol',
+    'items/weapons/power ups/pu twin disrupter',
+    'items/weapons/power ups/pu grenadelauncher',
+    'items/weapons/power ups/pu missile launcher',
+    'items/weapons/power ups/pu impaction cannon',
+    'items/weapons/power ups/pu tri spread gun',
+    'items/weapons/power ups/pu alienelecweapcomplete',
+    'items/weapons/power ups/pu 02 alienelecweapcomplete',
+    'items/weapons/power ups/pu heavybarrellcomplete',
+    'items/weapons/power ups/pu megafusioncomplete',
+    'items/weapons/power ups/pu nucleardisrcomplete',
+    'items/weapons/power ups/pu psyonic wave glove',
+))
 
 
 @dataclass(frozen=True)
@@ -82,13 +110,18 @@ def _parse_map_items(map_name: str, payload: bytes) -> MapItemData | None:
         if not has_pickup or x is None or y is None:
             continue
         model_l = (model or '').lower()
-        for prefix, cat in _CAT_BY_PREFIX:
+        cat = None
+        for prefix, prefix_cat in _CAT_BY_PREFIX:
             if model_l.startswith(prefix):
-                key = (round(x * 1000), round(y * 1000))
-                if key not in seen:
-                    seen.add(key)
-                    items.append((x, y, cat))
+                cat = prefix_cat
                 break
+        if cat is None and model_l in _WEAPON_PICKUP_MODELS:
+            cat = ITEM_CAT_WEAPON
+        if cat is not None:
+            key = (round(x * 1000), round(y * 1000))
+            if key not in seen:
+                seen.add(key)
+                items.append((x, y, cat))
 
     if not items:
         return None

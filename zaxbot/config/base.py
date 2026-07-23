@@ -6,7 +6,7 @@ from ..build import SectionSpec
 # --- new section parameters (.zaxbot) -------------------------------------
 NEW_SECTION_NAME   = b'.zaxbot\x00'
 NEW_SECTION_VA     = 0x31A000      # RVA; absolute = 0x71A000
-NEW_SECTION_SIZE   = 0x29000       # 48KB code + 116KB scratch (grown for the door detection
+NEW_SECTION_SIZE   = 0x2A000       # 48KB code + 120KB scratch (grown for the door detection
                                    # tables, the door-aware routing field, its per-team
                                    # split, the switch detection tables, the portal
                                    # routing layer — dest tables + node bindings — the
@@ -17,7 +17,9 @@ NEW_SECTION_SIZE   = 0x29000       # 48KB code + 116KB scratch (grown for the do
                                    # +0x1000 code room at the bot-menu GUI polish —
                                    # then +0x1000 scratch for the enemy-carrier chase
                                    # layer: chase_dist BFS rows + intel/latch block —
-                                   # then +0x1000 code room at the proximity-mine layer)
+                                   # then +0x1000 code room at the proximity-mine layer —
+                                   # then +0x1000 scratch for the weapon-pickup goody
+                                   # category: 150 static anchors + the 4th item_dist row)
 SECTION_CHARACTERS = 0xE0000020    # CODE | EXEC | READ | WRITE
 HOOK_ENTRY_OFF     = 0x000
 SCRATCH_OFF        = 0xC000        # writable scratch buffer; 48KB code / 116KB scratch

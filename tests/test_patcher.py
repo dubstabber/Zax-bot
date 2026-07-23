@@ -1750,26 +1750,28 @@ class SalvageKingTests(unittest.TestCase):
         # The pile ring mask in the register detour needs a power of two.
         self.assertEqual(cfg.SK_PILE_TABLE_MAX & (cfg.SK_PILE_TABLE_MAX - 1), 0)
 
-    # (health, energy, shield) filler counts per MP map — the goody-pursuit
-    # layer's static anchors (item_data.py, model-prefix classified).
+    # (health, energy, shield, weapon) counts per MP map — the goody-pursuit
+    # layer's static anchors (item_data.py; fillers model-prefix classified,
+    # weapons via the explicit gun-granting model set — ammo packs and the
+    # starter Light Pistol are deliberately NOT weapons).
     ITEM_CENSUS = {
-        'Battle on the Ice.zax': (0, 13, 11),
-        'Curse of the Temple.zax': (0, 8, 8),
-        'Doom ship.zax': (0, 9, 7),
-        'Hydro Vengence.zax': (0, 7, 4),
-        'Temple Melee.zax': (2, 8, 4),
-        'Torture Chamber.zax': (0, 5, 4),
-        'Hydroplant Bouncefest.zax': (0, 4, 4),
-        'Jungle Ruins.zax': (15, 8, 7),
-        'Temple Deathgrip.zax': (2, 2, 3),
-        'Caves of Gold.zax': (14, 17, 11),
-        'Cold Crucible.zax': (8, 6, 1),
-        'Cold Sweat.zax': (3, 4, 1),
-        'Corridor of Suffering.zax': (4, 7, 1),
-        'Jungle Madness.zax': (2, 4, 2),
-        'Molten Ice.zax': (0, 1, 1),
-        'The Foundry.zax': (0, 19, 16),
-        'Underground Frenzy.zax': (8, 6, 1),
+        'Battle on the Ice.zax': (0, 13, 11, 14),
+        'Curse of the Temple.zax': (0, 8, 8, 10),
+        'Doom ship.zax': (0, 9, 7, 14),
+        'Hydro Vengence.zax': (0, 7, 4, 10),
+        'Temple Melee.zax': (2, 8, 4, 7),
+        'Torture Chamber.zax': (0, 5, 4, 6),
+        'Hydroplant Bouncefest.zax': (0, 4, 4, 3),
+        'Jungle Ruins.zax': (15, 8, 7, 7),
+        'Temple Deathgrip.zax': (2, 2, 3, 2),
+        'Caves of Gold.zax': (14, 17, 11, 20),
+        'Cold Crucible.zax': (8, 6, 1, 6),
+        'Cold Sweat.zax': (3, 4, 1, 6),
+        'Corridor of Suffering.zax': (4, 7, 1, 5),
+        'Jungle Madness.zax': (2, 4, 2, 5),
+        'Molten Ice.zax': (0, 1, 1, 3),
+        'The Foundry.zax': (0, 19, 16, 26),
+        'Underground Frenzy.zax': (8, 6, 1, 6),
     }
 
     def test_item_census_is_pinned(self):
@@ -1787,7 +1789,7 @@ class SalvageKingTests(unittest.TestCase):
             seen[base] = tuple(counts)
         self.assertEqual(seen, self.ITEM_CENSUS)
         total = sum(len(m.items) for m in maps)
-        self.assertEqual(total, 272)
+        self.assertEqual(total, 422)   # 272 fillers + 150 weapons
         self.assertLessEqual(total, cfg.ITEM_STATIC_POINT_MAX)
         self.assertLessEqual(len(maps), cfg.ITEM_STATIC_MAP_MAX)
         self.assertLessEqual(max(len(m.items) for m in maps),
@@ -2041,8 +2043,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '81ee2d511ce18935bc959aadff7738458542944a6886c93beafbb3e7e015ba8f'
-    HOOK_ENTRY_SIZE = 45740
+    SECTION_SHA256 = '4b9218a23238c38f095b502fc664aadfbaa6ae56dac1166ce1c84be9c3e2c4c7'
+    HOOK_ENTRY_SIZE = 45885
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

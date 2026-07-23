@@ -1268,13 +1268,18 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
   (`cfg.ITEM_PURSUIT_ENABLED`; the two-phase upgrade of the straight-steer
   pile divert, which ground walls when a pile registered across one —
   user-reported, same bug class as CTF drop-pursuit v1):
-  - **Static filler anchors** (`item_data.py` → `load_items`, per match,
+  - **Static goody anchors** (`item_data.py` → `load_items`, per match,
     ALL modes): every MP map's pickups whose model path starts
-    `Items/Medical|Energy|Shields/` (272 across 17 maps; category by
-    prefix, census pinned in tests). Weapons/ammo/keys/minerals excluded.
-    Fillers respawn in place (10-15 s), so like minerals there is NO
-    presence tracking — a consumed anchor costs one cooldown-bounded empty
-    visit.
+    `Items/Medical|Energy|Shields/` (272 fillers across 17 maps; category
+    by prefix) PLUS category 3 = WEAPON pickups (150; user-requested
+    2026-07-23) matched by an explicit gun-GRANTING model set — NOT the
+    `Items/Weapons/` prefix, because 255 of that prefix's 475 parts are
+    AMMO packs (`PU Semi Auto Ammo`/`PU Grenade Canister`/`PU Missile 5
+    Pack`/`PU Proximity Mine`) and `PU Light Pistol` (70) is the starter
+    gun every bot already carries — those stay walk-over-only. Census
+    pinned in tests (422 total). Keys/minerals excluded. All respawn in
+    place (10-15 s), so like minerals there is NO presence tracking — a
+    consumed anchor costs one cooldown-bounded empty visit.
   - **Routing fields**: `build_item_routes` (df90, mode-independent, arms
     `item_routing_active`) fills one MULTI-SOURCE `bfs_run_seeded` row per
     CATEGORY (`item_dist`, cat-major); `sk_pile_route_refresh` (page flip)
@@ -1283,14 +1288,25 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     SPFA per pile event, never per frame.
   - **Behavior** (`s542360_gd_*` in bot_movement + the `goody_scan_piles/
     items` helpers): the latch `bot_pile_target` holds the pursuit KIND
-    (1 = pile, 2+cat = filler). ENTRY is opportunistic (piles within
-    `SK_PILE_PURSUE_RADIUS_SQ` in SK, fillers within
-    `ITEM_PURSUE_RADIUS_SQ` in any mode, shared per-bot cooldown; a CTF
-    drop pursuit outranks) but NEED-GATED for fillers
-    (`cfg.ITEM_NEED_GATE_ENABLED`, built 2026-07-22 from the user's greed
-    report): `goody_update_need` refreshes `goody_need_mask` (bit0
-    health / bit1 energy / bit2 shield) once per goody think from the
-    bot's LIVE state, and the item scan skips clear-bit categories.
+    (1 = pile, 2+cat = item). ENTRY is opportunistic and RANKED (user rule
+    2026-07-23: weapons over ammo/regular pickups, below the objective
+    pursuits): piles first (within `SK_PILE_PURSUE_RADIUS_SQ`, SK only),
+    then WEAPONS alone within `WEAPON_PURSUE_RADIUS_SQ` (350 px — arming
+    up is worth a longer walk), then the any-category filler fallback
+    within `ITEM_PURSUE_RADIUS_SQ`; shared per-bot cooldown; the CTF drop
+    pursuit / enemy-carrier chase / pad approach still outrank the whole
+    block by dispatch order — exactly the user's exception list. Entries
+    are NEED-GATED (`cfg.ITEM_NEED_GATE_ENABLED`, built 2026-07-22 from
+    the user's greed report): `goody_update_need` refreshes
+    `goody_need_mask` (bit0 health / bit1 energy / bit2 shield / bit3
+    WEAPON) once per goody think from the bot's LIVE state, and the item
+    scan skips clear-bit categories. Bit3's need test: fewer than
+    `WEAPON_NEED_MIN_OWNED` (3) items in the engine's "Primary" group
+    (counted via the group iterate `sub_425350`, key lazily cached in
+    `primary_hash` like spawn.py's force-weapon path) — spawn loadout is
+    the lone starter pistol, so fresh bots hunt guns and armed bots stop
+    detouring. No engine pickup-useful predicate exists for whole
+    weapons; the count IS the need test.
     The tests are the ENGINE'S OWN pickup-useful predicates, not
     re-derived rules — health: `cur_damage(char+0x7C) != 0` (float never
     negative, bits==0 iff full; `sub_48D030/48D150` = cur/max health
