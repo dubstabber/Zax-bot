@@ -6,8 +6,11 @@ key:
   menu; hook/bot_menu.py). Bots are spawned by the dialog's buttons, not by a
   digit key — the old text-prompt + digit state machine it replaced is gone.
 - key R -> MP gate -> ``do_snapshot`` (Phase A diff oracle)
-- keys N/J/X/, -> MP-gated waypoint editor (drop / select / delete / save)
-- key O -> toggle the authoring overlay
+- keys N/J/X/, -> waypoint editor (drop / select / delete / save), gated by
+  BOTH the MP gate and ``overlay_enabled`` — editing/saving only works while
+  the authoring overlay is visible (accidental presses with it hidden used to
+  silently mutate and persist an invisible graph)
+- key O -> toggle the authoring overlay (= the editor's enable switch)
 
 All paths tail-jmp to ``sub_599580`` so normal key handling is unaffected.
 NOTE: the ``menu_state`` / ``prompts_table`` / ``max_for_mode`` / ``prompt_*``
@@ -33,7 +36,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     # (R's snapshot includes the waypoint-graph diag chunks now;
     # no separate hotkey since W is bound to "move up" in-game).
     # N/J/X drive the waypoint editor (drop / select / delete);
-    # O toggles the visual waypoint overlay for authoring.
+    # O toggles the visual waypoint overlay for authoring — and with it the
+    # whole editor: N/J/X/',' are inert while the overlay is hidden.
     # ',' saves the current graph (load is automatic on match change).
     # S is bound to "move down" in-game so it can't be used for save. ---
     a.raw(b'\x80\xF9' + bytes([ax.VK_R])); a.jz('handle_R')
@@ -72,8 +76,15 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
 
     # --- Waypoint-editor handlers (N drop, J select, X delete) ---
     # Each is gated by mp_gate so editing only fires inside an active match
-    # (host char isn't a valid entity outside MP).
+    # (host char isn't a valid entity outside MP), AND by overlay_enabled so
+    # the graph can only be mutated (or saved) while it is VISIBLE — with the
+    # overlay hidden an accidental N/X/',' press silently mutated and
+    # persisted an invisible graph (X deletes nodes; ',' overwrites the .zwpt
+    # on disk). Overlay off -> the keys fall through to normal game handling
+    # exactly as if the editor didn't exist; press O to enter edit mode.
     a.label('handle_N')
+    a.raw(b'\x83\x3D' + le32(overlay_enabled_va) + b'\x00')   # overlay visible?
+    a.jz('passthru')                                          # hidden -> editor locked
     a.raw(b'\x60')
     mp_gate(a, 'pop_passthru')
     a.call_lbl('wp_drop')
@@ -81,6 +92,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.jmp_va(ax.ORIG_TARGET_VA)
 
     a.label('handle_J')
+    a.raw(b'\x83\x3D' + le32(overlay_enabled_va) + b'\x00')   # overlay visible?
+    a.jz('passthru')                                          # hidden -> editor locked
     a.raw(b'\x60')
     mp_gate(a, 'pop_passthru')
     a.call_lbl('wp_select')
@@ -88,6 +101,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.jmp_va(ax.ORIG_TARGET_VA)
 
     a.label('handle_X')
+    a.raw(b'\x83\x3D' + le32(overlay_enabled_va) + b'\x00')   # overlay visible?
+    a.jz('passthru')                                          # hidden -> editor locked
     a.raw(b'\x60')
     mp_gate(a, 'pop_passthru')
     a.call_lbl('wp_delete')
@@ -95,6 +110,8 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.jmp_va(ax.ORIG_TARGET_VA)
 
     a.label('handle_save')
+    a.raw(b'\x83\x3D' + le32(overlay_enabled_va) + b'\x00')   # overlay visible?
+    a.jz('passthru')                                          # hidden -> editor locked
     a.raw(b'\x60')
     mp_gate(a, 'pop_passthru')
     a.call_lbl('wp_save')

@@ -25,7 +25,11 @@ Shared helpers used by both the editor and the bot-movement follower:
 
 The editor entry points (drop/select/delete/save) are gated implicitly by the
 dispatcher's ``mp_gate`` (no point editing waypoints outside a match — the host
-char isn't a valid entity).
+char isn't a valid entity) AND by ``overlay_enabled`` — the dispatcher drops
+the four editor keys while the authoring overlay is hidden, so the graph can
+only be mutated or saved while it is visible on screen. ``wp_load`` (match
+change, from ``detour_df90``) is deliberately NOT overlay-gated: bots need the
+graph regardless of whether anyone is authoring.
 
 Capacity bounds are baked at emit time from ``cfg.OVERLAY_VERTEX_MAX`` and
 ``cfg.OVERLAY_EDGE_MAX``; the layout table sizes are sized off the same

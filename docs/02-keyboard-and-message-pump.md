@@ -33,8 +33,10 @@ Current dispatcher behavior (`zaxbot/hook/dispatcher.py`):
 - **O**: MP-gate, toggle `overlay_enabled`, sync pickup-registration markers to
   that state, and show an on-screen confirmation; the page-flip detour is
   installed but drawing starts off.
-- **N/J/X/,**: MP-gated waypoint editor controls: drop/snap, select, delete,
-  save.
+- **N/J/X/,**: waypoint editor controls: drop/snap, select, delete, save.
+  Gated by the MP gate AND `overlay_enabled` — inert while the authoring
+  overlay is hidden (accidental presses used to silently mutate and save an
+  invisible graph); press O first to edit.
 - all other keys: tail-jump to `sub_599580`.
 
 The old text-prompt + digit state machine (`menu_state`, `prompts_table`,
