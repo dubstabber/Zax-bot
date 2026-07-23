@@ -140,6 +140,30 @@ WP_EDGE_FOLLOW_ENABLED = True
 # line-hugging on very narrow paths.
 WP_EDGE_LOOKAHEAD = 0.15
 
+# --- Per-node movement DIVERGENCE (levels 1-3) ---------------------------
+# Every waypoint node carries a level byte (wp_node_level[], edited in-game
+# with +/- on the selected node, persisted in .zwpt v2; v1 files load as all
+# level 1). The level of the node a bot is APPROACHING controls how strictly
+# it follows the path — level 1 is byte-identical to the pre-divergence
+# behaviour, so lava corridors stay safe by default:
+#   level 1 (strict): edge-hug steering (WP_EDGE_FOLLOW machinery), no
+#           offset, WP_REACHED_RADIUS_SQ arrival.
+#   level 2 (loose):  straight-at-node steering with a per-bot random
+#           lateral offset (re-rolled each time a bot acquires the node, so
+#           two bots on the same route walk different lines) and a larger
+#           arrival radius (corner-cutting).
+#   level 3 (free):   bigger offset + bigger arrival radius.
+# The offset maxima MUST stay comfortably below the matching arrival radius
+# (the arrival test measures distance to the NODE, not the offset target —
+# an offset beyond the radius would orbit) and the radii below
+# WP_STUCK_REACHED_RADIUS_SQ (128px), whose stuck-arrival semantics
+# (wedge-counter exemption, door gate entry) must stay distinct.
+WP_DIVERGE_ENABLED = True
+WP_LVL2_RADIUS_SQ  = 7744.0    # 88px arrival ball for level-2 nodes
+WP_LVL3_RADIUS_SQ  = 12544.0   # 112px arrival ball for level-3 nodes
+WP_LVL2_OFFSET_MAX = 44        # int px: level-2 per-bot offset in [-44, 44]
+WP_LVL3_OFFSET_MAX = 64        # int px: level-3 per-bot offset in [-64, 64]
+
 # --- Off-graph recovery (progress-timeout escape) ------------------------
 # The bot routinely ends up physically SEPARATED from its target node by a
 # wall — a bad spawn, a lava-death respawn into a pocket, or explosion/player

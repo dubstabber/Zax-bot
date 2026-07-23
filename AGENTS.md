@@ -329,6 +329,35 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     pickup-attractor potential field and the edge look-ahead were REMOVED —
     they constantly aimed the angle into walls). `detour_5436F0` still
     synthesizes aim/fire when range + LOS allow.
+- Bots have PER-NODE MOVEMENT DIVERGENCE (`cfg.WP_DIVERGE_ENABLED`; built
+  2026-07-23, live pass pending — the "player-like looseness" layer). Every
+  waypoint node carries a level byte in `wp_node_level[]` (layout/diverge.py
+  tail block): 1 = STRICT (byte-equivalent to the old behaviour — edge-hug
+  steering, 64 px arrival; the safe default for narrow lava paths), 2 =
+  LOOSE, 3 = FREE. The level of the node a bot is APPROACHING drives three
+  things in the follower: (a) `follow_steer` skips the prev→current
+  EDGE-HUG for level >= 2 and steers straight at the node; (b) the straight
+  steer targets node + a PER-BOT lateral offset (`bot_div_x/y[slot]`,
+  re-rolled via `wp_div_roll` whenever `bot_div_node[slot]` != cur+1 —
+  self-healing, plus a df90 clear so a stale roll can't alias across match
+  change), uniform in ±`WP_LVL2/3_OFFSET_MAX` px (44/64) so pack-routed
+  bots fan out over the same route; (c) the arrival test loads
+  `wp_lvl_radius_sq[level&3]` (64/88/112 px) instead of the flat
+  `WP_REACHED_RADIUS_SQ` — freer nodes corner-cut earlier. Offsets stay
+  well inside the same level's arrival ball (test-pinned: off·√2 < radius)
+  so the dsq-to-NODE progress watchdog and arrival machinery are
+  unaffected, and all radii stay below the 128 px STUCK ball whose
+  wedge-exempt arrival semantics remain a distinct tier. Levels are edited
+  in-game: J-select a node, then +/- (main row or numpad; overlay+MP gated
+  like every editor key) with on-screen confirmation, and the overlay draws
+  a small line-drawn digit (glyph segment table `wp_lvl_glyphs`, packed at
+  build time) under every node. Persistence: `.zwpt` VERSION 2 appends one
+  level byte per vertex after the edges; the loader accepts v1 (levels
+  default to all-1 strict) so existing graphs load unchanged, `wp_load`
+  default-fills + sanitizes (clamp to 1..3), `wp_drop` inits new nodes to
+  1, `wp_delete` mirrors its swap-with-last in the level table. Final
+  approaches (flag/pad/switch/drop/bin) are untouched — divergence only
+  shapes node-to-node travel.
 - Shot prediction is fully wired. `compute_proj_speed` reads the active
   weapon's projectile speed from `[CModel + 0x60]` via
   `sub_48D8F0(dword_6CFDD8, [def + 0x20])`; NULL projectile key or zero
@@ -1096,12 +1125,12 @@ Working path: **Phase B - synthetic DirectPlay queue injection**.
     mislabelled a bot standing just past the doorway as not-crossed and
     walked it back INTO the closed door (2026-07-20 snapshots, part of the
     self-closing-door shuttle). Degenerate dot <= 0 (bot exactly on the door
-    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~2.9 KB
-    below `SCRATCH_OFF` (hook_entry_size 46132 of 49152 after the bot-menu,
+    line) backs up — the safe side. NOTE: `.zaxbot` code headroom is ~1.7 KB
+    below `SCRATCH_OFF` (hook_entry_size 47391 of 49152 after the bot-menu,
     CTF role/standoff, enemy-carrier chase, route-lane, combat-strafe,
-    pickup need-gate, carrier-escape, proximity-mine and overlay-batched-lock
-    layers; the boundary sits at 0xC000 with the section at 0x2A000). When it
-    runs low again, bump
+    pickup need-gate, carrier-escape, proximity-mine, overlay-batched-lock
+    and movement-divergence layers; the boundary sits at 0xC000 with the
+    section at 0x2A000). When it runs low again, bump
     `SCRATCH_OFF`+`NEW_SECTION_SIZE` together (build asserts on overflow). The `rstate`
     R-snapshot chunk (goal/carry/missing-policy/suspend/epoch, 0x170 B from
     `flag_routing_active`) was added for diagnosing route commitment.

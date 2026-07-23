@@ -46,6 +46,15 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x80\xF9' + bytes([ax.VK_X])); a.jz('handle_X')
     a.raw(b'\x80\xF9' + bytes([ax.VK_O])); a.jz('handle_overlay_toggle')
     a.raw(b'\x80\xF9' + bytes([ax.VK_COMMA])); a.jz('handle_save')
+    diverge_keys = (cfg.WP_DIVERGE_ENABLED
+                    and layout.has_field('wp_node_level'))
+    if diverge_keys:
+        # +/- adjust the SELECTED node's divergence level (main row AND
+        # numpad; same overlay+MP gating as the other editor keys).
+        a.raw(b'\x80\xF9' + bytes([ax.VK_OEM_PLUS])); a.jz('handle_lvl_up')
+        a.raw(b'\x80\xF9' + bytes([ax.VK_ADD])); a.jz('handle_lvl_up')
+        a.raw(b'\x80\xF9' + bytes([ax.VK_OEM_MINUS])); a.jz('handle_lvl_down')
+        a.raw(b'\x80\xF9' + bytes([ax.VK_SUBTRACT])); a.jz('handle_lvl_down')
     a.raw(b'\x80\xF9' + bytes([ax.VK_B]))                    # cmp cl, VK_B
     a.jnz('passthru')
 
@@ -117,6 +126,25 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     a.call_lbl('wp_save')
     a.raw(b'\x61')
     a.jmp_va(ax.ORIG_TARGET_VA)
+
+    if diverge_keys:
+        a.label('handle_lvl_up')
+        a.raw(b'\x83\x3D' + le32(overlay_enabled_va) + b'\x00')  # overlay visible?
+        a.jz('passthru')                                         # hidden -> locked
+        a.raw(b'\x60')
+        mp_gate(a, 'pop_passthru')
+        a.call_lbl('wp_level_up')
+        a.raw(b'\x61')
+        a.jmp_va(ax.ORIG_TARGET_VA)
+
+        a.label('handle_lvl_down')
+        a.raw(b'\x83\x3D' + le32(overlay_enabled_va) + b'\x00')  # overlay visible?
+        a.jz('passthru')                                         # hidden -> locked
+        a.raw(b'\x60')
+        mp_gate(a, 'pop_passthru')
+        a.call_lbl('wp_level_down')
+        a.raw(b'\x61')
+        a.jmp_va(ax.ORIG_TARGET_VA)
 
     a.label('handle_overlay_toggle')
     a.raw(b'\x60')

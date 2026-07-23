@@ -634,6 +634,72 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.call_va(ax.SUB_4FCCC0_VA)
         a.label('ov_after_selected')
 
+        # --- Draw divergence-level digit labels --------------------------
+        # A small line-drawn "1"/"2"/"3" right under each node's oval, from
+        # the static wp_lvl_glyphs segment table (node-relative offsets, see
+        # static_data._pack_level_glyphs). One point-cull per NODE covers
+        # the whole glyph (segments are a few px). Registers: EDI=renderer
+        # preserved, ESI=node idx, EBX=count, EBP=segment cursor; the
+        # remaining-segment counter lives in ov_glyph_n because the line
+        # call clobbers EAX/ECX/EDX. Runs inside the batched surface lock
+        # like every other pass.
+        if cfg.WP_DIVERGE_ENABLED and layout.has_field('wp_node_level'):
+            from ..layout.diverge import GLYPH_STRIDE
+            wp_node_level_ov_va = layout.va('wp_node_level')
+            wp_lvl_glyphs_va    = layout.va('wp_lvl_glyphs')
+            ov_glyph_base_va    = layout.va('ov_glyph_base')
+            ov_glyph_n_va       = layout.va('ov_glyph_n')
+            a.raw(b'\x31\xF6')                                # esi = node idx
+            a.raw(b'\x8B\x1D' + le32(overlay_vertex_count_va))  # ebx = count
+            a.raw(b'\x85\xDB'); a.jz('ov_after_glyphs')
+            a.label('ov_glyph_loop')
+            a.raw(b'\x39\xDE'); a.jae('ov_after_glyphs')      # idx >= count
+            a.raw(b'\xD9\x04\xF5' + le32(overlay_vertices_va))  # fld v.x
+            a.raw(b'\xD8\x25' + le32(overlay_cam_x_va))       # fsub cam.x
+            a.raw(b'\xD9\x1D' + le32(ov_glyph_base_va))       # fstp base.x
+            a.raw(b'\xD9\x04\xF5' + le32(overlay_vertices_va + 4))  # fld v.y
+            a.raw(b'\xD8\x25' + le32(overlay_cam_y_va))       # fsub cam.y
+            a.raw(b'\xD9\x1D' + le32(ov_glyph_base_va + 4))   # fstp base.y
+            _emit_point_cull(
+                a, ov_glyph_base_va,
+                overlay_cull_min_x_va, overlay_cull_max_x_va,
+                overlay_cull_min_y_va, overlay_cull_max_y_va,
+                'ov_glyph_next',
+            )
+            a.raw(b'\x0F\xB6\x86' + le32(wp_node_level_ov_va))  # movzx eax, level[esi]
+            a.raw(b'\x83\xE0\x03')                            # and eax, 3
+            a.raw(b'\x6B\xC0' + bytes([GLYPH_STRIDE]))        # imul eax, GLYPH_STRIDE
+            a.raw(b'\x8D\xA8' + le32(wp_lvl_glyphs_va))       # lea ebp, [eax + glyphs]
+            a.raw(b'\x8B\x45\x00')                            # eax = seg count
+            a.raw(b'\x85\xC0'); a.jz('ov_glyph_next')         # empty entry
+            a.raw(b'\xA3' + le32(ov_glyph_n_va))              # remaining = count
+            a.raw(b'\x83\xC5\x04')                            # ebp -> first segment
+            a.label('ov_glyph_seg')
+            a.raw(b'\xD9\x05' + le32(ov_glyph_base_va))       # fld base.x
+            a.raw(b'\xD8\x45\x00')                            # fadd seg.dx1
+            a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va))      # fstp p1.x
+            a.raw(b'\xD9\x05' + le32(ov_glyph_base_va + 4))   # fld base.y
+            a.raw(b'\xD8\x45\x04')                            # fadd seg.dy1
+            a.raw(b'\xD9\x1D' + le32(overlay_tmp_p1_va + 4))  # fstp p1.y
+            a.raw(b'\xD9\x05' + le32(ov_glyph_base_va))       # fld base.x
+            a.raw(b'\xD8\x45\x08')                            # fadd seg.dx2
+            a.raw(b'\xD9\x1D' + le32(overlay_tmp_p2_va))      # fstp p2.x
+            a.raw(b'\xD9\x05' + le32(ov_glyph_base_va + 4))   # fld base.y
+            a.raw(b'\xD8\x45\x0C')                            # fadd seg.dy2
+            a.raw(b'\xD9\x1D' + le32(overlay_tmp_p2_va + 4))  # fstp p2.y
+            a.raw(b'\x68' + le32(overlay_vertex_color_va))    # push &color
+            a.raw(b'\x68' + le32(overlay_tmp_p2_va))          # push &p2
+            a.raw(b'\x68' + le32(overlay_tmp_p1_va))          # push &p1
+            a.raw(b'\x89\xF9')                                # ecx = renderer
+            a.call_va(ax.SUB_4B3CB0_VA)
+            a.raw(b'\x83\xC5\x10')                            # ebp -> next segment
+            a.raw(b'\xFF\x0D' + le32(ov_glyph_n_va))          # --remaining
+            a.jnz('ov_glyph_seg')
+            a.label('ov_glyph_next')
+            a.raw(b'\x46')                                    # ++node idx
+            a.jmp('ov_glyph_loop')
+            a.label('ov_after_glyphs')
+
     # --- Draw detected pickups (item-grab feature, stage-1 verification) --
     # Same world->screen (subtract cam) + oval-draw path as vertices, over the
     # live pickup_table populated by detour_53DA40. Ungated by overlay_vertices

@@ -28,6 +28,15 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
     a.raw(b'\x83\x3D' + le32(edge_follow_enabled_va) + b'\x00')  # cmp [edge_follow_enabled], 0
     a.jz('s542360_wp_steer_node')
+    if c.diverge:
+        # DIVERGENCE gate: a level-2/3 target node is followed FREELY —
+        # skip the edge-hug and take the straight-at-node path (which adds
+        # the per-bot lateral offset below). Level-1 (strict) nodes keep
+        # the hug — that is what keeps bots on narrow lava corridors.
+        a.raw(b'\x8B\x04\x8D' + le32(current_wp_va))      # eax = cur
+        a.raw(b'\x0F\xB6\x80' + le32(c.wp_node_level_va))  # movzx eax, level[cur]
+        a.raw(b'\x83\xF8\x02')                            # cmp eax, 2
+        a.jae('s542360_wp_steer_node')                    # level >= 2 -> free
     a.raw(b'\x8B\x04\x8D' + le32(prev_wp_va))             # eax = prev_wp[slot]
     a.raw(b'\x83\xF8\xFF')                                # cmp eax, -1
     a.jz('s542360_wp_steer_node')                         # not latched -> node-only
@@ -74,14 +83,33 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     a.label('s542360_wp_steer_node_pop')
     a.raw(b'\xDD\xD8')                                    # fstp st0 (pop seglen2)
     a.label('s542360_wp_steer_node')
-    # Straight-at-node fallback: desired = node - bot.
+    # Straight-at-node fallback: desired = node - bot. With divergence, the
+    # target is node + this bot's rolled lateral offset (zero for level-1
+    # nodes) — the offset stays well inside the level's arrival radius so
+    # the dsq-to-node arrival/progress machinery is unaffected.
     a.raw(b'\x8B\x0D' + le32(bot_slot_tmp_va))            # ecx = slot
     a.raw(b'\x8B\x04\x8D' + le32(current_wp_va))          # eax = cur
+    if c.diverge:
+        # Re-roll the per-bot offset the moment the latched node changes
+        # (bot_div_node stores node+1; 0 = never rolled -> mismatch).
+        a.raw(b'\x8D\x50\x01')                            # lea edx, [eax+1]
+        a.raw(b'\x3B\x14\x8D' + le32(c.bot_div_node_va))  # cmp edx, div_node[slot]
+        a.jz('s542360_wp_div_ok')
+        a.raw(b'\x51')                                    # push ecx (slot)
+        a.raw(b'\x50')                                    # push eax (cur)
+        a.call_lbl('wp_div_roll')                         # in: eax=node, ecx=slot
+        a.raw(b'\x58')                                    # pop eax
+        a.raw(b'\x59')                                    # pop ecx
+        a.label('s542360_wp_div_ok')
     a.raw(b'\x8D\x14\xC5' + le32(overlay_vertices_va))    # lea edx, [eax*8 + verts]
     a.raw(b'\xD9\x02')                                    # fld [edx]     node.x
+    if c.diverge:
+        a.raw(b'\xD8\x04\x8D' + le32(c.bot_div_x_va))     # fadd off.x[slot]
     a.raw(b'\xD8\x25' + le32(bot_pos_va))                 # fsub bot.x
     a.raw(b'\xD9\x1D' + le32(dx_accum_va))                # fstp dx_accum
     a.raw(b'\xD9\x42\x04')                                # fld [edx+4]   node.y
+    if c.diverge:
+        a.raw(b'\xD8\x04\x8D' + le32(c.bot_div_y_va))     # fadd off.y[slot]
     a.raw(b'\xD8\x25' + le32(bot_pos_va + 4))             # fsub bot.y
     a.raw(b'\xD9\x1D' + le32(dy_accum_va))                # fstp dy_accum
     a.jmp('s542360_emit')

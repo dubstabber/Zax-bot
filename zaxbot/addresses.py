@@ -519,6 +519,10 @@ VK_O     = 0x4F
 VK_R     = 0x52
 VK_X     = 0x58
 VK_COMMA = 0xBC   # VK_OEM_COMMA — used for wp_save (S is bound to "move down" in-game)
+VK_OEM_PLUS  = 0xBB   # main-row '+' — node divergence level up
+VK_OEM_MINUS = 0xBD   # main-row '-' — node divergence level down
+VK_ADD       = 0x6B   # numpad '+' — same as VK_OEM_PLUS
+VK_SUBTRACT  = 0x6D   # numpad '-' — same as VK_OEM_MINUS
 
 # --- CWayPointMap probe (waypoint_diag) ------------------------------------
 # `sub_4ECA80` (CLevel::LoadWayPoints) stores the per-level CWayPointMap* at

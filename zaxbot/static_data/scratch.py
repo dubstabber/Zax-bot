@@ -11,6 +11,38 @@ from .common import (DUMP_TAGS, PROMPT_CTF, PROMPT_DM, PROMPT_SK,
 from .tables import (write_door_static_table, write_flag_static_table,
                      write_item_static_table, write_portal_static_table,
                      write_sk_static_table, write_switch_static_table)
+from ..layout.diverge import GLYPH_MAX_SEGS, GLYPH_STRIDE
+
+
+def _pack_level_glyphs(radius):
+    """Digit glyphs "1"/"2"/"3" as line segments relative to the node center
+    (x right, y down, world px == screen px), drawn by the overlay right
+    below each node's oval. Entry 0 (a masked corrupt level byte) is empty.
+    Layout per entry: u32 seg_count + GLYPH_MAX_SEGS x (dx1,dy1,dx2,dy2)."""
+    top = radius + 3.0
+    h = 9.0
+    mid = top + h / 2.0
+    bot = top + h
+    digits = [
+        [],                                                    # masked corrupt
+        [(-2.0, top + 2.0, 0.0, top),                          # '1' hook
+         (0.0, top, 0.0, bot),                                 # '1' stem
+         (-2.0, bot, 2.0, bot)],                               # '1' base
+        [(-3.0, top, 3.0, top), (3.0, top, 3.0, mid),          # '2'
+         (3.0, mid, -3.0, mid), (-3.0, mid, -3.0, bot),
+         (-3.0, bot, 3.0, bot)],
+        [(-3.0, top, 3.0, top), (3.0, top, 3.0, bot),          # '3'
+         (-1.0, mid, 3.0, mid), (-3.0, bot, 3.0, bot)],
+    ]
+    out = bytearray()
+    for segs in digits:
+        assert len(segs) <= GLYPH_MAX_SEGS
+        entry = struct.pack('<I', len(segs))
+        for s in segs:
+            entry += struct.pack('<4f', *s)
+        entry += b'\x00' * (GLYPH_STRIDE - len(entry))
+        out += entry
+    return bytes(out)
 
 
 def write_static_scratch_data(
@@ -61,6 +93,10 @@ def write_static_scratch_data(
     wp_progress_timeout_frames=150,
     wp_stuck_reached_radius_sq=16384.0,
     wp_slide_turn_step_deg=30.0,
+    wp_lvl2_radius_sq=7744.0,
+    wp_lvl3_radius_sq=12544.0,
+    wp_lvl2_offset_max=44,
+    wp_lvl3_offset_max=64,
     overlay_enabled=False,
     overlay_waypoints=(),
     overlay_edges=(),
@@ -357,6 +393,25 @@ def write_static_scratch_data(
     if layout.has_field('flag_home_tick_radius_sq'):
         layout.write(section, scratch_off, 'flag_home_tick_radius_sq',
                      struct.pack('<f', ctf_flag_home_force_tick_radius_sq))
+    # --- Per-node divergence levels ---------------------------------------
+    # wp_node_level defaults to all-1s (strict follow) at build time;
+    # wp_load re-fills it per match (v2 .zwpt bytes, or 1s for v1/no file).
+    # The radius/offset tables are indexed by level&3 — slot 0 mirrors
+    # level 1 so a corrupt byte degrades to strict behaviour. Glyphs are
+    # the overlay's line-drawn digit labels (node-relative segments).
+    if layout.has_field('wp_node_level'):
+        layout.write(section, scratch_off, 'wp_node_level',
+                     b'\x01' * layout.field('wp_node_level').size)
+        layout.write(section, scratch_off, 'wp_lvl_radius_sq',
+                     struct.pack('<4f', wp_reached_radius_sq,
+                                 wp_reached_radius_sq,
+                                 wp_lvl2_radius_sq, wp_lvl3_radius_sq))
+        layout.write(section, scratch_off, 'wp_lvl_offset_max',
+                     struct.pack('<4I', 0, 0,
+                                 int(wp_lvl2_offset_max),
+                                 int(wp_lvl3_offset_max)))
+        layout.write(section, scratch_off, 'wp_lvl_glyphs',
+                     _pack_level_glyphs(overlay_vertex_radius))
     if layout.has_field('portal_static_map_count'):
         write_portal_static_table(
             section,

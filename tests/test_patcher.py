@@ -2031,6 +2031,89 @@ class PatcherTests(unittest.TestCase):
         self.assertEqual(applied['DP poll capture'][:1], b'\xE9')
 
 
+class DivergeTests(unittest.TestCase):
+    """Per-node movement-divergence invariants (levels 1-3).
+
+    The follower indexes wp_lvl_radius_sq/wp_lvl_offset_max by level&3 and
+    steers at node+offset while testing arrival against the NODE — so every
+    level's max offset must stay strictly inside that level's arrival
+    radius, and every radius strictly below the 128px stuck-arrival ball
+    (whose wedge-exempt semantics are a distinct tier)."""
+
+    def _layout(self):
+        return build_scratch_layout(
+            zax_patch.IMAGE_BASE + zax_patch.NEW_SECTION_VA + zax_patch.SCRATCH_OFF,
+            zax_patch.NEW_SECTION_SIZE - zax_patch.SCRATCH_OFF,
+            zax_patch.NUM_BOT_NAMES,
+            zax_patch.NAME_SLOT_SIZE,
+            zax_patch.NAME_SLOT_ASCII,
+            cfg.WEAPON_SPEEDS_MAX,
+            overlay_vertex_max=cfg.OVERLAY_VERTEX_MAX,
+            overlay_edge_max=cfg.OVERLAY_EDGE_MAX,
+        )
+
+    def test_diverge_scratch_block_layout(self):
+        from zaxbot.layout.diverge import GLYPH_STRIDE
+        layout = self._layout()
+        self.assertEqual(layout.field('wp_node_level').size,
+                         cfg.OVERLAY_VERTEX_MAX)
+        self.assertEqual(layout.field('wp_lvl_radius_sq').size, 0x10)
+        self.assertEqual(layout.field('wp_lvl_offset_max').size, 0x10)
+        self.assertEqual(layout.field('wp_lvl_glyphs').size, 4 * GLYPH_STRIDE)
+        for name in ('bot_div_node', 'bot_div_x', 'bot_div_y'):
+            self.assertEqual(layout.field(name).size, 16 * 4)
+        # detour_df90 clears node+x+y with ONE rep-stosd — contiguity is
+        # load-bearing.
+        node = layout.field('bot_div_node')
+        x = layout.field('bot_div_x')
+        y = layout.field('bot_div_y')
+        self.assertEqual(x.offset, node.end)
+        self.assertEqual(y.offset, x.end)
+
+    def test_offset_stays_inside_arrival_radius(self):
+        import math
+        # Level 1 has no offset by construction; check 2 and 3.
+        for radius_sq, off in ((cfg.WP_LVL2_RADIUS_SQ, cfg.WP_LVL2_OFFSET_MAX),
+                               (cfg.WP_LVL3_RADIUS_SQ, cfg.WP_LVL3_OFFSET_MAX)):
+            # The offset target must sit WELL inside the arrival ball or the
+            # bot could orbit its own offset point without ever "arriving".
+            self.assertLess(off * math.sqrt(2), math.sqrt(radius_sq))
+            # And every level radius stays below the stuck-arrival tier.
+            self.assertLess(radius_sq, cfg.WP_STUCK_REACHED_RADIUS_SQ)
+        # Monotone: freer levels arrive from farther away.
+        self.assertLess(cfg.WP_REACHED_RADIUS_SQ, cfg.WP_LVL2_RADIUS_SQ)
+        self.assertLess(cfg.WP_LVL2_RADIUS_SQ, cfg.WP_LVL3_RADIUS_SQ)
+
+    def test_glyph_packing(self):
+        import struct as _struct
+        from zaxbot.layout.diverge import GLYPH_MAX_SEGS, GLYPH_STRIDE
+        from zaxbot.static_data.scratch import _pack_level_glyphs
+        packed = _pack_level_glyphs(cfg.OVERLAY_VERTEX_RADIUS)
+        self.assertEqual(len(packed), 4 * GLYPH_STRIDE)
+        counts = [
+            _struct.unpack_from('<I', packed, lvl * GLYPH_STRIDE)[0]
+            for lvl in range(4)
+        ]
+        # Entry 0 (masked corrupt byte) draws nothing; digits 1/2/3 exist.
+        self.assertEqual(counts[0], 0)
+        for lvl in (1, 2, 3):
+            self.assertGreater(counts[lvl], 0)
+            self.assertLessEqual(counts[lvl], GLYPH_MAX_SEGS)
+            # Every segment sits BELOW the node's oval (label position).
+            for k in range(counts[lvl]):
+                x1, y1, x2, y2 = _struct.unpack_from(
+                    '<4f', packed, lvl * GLYPH_STRIDE + 4 + k * 16)
+                for y in (y1, y2):
+                    self.assertGreater(y, cfg.OVERLAY_VERTEX_RADIUS)
+
+    def test_zwpt_version_is_2(self):
+        # v2 appends one level byte per vertex after the edges; the loader
+        # still accepts v1 (levels default to all-strict). Bump this pin
+        # deliberately when the format changes again.
+        from zaxbot.hook.waypoint_edit import ZWPT_VERSION
+        self.assertEqual(ZWPT_VERSION, 2)
+
+
 class GoldenSectionTests(unittest.TestCase):
     """Byte-identity tripwire for the emitted .zaxbot section.
 
@@ -2043,8 +2126,8 @@ class GoldenSectionTests(unittest.TestCase):
             print(hashlib.sha256(s).hexdigest(), i['hook_entry_size'])"
     """
 
-    SECTION_SHA256 = '40f2efa121882ad06c35ddb0b9eb965c4848a95ca7dd34713aa9b8635b4a4e04'
-    HOOK_ENTRY_SIZE = 46184
+    SECTION_SHA256 = '6de3d7bd8803ba987eccf0df8c0211e16b5df49b6ec24728f817310735624778'
+    HOOK_ENTRY_SIZE = 47391
 
     def test_zaxbot_section_is_byte_identical(self):
         section, info = zax_patch.build_hook(

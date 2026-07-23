@@ -243,7 +243,18 @@ def emit(a: Asm, layout: ScratchLayout, c) -> None:
     a.raw(b'\xDE\xC1')                                    # faddp -> ST0 = dsq
     # Keep dsq on the FPU for the progress check. fcomip (radius : dsq) pops the
     # radius and leaves dsq; CF=1 iff radius < dsq (NOT arrived).
-    a.raw(b'\xD9\x05' + le32(wp_reached_radius_sq_va))    # fld radius
+    if c.diverge:
+        # DIVERGENCE: the arrival radius scales with the target node's level
+        # (wp_lvl_radius_sq[level&3]; slot 0 mirrors level 1, so a corrupt
+        # byte degrades to strict). EAX still holds cur from the dsq setup;
+        # EDX is dead (s542360_wp_arrived/not_arrived both reload from
+        # memory). Level 2/3 balls stay below the 128px stuck radius, whose
+        # wedge-exempt arrival semantics must remain a distinct tier.
+        a.raw(b'\x0F\xB6\x90' + le32(c.wp_node_level_va))  # movzx edx, level[cur]
+        a.raw(b'\x83\xE2\x03')                            # and edx, 3
+        a.raw(b'\xD9\x04\x95' + le32(c.wp_lvl_radius_sq_va))  # fld radius_sq[edx]
+    else:
+        a.raw(b'\xD9\x05' + le32(wp_reached_radius_sq_va))  # fld radius
     a.raw(b'\xDF\xF1')                                    # fcomip st0,st1
     a.jb('s542360_wp_not_arrived')                        # radius < dsq -> maybe stuck-near
     a.raw(b'\xDD\xD8')                                    # fstp st(0)  (arrived: pop dsq)

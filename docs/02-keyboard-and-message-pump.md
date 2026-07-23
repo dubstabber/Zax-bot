@@ -37,6 +37,11 @@ Current dispatcher behavior (`zaxbot/hook/dispatcher.py`):
   Gated by the MP gate AND `overlay_enabled` — inert while the authoring
   overlay is hidden (accidental presses used to silently mutate and save an
   invisible graph); press O first to edit.
+- **+/-** (main row or numpad): raise/lower the SELECTED node's movement-
+  divergence level (1 strict / 2 loose / 3 free — see `WP_DIVERGE_*` in
+  `config/movement.py`). Same overlay+MP gating; shows "[wp] node level N"
+  on screen, and the overlay draws the digit under each node. Saved in
+  `.zwpt` v2 (one byte per vertex after the edges; v1 files load as all-1).
 - all other keys: tail-jump to `sub_599580`.
 
 The old text-prompt + digit state machine (`menu_state`, `prompts_table`,

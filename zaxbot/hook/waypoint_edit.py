@@ -15,6 +15,11 @@ match-change detours:
                   swap-source), and patch ``wp_selected_idx`` accordingly.
   - ``wp_save``   (',' key): persist the graph to ``waypoints/<map>.zwpt``.
   - ``wp_load``   (match change): reload the saved graph for the current map.
+  - ``wp_level_up`` / ``wp_level_down`` ('+'/'-' keys): adjust the selected
+                  node's movement-divergence level (1 strict / 2 loose /
+                  3 free; see ``config/movement.py``).
+  - ``wp_div_roll``: per-bot lateral steer-offset roll for the divergence
+                  layer (called from ``follow_steer`` on node acquisition).
 
 Shared helpers used by both the editor and the bot-movement follower:
 
@@ -57,7 +62,11 @@ WORLDMGR_CHAR_ARR_OFF = 0x290
 # File magic 'ZWPT' as a u32 LE: bytes 'Z'(0x5A), 'W'(0x57), 'P'(0x50),
 # 'T'(0x54) at offsets 0..3 → u32 = 0x5450575A.
 ZWPT_MAGIC = 0x5450575A
-ZWPT_VERSION = 1
+# Version 2 appends one divergence-level byte per vertex after the edge
+# array (see layout/diverge.py). The loader still accepts version-1 files
+# (levels default to all-1s = strict), so existing authored graphs load
+# unchanged; saving always writes version 2.
+ZWPT_VERSION = 2
 
 
 def emit(a: Asm, layout: ScratchLayout) -> None:
@@ -74,6 +83,9 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
     _emit_build_filename(a, layout)
     _emit_save(a, layout)
     _emit_load(a, layout)
+    if cfg.WP_DIVERGE_ENABLED and layout.has_field('wp_node_level'):
+        _emit_level_edit(a, layout)
+        _emit_div_roll(a, layout)
 
 
 def _emit_read_host_pos(a: Asm, layout: ScratchLayout) -> None:
@@ -401,6 +413,12 @@ def _emit_drop(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x89\x51\x04')                                       # mov [ecx+4], edx
     a.raw(b'\xFF\x05' + le32(overlay_vertex_count_va))           # inc [vertex_count]
     a.raw(b'\x89\xC3')                                           # mov ebx, eax  (new_idx)
+    if layout.has_field('wp_node_level'):
+        # A new node always starts STRICT (level 1) — the slot byte can be
+        # stale after a delete/re-drop cycle (delete swaps the last node's
+        # level into the freed slot and shrinks the count).
+        a.raw(b'\xC6\x83' + le32(layout.va('wp_node_level'))
+              + b'\x01')                                         # mov byte [levels+ebx], 1
 
     a.label('wp_drop_have_idx')
     # EBX = new/snapped idx. If wp_selected_idx valid and != ebx, append edge.
@@ -476,6 +494,11 @@ def _emit_delete(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x89\x01')                                           # mov [ecx], eax
     a.raw(b'\x8B\x46\x04')                                       # mov eax, [esi+4]
     a.raw(b'\x89\x41\x04')                                       # mov [ecx+4], eax
+    if layout.has_field('wp_node_level'):
+        # Mirror the vertex swap in the level table: level[deleted] =
+        # level[last] (the last node now lives at the deleted index).
+        a.raw(b'\x8A\x85' + le32(layout.va('wp_node_level')))    # mov al, [levels+ebp]
+        a.raw(b'\x88\x83' + le32(layout.va('wp_node_level')))    # mov [levels+ebx], al
     a.label('wp_del_after_swap')
     a.raw(b'\xFF\x0D' + le32(overlay_vertex_count_va))           # dec [vertex_count]
 
@@ -687,6 +710,18 @@ def _emit_save(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xFF\x15' + le32(ax.IMP_WRITEFILE))
     a.label('wp_save_skip_edges')
 
+    # WriteFile per-node divergence levels (v2 payload: one byte per vertex).
+    if layout.has_field('wp_node_level'):
+        a.raw(b'\xA1' + le32(overlay_vertex_count_va))           # eax = vert count (bytes)
+        a.raw(b'\x85\xC0'); a.jz('wp_save_skip_levels')
+        a.raw(b'\x6A\x00')
+        a.raw(b'\x68' + le32(wp_io_count_va))
+        a.raw(b'\x50')                                           # push eax (count)
+        a.raw(b'\x68' + le32(layout.va('wp_node_level')))
+        a.raw(b'\x53')
+        a.raw(b'\xFF\x15' + le32(ax.IMP_WRITEFILE))
+        a.label('wp_save_skip_levels')
+
     # CloseHandle(hFile)
     a.raw(b'\x53')
     a.raw(b'\xFF\x15' + le32(ax.IMP_CLOSEHANDLE))
@@ -764,11 +799,15 @@ def _emit_load(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x83\x3D' + le32(wp_io_count_va) + b'\x10')          # cmp [io_count], 16
     a.jnz('wp_load_close_fail')
 
-    # Validate magic + version.
+    # Validate magic + version. Versions 1..ZWPT_VERSION are accepted: a v1
+    # file simply has no level payload (defaults fill in below), so graphs
+    # authored before the divergence feature keep loading unchanged.
     a.raw(b'\x81\x3D' + le32(wp_file_header_va + 0) + le32(ZWPT_MAGIC))
     a.jnz('wp_load_close_fail')
-    a.raw(b'\x83\x3D' + le32(wp_file_header_va + 4) + b'\x01')
-    a.jnz('wp_load_close_fail')
+    a.raw(b'\xA1' + le32(wp_file_header_va + 4))                 # eax = version
+    a.raw(b'\x48')                                               # dec eax
+    a.raw(b'\x83\xF8' + bytes([ZWPT_VERSION - 1]))               # cmp eax, max-1
+    a.ja('wp_load_close_fail')                                   # 0 or > max -> reject
 
     # Bounds-check vertex_count <= vertex_max
     a.raw(b'\xA1' + le32(wp_file_header_va + 8))                 # eax = vert count
@@ -804,6 +843,43 @@ def _emit_load(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\x85\xC0'); a.jz('wp_load_close_fail')
 
     a.label('wp_load_commit')
+    if layout.has_field('wp_node_level'):
+        wp_node_level_va = layout.va('wp_node_level')
+        # Default-fill the WHOLE level table with 1s (strict) first — v1
+        # files carry no levels, and stale bytes from the previous map's
+        # graph must never leak into this one. rep stosb clobbers
+        # eax/ecx/edi only (ebx = hFile survives).
+        a.raw(b'\xBF' + le32(wp_node_level_va))                  # edi = &levels
+        a.raw(b'\xB9' + le32(vertex_max))                        # ecx = table size
+        a.raw(b'\xB0\x01')                                       # mov al, 1
+        a.raw(b'\xF3\xAA')                                       # rep stosb
+        # v2 payload: one level byte per vertex, right after the edges.
+        a.raw(b'\x83\x3D' + le32(wp_file_header_va + 4) + b'\x02')  # version == 2?
+        a.jnz('wp_load_levels_done')
+        a.raw(b'\xA1' + le32(wp_file_header_va + 8))             # eax = vert count
+        a.raw(b'\x85\xC0'); a.jz('wp_load_levels_done')
+        a.raw(b'\x6A\x00')
+        a.raw(b'\x68' + le32(wp_io_count_va))
+        a.raw(b'\x50')                                           # push eax (byte count)
+        a.raw(b'\x68' + le32(wp_node_level_va))
+        a.raw(b'\x53')
+        a.raw(b'\xFF\x15' + le32(ax.IMP_READFILE))
+        a.raw(b'\x85\xC0'); a.jz('wp_load_close_fail')
+        # Sanitize: any byte outside 1..3 (corrupt/hand-edited file) would
+        # index the level tables at a garbage slot — clamp to 1.
+        a.raw(b'\x8B\x0D' + le32(wp_file_header_va + 8))         # ecx = vert count
+        a.raw(b'\x31\xF6')                                       # esi = 0
+        a.label('wp_load_san_loop')
+        a.raw(b'\x39\xCE'); a.jae('wp_load_levels_done')         # esi >= count?
+        a.raw(b'\x8A\x86' + le32(wp_node_level_va))              # al = levels[esi]
+        a.raw(b'\xFE\xC8')                                       # dec al
+        a.raw(b'\x3C\x02')                                       # cmp al, 2
+        a.jbe('wp_load_san_ok')                                  # 1..3 -> keep
+        a.raw(b'\xC6\x86' + le32(wp_node_level_va) + b'\x01')    # levels[esi] = 1
+        a.label('wp_load_san_ok')
+        a.raw(b'\x46')                                           # inc esi
+        a.jmp('wp_load_san_loop')
+        a.label('wp_load_levels_done')
     # Commit counts.
     a.raw(b'\xA1' + le32(wp_file_header_va + 8))                 # eax = vert_count
     a.raw(b'\xA3' + le32(overlay_vertex_count_va))
@@ -826,3 +902,119 @@ def _emit_load(a: Asm, layout: ScratchLayout) -> None:
     a.raw(b'\xFF\x15' + le32(ax.IMP_CLOSEHANDLE))
     a.label('wp_load_done')
     a.raw(b'\x61\xC3')
+
+
+def _emit_level_edit(a: Asm, layout: ScratchLayout) -> None:
+    """wp_level_up / wp_level_down ('+'/'-' keys): adjust the SELECTED node's
+    divergence level within [1, 3] and confirm on screen. No selection (or a
+    stale out-of-range index) shows a hint instead. The stored byte is
+    clamped into range first so a corrupt value can never walk further out.
+    Dispatcher-gated on overlay visibility + MP like the other editor keys."""
+    wp_node_level_va        = layout.va('wp_node_level')
+    wp_selected_idx_va      = layout.va('wp_selected_idx')
+    overlay_vertex_count_va = layout.va('overlay_vertex_count')
+
+    for name, is_up in (('wp_level_up', True), ('wp_level_down', False)):
+        a.label(name)
+        a.raw(b'\x60')                                           # pushad
+        a.raw(b'\xA1' + le32(wp_selected_idx_va))                # eax = selected
+        a.raw(b'\x83\xF8\xFF'); a.jz('wp_lvl_nosel')             # -1 -> no selection
+        a.raw(b'\x3B\x05' + le32(overlay_vertex_count_va))       # >= count?
+        a.jae('wp_lvl_nosel')
+        a.raw(b'\x0F\xB6\x88' + le32(wp_node_level_va))          # movzx ecx, levels[eax]
+        # Clamp into [1, 3] before applying the step (corrupt-byte defense).
+        a.raw(b'\x83\xF9\x01'); a.jae(f'{name}_c1')              # ecx >= 1?
+        a.raw(b'\xB9\x01\x00\x00\x00')                           # ecx = 1
+        a.label(f'{name}_c1')
+        a.raw(b'\x83\xF9\x03'); a.jbe(f'{name}_c2')              # ecx <= 3?
+        a.raw(b'\xB9\x03\x00\x00\x00')                           # ecx = 3
+        a.label(f'{name}_c2')
+        if is_up:
+            a.raw(b'\x83\xF9\x03'); a.jae(f'{name}_store')       # already max
+            a.raw(b'\x41')                                       # inc ecx
+        else:
+            a.raw(b'\x83\xF9\x01'); a.jbe(f'{name}_store')       # already min
+            a.raw(b'\x49')                                       # dec ecx
+        a.label(f'{name}_store')
+        a.raw(b'\x88\x88' + le32(wp_node_level_va))              # levels[eax] = cl
+        a.call_lbl('wp_level_msg')                               # confirm (ecx = level)
+        a.raw(b'\x61\xC3')                                       # popad; ret
+
+    a.label('wp_lvl_nosel')
+    a.raw(b'\x6A\xFF')                                           # push -1
+    a.raw(b'\x68'); a.imm32_lbl('wp_msg_lvl_nosel')              # push msg
+    a.call_va(ax.SHOWMSG_VA)
+    a.raw(b'\x61\xC3')                                           # popad; ret
+
+    # wp_level_msg: in ECX = level 1..3; shows the matching confirmation.
+    a.label('wp_level_msg')
+    a.raw(b'\x83\xF9\x01'); a.jz('wp_lvl_msg1')
+    a.raw(b'\x83\xF9\x02'); a.jz('wp_lvl_msg2')
+    a.raw(b'\x6A\xFF')
+    a.raw(b'\x68'); a.imm32_lbl('wp_msg_lvl3')
+    a.call_va(ax.SHOWMSG_VA)
+    a.raw(b'\xC3')
+    a.label('wp_lvl_msg1')
+    a.raw(b'\x6A\xFF')
+    a.raw(b'\x68'); a.imm32_lbl('wp_msg_lvl1')
+    a.call_va(ax.SHOWMSG_VA)
+    a.raw(b'\xC3')
+    a.label('wp_lvl_msg2')
+    a.raw(b'\x6A\xFF')
+    a.raw(b'\x68'); a.imm32_lbl('wp_msg_lvl2')
+    a.call_va(ax.SHOWMSG_VA)
+    a.raw(b'\xC3')
+
+    a.label('wp_msg_lvl1')
+    a.raw(b'[wp] node level 1 (strict)\x00')
+    a.label('wp_msg_lvl2')
+    a.raw(b'[wp] node level 2 (loose)\x00')
+    a.label('wp_msg_lvl3')
+    a.raw(b'[wp] node level 3 (free)\x00')
+    a.label('wp_msg_lvl_nosel')
+    a.raw(b'[wp] no node selected (press J)\x00')
+
+
+def _emit_div_roll(a: Asm, layout: ScratchLayout) -> None:
+    """wp_div_roll: roll this bot's lateral steer offset for a node.
+    ABI: in EAX = node idx, ECX = bot slot. Writes bot_div_x/y[slot] (floats,
+    each uniform in [-max, max] where max = wp_lvl_offset_max[level&3]) and
+    bot_div_node[slot] = node+1. Preserves EBX/ESI/EDI/EBP; clobbers
+    EAX/ECX/EDX (the engine RNG's caller-saved set). FPU balanced. The RNG
+    call mirrors wp_advance: push high, push 0, this=RNG instance, callee
+    pops 8 — a [0, 2*max] roll shifted down by max avoids negative RNG
+    bounds."""
+    wp_node_level_va     = layout.va('wp_node_level')
+    wp_lvl_offset_max_va = layout.va('wp_lvl_offset_max')
+    bot_div_node_va      = layout.va('bot_div_node')
+    bot_div_x_va         = layout.va('bot_div_x')
+    bot_div_y_va         = layout.va('bot_div_y')
+    wp_div_tmp_va        = layout.va('wp_div_tmp')
+
+    a.label('wp_div_roll')
+    a.raw(b'\x53\x56\x57')                                       # push ebx/esi/edi
+    a.raw(b'\x89\xCB')                                           # ebx = slot
+    a.raw(b'\x89\xC6')                                           # esi = node
+    a.raw(b'\x0F\xB6\x86' + le32(wp_node_level_va))              # movzx eax, levels[esi]
+    a.raw(b'\x83\xE0\x03')                                       # and eax, 3
+    a.raw(b'\x8B\x3C\x85' + le32(wp_lvl_offset_max_va))          # edi = offset_max[eax]
+    a.raw(b'\x85\xFF'); a.jz('wp_dr_zero')                       # level 1 -> no offset
+    for axis_va in (bot_div_x_va, bot_div_y_va):
+        a.raw(b'\x8D\x04\x3F')                                   # lea eax, [edi+edi]
+        a.raw(b'\x50')                                           # push eax (high = 2*max)
+        a.raw(b'\x6A\x00')                                       # push 0   (low)
+        a.raw(b'\xB9' + le32(ax.RNG_OBJ_VA))                     # ecx = RNG instance
+        a.call_va(ax.RNG_SUB)                                    # eax in [0, 2*max]
+        a.raw(b'\x29\xF8')                                       # sub eax, edi -> [-max, max]
+        a.raw(b'\xA3' + le32(wp_div_tmp_va))                     # spill for fild
+        a.raw(b'\xDB\x05' + le32(wp_div_tmp_va))                 # fild dword
+        a.raw(b'\xD9\x1C\x9D' + le32(axis_va))                   # fstp [axis + ebx*4]
+    a.jmp('wp_dr_done')
+    a.label('wp_dr_zero')
+    a.raw(b'\xC7\x04\x9D' + le32(bot_div_x_va) + le32(0))        # off.x = 0.0
+    a.raw(b'\xC7\x04\x9D' + le32(bot_div_y_va) + le32(0))        # off.y = 0.0
+    a.label('wp_dr_done')
+    a.raw(b'\x8D\x46\x01')                                       # lea eax, [esi+1]
+    a.raw(b'\x89\x04\x9D' + le32(bot_div_node_va))               # bot_div_node[slot] = node+1
+    a.raw(b'\x5F\x5E\x5B')                                       # pop edi/esi/ebx
+    a.raw(b'\xC3')                                               # ret

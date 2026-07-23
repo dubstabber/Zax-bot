@@ -104,6 +104,11 @@ def build_follow_ctx(layout: ScratchLayout) -> SimpleNamespace:
     chase_dsq_tmp_va = None
     chase_flag_present_va = None
     chase_flag_count_va = None
+    wp_node_level_va = None
+    wp_lvl_radius_sq_va = None
+    bot_div_node_va = None
+    bot_div_x_va = None
+    bot_div_y_va = None
 
     bot_pos_va        = layout.va('bot_pos')
     bot_slot_tmp_va   = layout.va('bot_slot_tmp')
@@ -384,6 +389,20 @@ def build_follow_ctx(layout: ScratchLayout) -> SimpleNamespace:
         goody_abandon_va    = layout.va('goody_abandon_radius_sq')
         sk_pile_dirty_mv_va = layout.va('sk_pile_dirty')
 
+    # Per-node movement divergence (levels 1-3): the TARGET node's level
+    # gates the edge-hug (level >= 2 steers straight at the node instead),
+    # selects the arrival radius (wp_lvl_radius_sq[level&3], follow_final_
+    # approach) and drives the per-bot lateral steer offset (bot_div_x/y,
+    # re-rolled by wp_div_roll whenever bot_div_node lags current_wp).
+    # Level 1 is byte-equivalent to the pre-divergence behaviour.
+    diverge = (cfg.WP_DIVERGE_ENABLED
+               and layout.has_field('wp_node_level'))
+    if diverge:
+        wp_node_level_va    = layout.va('wp_node_level')
+        wp_lvl_radius_sq_va = layout.va('wp_lvl_radius_sq')
+        bot_div_node_va     = layout.va('bot_div_node')
+        bot_div_x_va        = layout.va('bot_div_x')
+        bot_div_y_va        = layout.va('bot_div_y')
 
     ns = dict(locals())
     ns.pop('layout', None)

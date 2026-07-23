@@ -123,6 +123,17 @@ def emit(a: Asm, layout: ScratchLayout) -> None:
         a.raw(b'\xB9' + le32(cfg.MAX_BOT_SLOTS))       # ecx = 16
         a.raw(b'\x31\xC0')                             # xor eax, eax
         a.raw(b'\xF3\xAB')                             # rep stosd
+    # Divergence offset latches: bot_div_node/x/y are contiguous
+    # (layout/diverge.py) so one rep-stosd covers all three. The roll is
+    # otherwise self-healing on mismatch, but a stale node+1 that happens to
+    # equal a NEW map's node index would apply last map's (possibly level-3)
+    # offset to a node that may be level-1 strict — clear so match start
+    # always re-rolls against the freshly loaded level table.
+    if layout.has_field('bot_div_node'):
+        a.raw(b'\xBF' + le32(layout.va('bot_div_node')))  # mov edi, bot_div_node
+        a.raw(b'\xB9' + le32(cfg.MAX_BOT_SLOTS * 3))      # node + x + y dwords
+        a.raw(b'\x31\xC0')                                # xor eax, eax
+        a.raw(b'\xF3\xAB')                                # rep stosd
     # Once we've pre-grown mgr+0x290 to 16 entries (match 1 onwards), the
     # buffer outlives the match: slots populated by match N can still hold
     # freed char pointers at the start of match N+1. Per-frame fire/aim
