@@ -68,6 +68,28 @@ All of this happens inside the game's install folder (the one containing
 Delete the patched `Zax.exe` and rename `Zax.exe.bak` back to `Zax.exe`.
 Nothing else in the game install is modified.
 
+## Game language (Polish ↔ English)
+
+The Polish release is Polish only because of the `Polish.red` file next to
+`Data.dat`. The engine builds its world from `Data.dat` — which is entirely
+**English** (all base text, fonts, voice-over and movies) — and then mounts
+any `*.red` overlay archive found in the folder on top of it. `Polish.red`
+is that overlay: it carries a `Local.txt` of ~830 English→Polish string
+pairs plus Polish fonts, speech audio and the intro movie, which override
+the English originals.
+
+So switching language is just controlling that overlay — **no re-patching
+needed:**
+
+- **Play in English:** rename `Polish.red` to anything not ending in `.red`
+  (e.g. `Polish.red.off`), or move it out of the game folder. With no
+  overlay mounted the game falls back to the English base — text, fonts,
+  voice and movie all English.
+- **Back to Polish:** restore the `Polish.red` name.
+
+The bot mod is language-independent (it patches code, not text), so bots
+behave identically either way.
+
 ## Other in-game keys (host, multiplayer)
 
 | key | action |
